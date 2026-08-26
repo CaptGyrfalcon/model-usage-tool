@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI 用量</title>
+    <link rel="stylesheet" href="styles.css?v=8" />
+  </head>
+  <body>
+    <div class="shell">
+      <div class="ambient ambient-one"></div>
+      <div class="ambient ambient-two"></div>
+
+      <header class="titlebar">
+        <div class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></div>
+        <div class="brand-copy">
+          <div class="title-row">
+            <h1>AI 用量</h1>
+            <span class="plan-pill" id="planBadge">连接中</span>
+          </div>
+          <div class="subtitle" id="planLine">正在读取本机登录态</div>
+        </div>
+        <div class="window-actions">
+          <button type="button" id="priceBtn" class="icon-btn price-btn" title="手动更新官方价目表" aria-label="手动更新官方价目表">$</button>
+          <button type="button" id="refreshBtn" class="icon-btn" title="立即刷新" aria-label="立即刷新">↻</button>
+          <button type="button" id="exitFullscreenBtn" class="exit-fullscreen-btn" title="退出全屏（Esc）" aria-label="退出全屏">退出全屏 <kbd>Esc</kbd></button>
+          <button type="button" id="fullscreenBtn" class="icon-btn fullscreen-btn" title="全屏仪表盘（F11）" aria-label="切换全屏仪表盘">⛶</button>
+          <button type="button" id="orbBtn" class="icon-btn orb-btn" title="极简额度球" aria-label="切换极简额度球">◉</button>
+          <button type="button" id="compactBtn" class="icon-btn" title="迷你模式" aria-label="切换迷你模式">▱</button>
+          <button type="button" id="closeBtn" class="icon-btn close" title="隐藏到状态栏" aria-label="隐藏到状态栏">×</button>
+        </div>
+      </header>
+
+      <div class="sync-strip">
+        <span class="live-dot" id="liveDot"></span>
+        <span id="statusText">正在连接 Cursor 用量接口…</span>
+        <span class="sync-countdown" id="syncCountdown"></span>
+      </div>
+
+      <nav class="tabs" aria-label="数据视图">
+        <button class="tab active" data-tab="overview" type="button">总览</button>
+        <button class="tab" data-tab="models" type="button">模型明细</button>
+        <button class="tab" data-tab="trends" type="button">消耗趋势</button>
+      </nav>
+
+      <main class="content">
+        <section class="view active" id="overviewView">
+          <div class="hero-grid" id="heroGrid"></div>
+          <div class="quota-stack">
+            <article class="quota-card cursor-card" id="cursorPool"></article>
+            <article class="quota-card other-card" id="otherPool"></article>
+            <article class="quota-card codex-card" id="codexPool"></article>
+          </div>
+          <article class="detail-card" id="recentPanel"></article>
+        </section>
+
+        <section class="view" id="modelsView">
+          <div class="section-heading">
+            <div>
+              <h2>模型用量</h2>
+              <p id="modelSubtitle">按总 Token（含缓存）排序</p>
+            </div>
+            <span class="count-pill" id="modelCount">0 次</span>
+          </div>
+          <div class="segmented source-switch" aria-label="模型数据来源">
+            <button type="button" data-source="all" class="active">全部</button>
+            <button type="button" data-source="cursor">Cursor</button>
+            <button type="button" data-source="codex">Codex</button>
+          </div>
+          <label class="model-range-control">
+            <span>统计范围</span>
+            <select id="modelRangeSelect" aria-label="模型用量统计范围">
+              <option value="all">全部历史</option>
+              <optgroup label="按月">
+                <option value="months6">近 6 个月</option>
+                <option value="months3">近 3 个月</option>
+                <option value="month1">近 1 个月</option>
+              </optgroup>
+              <optgroup label="按天">
+                <option value="days14">近 14 天</option>
+                <option value="days7">近 7 天</option>
+                <option value="day1">近 1 天</option>
+              </optgroup>
+              <optgroup label="按小时">
+                <option value="hours12">近 12 小时</option>
+                <option value="hours6">近 6 小时</option>
+                <option value="hour1">近 1 小时</option>
+              </optgroup>
+            </select>
+          </label>
+          <div class="segmented precision-switch" aria-label="模型统计精度">
+            <button type="button" data-precision="coarse" class="active">笼统</button>
+            <button type="button" data-precision="speed">速度</button>
+            <button type="button" data-precision="exact">精确</button>
+          </div>
+          <div class="precision-note" id="precisionNote"></div>
+          <div class="model-list" id="modelList"></div>
+        </section>
+
+        <section class="view" id="trendsView">
+          <div class="section-heading">
+            <div>
+              <h2>新增消耗</h2>
+              <p id="trendResolution">按小时聚合</p>
+            </div>
+            <div class="trend-total" id="trendTotal">—</div>
+          </div>
+          <div class="segmented source-switch" aria-label="趋势数据来源">
+            <button type="button" data-source="all" class="active">全部</button>
+            <button type="button" data-source="cursor">Cursor</button>
+            <button type="button" data-source="codex">Codex</button>
+          </div>
+          <div class="segmented" aria-label="趋势范围">
+            <button type="button" data-range="day" class="active">日</button>
+            <button type="button" data-range="week">周</button>
+            <button type="button" data-range="month">月</button>
+          </div>
+          <div class="segmented metric-switch" aria-label="趋势指标">
+            <button type="button" data-metric="total" class="active">总 Token</button>
+            <button type="button" data-metric="effective">有效 Token</button>
+            <button type="button" data-metric="equivalentCostCents">美元等效</button>
+          </div>
+          <button type="button" id="breakdownBtn" class="breakdown-btn" aria-pressed="false">
+            <span class="toggle-track"><i></i></span>
+            柱内显示输入构成
+          </button>
+          <article class="chart-card">
+            <div class="chart-wrap" id="trendChart"></div>
+            <div class="chart-legend">
+              <span class="legend-items" id="legendItems"><i></i><b id="legendText">总 Token 新增（含缓存）</b></span>
+              <span id="chartPeak">峰值 —</span>
+            </div>
+          </article>
+          <div class="trend-footnote" id="trendFootnote">数据来自本地持久化历史库。</div>
+        </section>
+      </main>
+
+      <footer>
+        <label class="setting-control">
+          <span>刷新</span>
+          <select id="intervalSelect" aria-label="自动刷新间隔">
+            <option value="15000">15 秒</option>
+            <option value="30000">30 秒</option>
+            <option value="45000">45 秒</option>
+            <option value="60000">1 分钟</option>
+            <option value="120000">2 分钟</option>
+          </select>
+        </label>
+        <label class="opacity setting-control">
+          <span>透明度</span>
+          <input id="opacity" type="range" min="65" max="100" value="96" aria-label="窗口透明度" />
+        </label>
+        <button type="button" id="dashBtn" class="dashboard-btn">账单 ↗</button>
+      </footer>
+    </div>
+    <section class="orb-view" id="orbView" aria-label="极简额度球">
+      <div class="orb-topbar">
+        <div class="orb-mode-switch" aria-label="额度球显示模式">
+          <button type="button" data-orb-display="quota" class="active">额度</button>
+          <button type="button" data-orb-display="speed">速度</button>
+        </div>
+        <button type="button" id="orbHideBtn" class="orb-top-btn" title="隐藏到状态栏" aria-label="隐藏到状态栏">×</button>
+      </div>
+      <div class="orb-stage">
+        <button type="button" id="orbPrevBtn" class="orb-arrow" title="上一个额度池" aria-label="上一个额度池">‹</button>
+        <div class="orb-ring" id="orbRing" role="meter" aria-label="额度已用比例" aria-valuemin="0" aria-valuemax="100">
+          <i class="orb-fast-glow" aria-hidden="true"></i>
+          <div class="orb-core">
+            <strong id="orbPercent">—</strong>
+            <span>已用</span>
+          </div>
+        </div>
+        <button type="button" id="orbNextBtn" class="orb-arrow" title="下一个额度池" aria-label="下一个额度池">›</button>
+      </div>
+      <div class="orb-copy">
+        <b id="orbPoolName">等待用量</b>
+        <span id="orbPoolDetail">正在读取额度池…</span>
+      </div>
+      <div class="orb-actions">
+        <button type="button" id="orbRestoreBtn" class="orb-restore-btn" title="恢复完整窗口">恢复窗口</button>
+        <button type="button" id="orbRefreshBtn" class="orb-refresh-btn" title="立即刷新" aria-label="立即刷新">↻</button>
+      </div>
+    </section>
+    <div id="chartTooltip" class="chart-tooltip" role="tooltip" aria-hidden="true">
+      <div class="chart-tooltip-heading">
+        <span id="chartTooltipLabel">—</span>
+        <strong id="chartTooltipTotal">—</strong>
+      </div>
+      <div id="chartTooltipRows" class="chart-tooltip-rows"></div>
+      <div id="chartTooltipMeta" class="chart-tooltip-meta"></div>
+    </div>
+    <script src="preview.js?v=2"></script>
+    <script src="app.js?v=11"></script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "cursor-usage-widget",
+  "version": "1.0.0",
+  "description": "Windows notification-area widget for persistent Cursor and Codex usage history",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "widget": "electron .",
+    "test": "node --test test/*.test.cjs",
+    "postinstall": "node scripts/ensure-electron.cjs"
+  },
+  "dependencies": {
+    "electron": "^37.3.1"
+  }
+}
