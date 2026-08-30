@@ -4,6 +4,16 @@ let snapshot = { ok: false, loading: true, data: null };
 let windowState = { fullscreen: false };
 let modelUsage = null;
 let modelUsageRequest = 0;
+let quotaTimeline = null;
+let quotaTimelineRequest = 0;
+let eventPage = null;
+let eventPageRequest = 0;
+let pricingCatalog = null;
+let pricingCatalogRequest = 0;
+let eventQueryDraft = "";
+let eventSearchTimer = null;
+let selectedCycleKey = null;
+let selectedPricingId = null;
 let renderFrame = null;
 let chartTooltipContext = { series: [], metric: "total" };
 let chartHoveredIndex = -1;
@@ -40,6 +50,9 @@ let settings = {
   trendBreakdown: false,
   trendSpeedBreakdown: false,
   dataSource: "all",
+  quotaLevelPool: "cursor-models",
+  eventSource: "all",
+  pricingSource: "all",
   smartDock: false,
   privacyMode: false,
   quotaAlerts: true,
@@ -803,8 +816,30 @@ function renderOverview(d) {
   const lastTotal = lastEffective + (last?.tokens?.cacheRead || 0) + (last?.tokens?.cacheWrite || 0);
   const lastCost = last?.equivalentCostCents == null ? "价格不可用" : `${formatUsd(last.equivalentCostCents)} 美元等效`;
   $("recentPanel").innerHTML = last
-    ? `<div class="recent-icon">↗</div><div><span>最近一次调用 · ${last.source === "codex" ? "Codex" : "Cursor"}</span><b>${settings.privacyMode ? "模型信息已隐藏" : `${escapeHtml(last.model)}${last.effort ? ` · ${escapeHtml(last.effort)}` : ""}`}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>`
+    ? `<div class="recent-icon">↗</div><div class="recent-copy"><span>最近一次调用 · ${last.source === "codex" ? "Codex" : "Cursor"}</span><b>${settings.privacyMode ? "模型信息已隐藏" : `${escapeHtml(last.model)}${last.effort ? ` · ${escapeHtml(last.effort)}` : ""}`}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>${recentDonutHtml(last)}`
     : `<div class="empty-state">本周期还没有可显示的用量事件</div>`;
+}
+
+function recentDonutHtml(last) {
+  const tokens = last?.tokens || {};
+  const parts = [
+    { key: "input", value: Number(tokens.input) || 0, className: "input" },
+    { key: "cacheWrite", value: Number(tokens.cacheWrite) || 0, className: "cache-write" },
+    { key: "cacheRead", value: Number(tokens.cacheRead) || 0, className: "cache-read" },
+    { key: "output", value: Number(tokens.output) || 0, className: "output" },
+  ];
+  const total = parts.reduce((sum, part) => sum + part.value, 0);
+  const radius = 16;
+  const circumference = 2 * Math.PI * radius;
+  let offset = 0;
+  const rings = parts.map((part) => {
+    const length = total > 0 ? (part.value / total) * circumference : 0;
+    const circle = `<circle class="recent-donut-ring ${part.className}" cx="21" cy="21" r="${radius}" stroke-dasharray="${length.toFixed(2)} ${Math.max(0, circumference - length).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}"></circle>`;
+    offset += length;
+    return circle;
+  }).join("");
+  const cost = last?.equivalentCostCents == null ? "—" : formatUsd(last.equivalentCostCents);
+  return `<div class="recent-donut" aria-label="最近一次 Token 构成"><svg viewBox="0 0 42 42" role="img"><circle class="recent-donut-ring track" cx="21" cy="21" r="${radius}"></circle>${rings}</svg><div class="recent-donut-core">${escapeHtml(cost)}</div></div>`;
 }
 
 const precisionNotes = {
@@ -1173,21 +1208,222 @@ function handleChartPointerMove(event) {
   moveChartTooltip(event.clientX, event.clientY, firstShow);
 }
 
+function liveQuotaPoints(d) {
+  if (!d) return [];
+  const at = d.fetchedAt || Date.now();
+  const windows = Array.isArray(d.codex?.quota?.windows) && d.codex.quota.windows.length
+    ? d.codex.quota.windows
+    : [d.codex?.quota?.primary, d.codex?.quota?.secondary].filter(Boolean);
+  return [
+    d.cursorModels && { source: "cursor", pool: "cursor-models", timestamp: at, usedPercent: d.cursorModels.percentUsed, resetsAt: d.billingCycleEnd },
+    d.otherModels && { source: "cursor", pool: "other-models", timestamp: at, usedPercent: d.otherModels.percentUsed, resetsAt: d.billingCycleEnd },
+    ...windows.map((window) => ({
+      source: "codex",
+      pool: `${window.slot || "window"}-${window.windowMinutes}`,
+      timestamp: at,
+      usedPercent: window.usedPercent,
+      windowMinutes: window.windowMinutes,
+      resetsAt: window.resetsAt,
+    })),
+  ].filter(Boolean);
+}
+
+function formatDateTime(ts) {
+  if (!ts) return "—";
+  const date = new Date(ts);
+  return `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function speedLabel(event) {
+  if (event?.fastKnown === false) return { text: "速度未知", className: "unknown" };
+  return event?.fast ? { text: "Fast", className: "fast" } : { text: "非 Fast", className: "normal" };
+}
+
+function levelChartSvg(series) {
+  if (!series?.length) return `<div class="empty-state">这个周期还没有水位采样</div>`;
+  const fullscreen = Boolean(windowState.fullscreen);
+  const width = fullscreen ? 1400 : 400;
+  const height = fullscreen ? 420 : 232;
+  const left = fullscreen ? 76 : 42;
+  const top = fullscreen ? 24 : 14;
+  const plotWidth = fullscreen ? width - left - 28 : 346;
+  const plotHeight = fullscreen ? height - top - 64 : 168;
+  const baseY = top + plotHeight;
+  const values = series.map((item) => Number(item.remainingPercent) || 0);
+  const maxValue = 100;
+  const minAt = series[0].at;
+  const maxAt = series[series.length - 1].at;
+  const span = Math.max(1, maxAt - minAt);
+  const xOf = (at) => left + ((at - minAt) / span) * plotWidth;
+  const yOf = (value) => baseY - (value / maxValue) * plotHeight;
+  const points = series.map((item) => `${xOf(item.at).toFixed(1)},${yOf(Number(item.remainingPercent) || 0).toFixed(1)}`);
+  const area = `${left.toFixed(1)},${baseY.toFixed(1)} ${points.join(" ")} ${xOf(maxAt).toFixed(1)},${baseY.toFixed(1)}`;
+  const ticks = [0, 50, 100].map((value) => {
+    const y = yOf(value);
+    return `<line class="chart-grid" x1="${left}" y1="${y}" x2="${left + plotWidth}" y2="${y}"/><text class="axis-y" x="${left - 7}" y="${y + 4}" text-anchor="end">${value}%</text>`;
+  }).join("");
+  const labels = [series[0], series[Math.floor(series.length / 2)], series[series.length - 1]]
+    .filter((item, index, list) => list.findIndex((entry) => entry.at === item.at) === index)
+    .map((item) => `<text class="axis-x" x="${xOf(item.at).toFixed(1)}" y="${baseY + 22}" text-anchor="middle">${escapeHtml(formatDateTime(item.at))}</text>`)
+    .join("");
+  const dots = series.map((item, index) => `<circle class="level-dot" data-level-index="${index}" cx="${xOf(item.at).toFixed(1)}" cy="${yOf(Number(item.remainingPercent) || 0).toFixed(1)}" r="2.4"></circle>`).join("");
+  const hits = series.map((item, index) => {
+    const x = xOf(item.at);
+    const widthHit = Math.max(8, plotWidth / Math.max(series.length, 1));
+    return `<rect class="chart-hitbox" data-level-index="${index}" x="${(x - widthHit / 2).toFixed(1)}" y="${top}" width="${widthHit.toFixed(1)}" height="${plotHeight}"></rect>`;
+  }).join("");
+  return `<svg class="bar-chart level-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="额度水位曲线">${ticks}<polygon class="level-area" points="${area}"></polygon><polyline class="level-line" points="${points.join(" ")}"></polyline>${dots}${hits}${labels}</svg>`;
+}
+
+function renderLevels() {
+  const timeline = quotaTimeline || snapshot.data?.quotaTimeline;
+  const pools = timeline?.pools || [];
+  $("levelPoolSwitch").innerHTML = pools.map((pool) => (
+    `<button type="button" data-level-pool="${escapeHtml(pool.id)}" class="${pool.id === (timeline?.pool || settings.quotaLevelPool) ? "active" : ""}"${pool.hasData ? "" : " disabled"}>${escapeHtml(pool.label.replace("Cursor ", "").replace("Codex ", "Codex "))}</button>`
+  )).join("");
+  const cycles = timeline?.cycles || [];
+  $("levelCycleSelect").innerHTML = cycles.length
+    ? cycles.map((cycle) => `<option value="${escapeHtml(cycle.key)}"${cycle.key === timeline.cycle?.key ? " selected" : ""}>${escapeHtml(cycle.label)}</option>`).join("")
+    : `<option value="">暂无周期</option>`;
+  $("levelSubtitle").textContent = timeline?.cycle
+    ? `${pools.find((pool) => pool.id === timeline.pool)?.label || "额度池"} · ${timeline.cycle.label}`
+    : "各账期内剩余额度变化";
+  const start = timeline?.cycle?.startRemaining;
+  const end = timeline?.cycle?.endRemaining;
+  $("levelTotal").textContent = start == null && end == null ? "—" : `${formatCursorPct(start)} → ${formatCursorPct(end)}`;
+  $("levelPeak").textContent = timeline?.series?.length
+    ? `${timeline.series.length} 个采样点`
+    : "尚无采样";
+  $("levelChart").innerHTML = levelChartSvg(timeline?.series || []);
+}
+
+function eventCostCents(event) {
+  return event?.equivalentCostCents;
+}
+
+function renderEvents() {
+  const page = eventPage;
+  $("eventSourceSwitch").querySelectorAll("[data-event-source]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.eventSource === (settings.eventSource || "all"));
+  });
+  if (!page) {
+    $("eventCount").textContent = "读取中";
+    $("eventSubtitle").textContent = "正在读取本地历史库";
+    $("eventList").innerHTML = `<div class="empty-state">正在加载请求明细…</div>`;
+    $("eventPager").innerHTML = "";
+    return;
+  }
+  $("eventCount").textContent = `${formatInteger(page.total)} 次`;
+  $("eventSubtitle").textContent = page.total ? `第 ${page.offset + 1}–${Math.min(page.offset + page.events.length, page.total)} 条` : "没有匹配的请求";
+  $("eventList").innerHTML = page.events.length
+    ? page.events.map((event) => {
+      const speed = speedLabel(event);
+      const model = settings.privacyMode ? "模型信息已隐藏" : `${event.model}${event.effort ? ` · ${event.effort}` : ""}`;
+      return `<article class="event-row">
+        <div class="event-row-top"><b>${escapeHtml(model)}</b><em>${escapeHtml(formatUsd(eventCostCents(event)))}</em></div>
+        <div class="event-meta">
+          <span>${escapeHtml(formatDateTime(event.timestamp))}</span>
+          <span>${event.source === "codex" ? "Codex" : "Cursor"}</span>
+          <span class="speed-pill ${speed.className}">${speed.text}</span>
+        </div>
+        <small>输入 ${formatTokens(event.input)} · 写缓存 ${formatTokens(event.cacheWrite)} · 读缓存 ${formatTokens(event.cacheRead)} · 输出 ${formatTokens(event.output)}</small>
+      </article>`;
+    }).join("")
+    : `<div class="empty-state">没有匹配的请求记录</div>`;
+  const pageCount = Math.max(1, Math.ceil((page.total || 0) / (page.limit || 40)));
+  const current = Math.floor((page.offset || 0) / (page.limit || 40)) + 1;
+  $("eventPager").innerHTML = `
+    <button type="button" class="text-btn" id="eventPrev" ${page.offset <= 0 ? "disabled" : ""}>上一页</button>
+    <span>${current} / ${pageCount}</span>
+    <button type="button" class="text-btn" id="eventNext" ${page.offset + page.events.length >= page.total ? "disabled" : ""}>下一页</button>
+  `;
+  $("eventPrev")?.addEventListener("click", () => loadEventPage(Math.max(0, page.offset - page.limit)));
+  $("eventNext")?.addEventListener("click", () => loadEventPage(page.offset + page.limit));
+}
+
+function formatRate(value) {
+  if (settings.privacyMode) return "••••";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return `$${number}`;
+}
+
+function renderPricing() {
+  const catalog = pricingCatalog;
+  if (!catalog) {
+    $("pricingCount").textContent = "读取中";
+    $("pricingList").innerHTML = `<div class="empty-state">正在读取价目表…</div>`;
+    return;
+  }
+  $("pricingSourceSwitch").querySelectorAll("[data-pricing-source]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.pricingSource === (settings.pricingSource || "all"));
+  });
+  const snapshots = catalog.snapshots || [];
+  $("pricingSnapshotSelect").innerHTML = snapshots.length
+    ? snapshots.map((item, index) => {
+      const latest = index === 0 ? "当日 · " : "历史 · ";
+      const when = new Date(item.fetchedAt).toLocaleString("zh-CN");
+      return `<option value="${item.id}"${Number(item.id) === Number(catalog.selectedId) ? " selected" : ""}>${latest}${escapeHtml(when)}</option>`;
+    }).join("")
+    : `<option value="">尚无已保存的价目表</option>`;
+  $("pricingCount").textContent = `${formatInteger(catalog.rows?.length || 0)} 档`;
+  $("pricingSubtitle").textContent = catalog.snapshot
+    ? `${catalog.snapshot.status === "remote" || catalog.snapshot.status === "official" ? "官方" : "内置"}价目 · ${catalog.snapshot.modelCount} 个模型`
+    : "按模型与 Fast / 非 Fast 分档";
+  $("pricingNote").textContent = catalog.snapshot?.note || "价格单位为每百万 Token 美元。";
+  $("pricingList").innerHTML = catalog.rows?.length
+    ? `<div class="pricing-table-wrap"><table class="pricing-table">
+      <thead>
+        <tr>
+          <th>来源</th>
+          <th>模型</th>
+          <th>速度</th>
+          <th>上下文</th>
+          <th>输入</th>
+          <th>输出</th>
+          <th>写缓存</th>
+          <th>读缓存</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${catalog.rows.map((row) => `
+          <tr>
+            <td>${row.source === "codex" ? "Codex" : "Cursor"}</td>
+            <td>${settings.privacyMode ? "模型已隐藏" : escapeHtml(row.model)}</td>
+            <td><span class="speed-pill ${row.speed === "fast" ? "fast" : "normal"}">${escapeHtml(row.speedLabel)}</span></td>
+            <td>${escapeHtml(row.contextLabel)}</td>
+            <td>${escapeHtml(formatRate(row.input))}</td>
+            <td>${escapeHtml(formatRate(row.output))}</td>
+            <td>${escapeHtml(formatRate(row.cacheWrite))}</td>
+            <td>${escapeHtml(formatRate(row.cacheRead))}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table></div>`
+    : `<div class="empty-state">这份价目表里没有可展示的档位</div>`;
+}
+
 function renderActiveView(d) {
   if (!d) return;
   if (settings.activeTab === "models") renderModels(d);
   else if (settings.activeTab === "trends") renderTrends(d);
+  else if (settings.activeTab === "levels") renderLevels();
+  else if (settings.activeTab === "events") renderEvents();
+  else if (settings.activeTab === "pricing") renderPricing();
   else renderOverview(d);
 }
 
 function setActiveTab(tab, persist = false) {
-  const valid = ["overview", "models", "trends"].includes(tab) ? tab : "overview";
+  const valid = ["overview", "models", "trends", "levels", "events", "pricing"].includes(tab) ? tab : "overview";
   settings.activeTab = valid;
-  if (valid !== "trends") hideChartTooltip();
+  if (valid !== "trends" && valid !== "levels") hideChartTooltip();
   document.querySelectorAll(".tab").forEach((button) => button.classList.toggle("active", button.dataset.tab === valid));
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `${valid}View`));
   if (persist) {
     window.widget.saveSettings({ activeTab: valid });
+    if (valid === "levels") loadQuotaTimeline();
+    if (valid === "events") loadEventPage(0);
+    if (valid === "pricing") loadPricingCatalog();
     renderActiveView(snapshot.data);
   }
 }
@@ -1292,11 +1528,191 @@ function setSmartPanel(open) {
   $("smartBtn").classList.toggle("active", smartPanelOpen || settings.smartDock || settings.privacyMode || settings.quotaAlerts);
 }
 
+async function loadQuotaTimeline() {
+  if (!window.widget.getQuotaTimeline) {
+    quotaTimeline = snapshot.data?.quotaTimeline || null;
+    if (settings.activeTab === "levels") renderLevels();
+    return;
+  }
+  const request = ++quotaTimelineRequest;
+  try {
+    const next = await window.widget.getQuotaTimeline({
+      pool: settings.quotaLevelPool,
+      cycleKey: selectedCycleKey,
+      now: Date.now(),
+      live: liveQuotaPoints(snapshot.data),
+    });
+    if (request !== quotaTimelineRequest) return;
+    quotaTimeline = next;
+    selectedCycleKey = next?.cycle?.key || selectedCycleKey;
+    if (settings.activeTab === "levels") renderLevels();
+  } catch (error) {
+    console.error("读取额度水位失败", error);
+  }
+}
+
+async function loadEventPage(offset = 0) {
+  if (!window.widget.queryUsageEvents) {
+    eventPage = eventPage || { total: 0, offset: 0, limit: 40, events: [] };
+    if (settings.activeTab === "events") renderEvents();
+    return;
+  }
+  const request = ++eventPageRequest;
+  try {
+    const next = await window.widget.queryUsageEvents({
+      source: settings.eventSource || "all",
+      query: eventQueryDraft,
+      offset,
+      limit: 40,
+    });
+    if (request !== eventPageRequest) return;
+    eventPage = next;
+    if (settings.activeTab === "events") renderEvents();
+  } catch (error) {
+    console.error("读取请求明细失败", error);
+  }
+}
+
+async function loadPricingCatalog() {
+  if (!window.widget.getPricingCatalog) {
+    if (settings.activeTab === "pricing") renderPricing();
+    return;
+  }
+  const request = ++pricingCatalogRequest;
+  try {
+    const next = await window.widget.getPricingCatalog({
+      snapshotId: selectedPricingId,
+      source: settings.pricingSource || "all",
+    });
+    if (request !== pricingCatalogRequest) return;
+    pricingCatalog = next;
+    selectedPricingId = next?.selectedId ?? selectedPricingId;
+    if (settings.activeTab === "pricing") renderPricing();
+  } catch (error) {
+    console.error("读取价目表失败", error);
+  }
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+async function collectExportEvents() {
+  const rows = [];
+  let offset = 0;
+  const limit = 200;
+  while (offset < 8000) {
+    const page = await window.widget.queryUsageEvents({
+      source: settings.eventSource || "all",
+      query: eventQueryDraft,
+      offset,
+      limit,
+    });
+    rows.push(...(page.events || []));
+    if (!page.events?.length || rows.length >= (page.total || 0)) break;
+    offset += limit;
+  }
+  return rows;
+}
+
+async function exportEvents(kind) {
+  if (!window.widget.queryUsageEvents) return;
+  const rows = await collectExportEvents();
+  const stamp = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+  if (kind === "json") {
+    await window.widget.saveTextFile({
+      name: `usage-events-${stamp}.json`,
+      content: JSON.stringify(rows, null, 2),
+    });
+    return;
+  }
+  const header = ["时间", "来源", "模型", "effort", "速度", "输入", "写缓存", "读缓存", "输出", "美元等效"];
+  const lines = [
+    header.join(","),
+    ...rows.map((event) => [
+      new Date(event.timestamp).toISOString(),
+      event.source,
+      event.model,
+      event.effort || "",
+      event.fastKnown === false ? "unknown" : event.fast ? "fast" : "standard",
+      event.input,
+      event.cacheWrite,
+      event.cacheRead,
+      event.output,
+      event.equivalentCostCents == null ? "" : (Number(event.equivalentCostCents) / 100).toFixed(6),
+    ].map(csvCell).join(",")),
+  ];
+  await window.widget.saveTextFile({
+    name: `usage-events-${stamp}.csv`,
+    content: `\uFEFF${lines.join("\n")}`,
+  });
+}
+
+function handleLevelPointerMove(event) {
+  const hit = event.target.closest("[data-level-index]");
+  if (!hit) {
+    hideChartTooltip();
+    return;
+  }
+  const index = Number(hit.dataset.levelIndex);
+  const point = quotaTimeline?.series?.[index];
+  if (!point) return;
+  $("chartTooltipLabel").textContent = formatDateTime(point.at);
+  $("chartTooltipTotal").textContent = `剩余 ${formatCursorPct(point.remainingPercent)}`;
+  $("chartTooltipRows").innerHTML = `<div>已用 ${formatCursorPct(point.usedPercent)}</div>`;
+  $("chartTooltipMeta").textContent = quotaTimeline?.cycle?.label || "";
+  const firstShow = !chartTooltipVisible;
+  chartTooltipVisible = true;
+  $("chartTooltip").classList.add("visible");
+  $("chartTooltip").setAttribute("aria-hidden", "false");
+  moveChartTooltip(event.clientX, event.clientY, firstShow);
+}
+
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => setActiveTab(button.dataset.tab, true));
 });
 $("trendChart").addEventListener("pointermove", handleChartPointerMove, { passive: true });
 $("trendChart").addEventListener("pointerleave", hideChartTooltip);
+$("levelChart").addEventListener("pointermove", handleLevelPointerMove, { passive: true });
+$("levelChart").addEventListener("pointerleave", hideChartTooltip);
+$("levelPoolSwitch").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-level-pool]");
+  if (!button || button.disabled) return;
+  settings.quotaLevelPool = button.dataset.levelPool;
+  selectedCycleKey = null;
+  window.widget.saveSettings({ quotaLevelPool: settings.quotaLevelPool });
+  loadQuotaTimeline();
+});
+$("levelCycleSelect").addEventListener("change", (event) => {
+  selectedCycleKey = event.target.value || null;
+  loadQuotaTimeline();
+});
+$("eventSourceSwitch").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-event-source]");
+  if (!button) return;
+  settings.eventSource = button.dataset.eventSource;
+  window.widget.saveSettings({ eventSource: settings.eventSource });
+  loadEventPage(0);
+});
+$("eventSearch").addEventListener("input", (event) => {
+  eventQueryDraft = event.target.value;
+  clearTimeout(eventSearchTimer);
+  eventSearchTimer = setTimeout(() => loadEventPage(0), 220);
+});
+$("eventExportCsv").addEventListener("click", () => exportEvents("csv"));
+$("eventExportJson").addEventListener("click", () => exportEvents("json"));
+$("pricingSourceSwitch").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-pricing-source]");
+  if (!button) return;
+  settings.pricingSource = button.dataset.pricingSource;
+  window.widget.saveSettings({ pricingSource: settings.pricingSource });
+  loadPricingCatalog();
+});
+$("pricingSnapshotSelect").addEventListener("change", (event) => {
+  selectedPricingId = event.target.value ? Number(event.target.value) : null;
+  loadPricingCatalog();
+});
 document.querySelectorAll("[data-source]").forEach((button) => {
   button.addEventListener("click", () => {
     settings.dataSource = button.dataset.source;
@@ -1389,6 +1805,10 @@ window.widget.onSnapshot((next) => {
   recordLiquidSnapshot(next, true);
   snapshot = next;
   if (next.data?.modelUsage?.key === settings.modelRange) modelUsage = next.data.modelUsage;
+  if (next.data?.quotaTimeline && !quotaTimeline) quotaTimeline = next.data.quotaTimeline;
+  if (settings.activeTab === "levels") loadQuotaTimeline();
+  if (settings.activeTab === "events") loadEventPage(eventPage?.offset || 0);
+  if (settings.activeTab === "pricing") loadPricingCatalog();
   scheduleRender();
 });
 window.widget.onSettings((next) => {
@@ -1429,6 +1849,11 @@ Promise.all([window.widget.getSettings(), window.widget.getSnapshot(), window.wi
   recordLiquidSnapshot(initialSnapshot, false);
   snapshot = initialSnapshot;
   modelUsage = initialSnapshot.data?.modelUsage || null;
+  quotaTimeline = initialSnapshot.data?.quotaTimeline || null;
   windowState = { ...windowState, ...initialWindowState };
+  if ($("eventSearch")) $("eventSearch").value = eventQueryDraft;
   render();
+  if (settings.activeTab === "levels") loadQuotaTimeline();
+  if (settings.activeTab === "events") loadEventPage(0);
+  if (settings.activeTab === "pricing") loadPricingCatalog();
 });

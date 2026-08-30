@@ -7,6 +7,8 @@ const { scanCodexUsage } = require("./codex.cjs");
 const { refreshPricing, priceEvent } = require("./pricing.cjs");
 const { cursorEventKey } = require("./identity.cjs");
 const { buildQuotaInsights } = require("./quota-insights.cjs");
+const { buildQuotaTimeline, livePointsFromSnapshot } = require("./quota-timeline.cjs");
+const { flattenPricingSnapshot, summarizePricingSnapshot } = require("./pricing-table.cjs");
 
 const APP_DIR = path.join(os.homedir(), "AppData", "Roaming", "cursor-usage-widget");
 const SETTINGS_PATH = path.join(APP_DIR, "settings.json");
@@ -48,6 +50,9 @@ const DEFAULT_SETTINGS = {
   trendBreakdown: false,
   trendSpeedBreakdown: false,
   dataSource: "all",
+  quotaLevelPool: "cursor-models",
+  eventSource: "all",
+  pricingSource: "all",
   tokenDisplayVersion: 2,
   smartDock: false,
   privacyMode: false,
@@ -210,6 +215,35 @@ function num(value) {
   if (value == null || value === "" || value === "-") return 0;
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+function finitePercent(value) {
+  if (value == null || value === "" || value === "-") return null;
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function percentPrecision(value) {
+  const number = finitePercent(value);
+  if (number == null) return -1;
+  if (typeof value === "string" && /e/i.test(value) === false && value.includes(".")) {
+    return value.split(".")[1].replace(/0+$/, "").length;
+  }
+  const text = String(number);
+  if (/e/i.test(text)) {
+    const [coefficient, exponent] = text.toLowerCase().split("e");
+    return Math.max(0, (coefficient.split(".")[1] || "").length - Number(exponent));
+  }
+  return (text.split(".")[1] || "").length;
+}
+
+function pickUsagePercent(...candidates) {
+  const scored = candidates
+    .map((value) => ({ value: finitePercent(value), precision: percentPrecision(value) }))
+    .filter((item) => item.value != null);
+  if (!scored.length) return 0;
+  scored.sort((left, right) => right.precision - left.precision);
+  return scored[0].value;
 }
 
 function parseIsoOrMs(value) {
@@ -711,9 +745,9 @@ async function fetchCursorSnapshot(pricingSnapshot) {
   const history = getHistory();
   history.upsertEvents(usageResult.events.map((event) => cursorEventToHistory(event, pricingSnapshot, autoBucketModels, history)));
 
-  const autoPct = num(individual.autoPercentUsed ?? planUsage.autoPercentUsed);
-  const apiPct = num(individual.apiPercentUsed ?? planUsage.apiPercentUsed);
-  const totalPct = num(individual.totalPercentUsed ?? planUsage.totalPercentUsed);
+  const autoPct = pickUsagePercent(individual.autoPercentUsed, planUsage.autoPercentUsed);
+  const apiPct = pickUsagePercent(individual.apiPercentUsed, planUsage.apiPercentUsed);
+  const totalPct = pickUsagePercent(individual.totalPercentUsed, planUsage.totalPercentUsed);
   const includedLimit = num(individual.limit ?? planUsage.limit);
   const includedUsed = num(individual.used ?? planUsage.includedSpend);
   const includedRemaining = individual.remaining != null ? num(individual.remaining) : Math.max(0, includedLimit - includedUsed);
@@ -1189,7 +1223,36 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
     },
   };
   result.quotaInsights = buildQuotaInsights(result, now);
+  result.quotaTimeline = getQuotaTimeline({
+    pool: loadSettings().quotaLevelPool,
+    now,
+    live: livePointsFromSnapshot(result, now),
+  });
   return result;
+}
+
+function getQuotaTimeline({ pool, cycleKey, now = Date.now(), live = [] } = {}) {
+  return buildQuotaTimeline(getHistory().getQuotaSamples(), { pool, cycleKey, now, live });
+}
+
+function queryUsageEvents({ source = "all", query = "", offset = 0, limit = 40 } = {}) {
+  const sources = source && source !== "all" ? source : undefined;
+  return getHistory().queryEvents({ sources, query, offset, limit });
+}
+
+function getPricingCatalog({ snapshotId = null, source = "all" } = {}) {
+  const history = getHistory();
+  const snapshots = history.listPricingSnapshots(36);
+  const selected = snapshotId == null
+    ? history.latestPricingSnapshot()
+    : history.pricingSnapshot(snapshotId);
+  const current = selected || history.latestPricingSnapshot();
+  return {
+    snapshots,
+    selectedId: current?.id ?? null,
+    snapshot: current ? summarizePricingSnapshot(current) : null,
+    rows: current ? flattenPricingSnapshot(current, { source }) : [],
+  };
 }
 
 module.exports = {
@@ -1205,8 +1268,12 @@ module.exports = {
   speedUsageSummary,
   buildModelUsage,
   getModelUsage,
+  getQuotaTimeline,
+  queryUsageEvents,
+  getPricingCatalog,
   collapseCursorSnapshots,
   currentCodexRateWindow,
   inferPoolQuota,
   isCursorModel,
+  pickUsagePercent,
 };

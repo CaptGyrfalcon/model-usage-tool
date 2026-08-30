@@ -5,7 +5,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI 用量</title>
-    <link rel="stylesheet" href="styles.css?v=16" />
+    <link rel="stylesheet" href="styles.css?v=18" />
   </head>
   <body>
     <div class="shell">
@@ -43,6 +43,9 @@
         <button class="tab active" data-tab="overview" type="button">总览</button>
         <button class="tab" data-tab="models" type="button">模型明细</button>
         <button class="tab" data-tab="trends" type="button">消耗趋势</button>
+        <button class="tab" data-tab="levels" type="button">额度水位</button>
+        <button class="tab" data-tab="events" type="button">请求明细</button>
+        <button class="tab" data-tab="pricing" type="button">价目表</button>
       </nav>
 
       <main class="content">
@@ -140,6 +143,72 @@
             </div>
           </article>
           <div class="trend-footnote" id="trendFootnote">数据来自本地持久化历史库。</div>
+        </section>
+
+        <section class="view" id="levelsView">
+          <div class="section-heading">
+            <div>
+              <h2>额度水位</h2>
+              <p id="levelSubtitle">各账期内剩余额度变化</p>
+            </div>
+            <div class="trend-total" id="levelTotal">—</div>
+          </div>
+          <div class="segmented" id="levelPoolSwitch" aria-label="额度池"></div>
+          <label class="model-range-control">
+            <span>周期</span>
+            <select id="levelCycleSelect" aria-label="额度周期"></select>
+          </label>
+          <article class="chart-card">
+            <div class="chart-wrap" id="levelChart"></div>
+            <div class="chart-legend">
+              <span class="legend-items"><i class="level-swatch"></i><b>剩余额度</b></span>
+              <span id="levelPeak">—</span>
+            </div>
+          </article>
+          <div class="trend-footnote">曲线来自每次刷新写入的额度采样；当前点会叠加上一次同步结果。</div>
+        </section>
+
+        <section class="view" id="eventsView">
+          <div class="section-heading">
+            <div>
+              <h2>请求明细</h2>
+              <p id="eventSubtitle">按时间倒序查看单次调用</p>
+            </div>
+            <span class="count-pill" id="eventCount">0 次</span>
+          </div>
+          <div class="segmented" id="eventSourceSwitch" aria-label="请求来源">
+            <button type="button" data-event-source="all" class="active">全部</button>
+            <button type="button" data-event-source="cursor">Cursor</button>
+            <button type="button" data-event-source="codex">Codex</button>
+          </div>
+          <div class="event-toolbar">
+            <input id="eventSearch" type="search" placeholder="搜索模型或 effort" aria-label="搜索请求" />
+            <button type="button" id="eventExportCsv" class="text-btn">导出 CSV</button>
+            <button type="button" id="eventExportJson" class="text-btn">导出 JSON</button>
+          </div>
+          <div class="event-list" id="eventList"></div>
+          <div class="pager" id="eventPager"></div>
+        </section>
+
+        <section class="view" id="pricingView">
+          <div class="section-heading">
+            <div>
+              <h2>令牌价目表</h2>
+              <p id="pricingSubtitle">按模型与 Fast / 非 Fast 分档</p>
+            </div>
+            <span class="count-pill" id="pricingCount">0 档</span>
+          </div>
+          <label class="model-range-control">
+            <span>版本</span>
+            <select id="pricingSnapshotSelect" aria-label="价目表版本"></select>
+          </label>
+          <div class="segmented" id="pricingSourceSwitch" aria-label="价目表目录">
+            <button type="button" data-pricing-source="all" class="active">全部</button>
+            <button type="button" data-pricing-source="cursor">Cursor</button>
+            <button type="button" data-pricing-source="codex">Codex</button>
+          </div>
+          <div class="pricing-note" id="pricingNote"></div>
+          <div class="pricing-list" id="pricingList"></div>
         </section>
       </main>
 
@@ -243,8 +312,8 @@
       <div id="chartTooltipRows" class="chart-tooltip-rows"></div>
       <div id="chartTooltipMeta" class="chart-tooltip-meta"></div>
     </div>
-    <script src="preview.js?v=7"></script>
+    <script src="preview.js?v=8"></script>
     <script src="liquid-pool.js?v=4"></script>
-    <script src="app.js?v=21"></script>
+    <script src="app.js?v=23"></script>
   </body>
 </html>

@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { Worker } = require("node:worker_threads");
-const { app, BrowserWindow, ipcMain, shell, Menu, screen, Tray, nativeImage, Notification, globalShortcut } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell, Menu, screen, Tray, nativeImage, Notification, globalShortcut } = require("electron");
 const { loadSettings, saveSettings } = require("./lib.cjs");
 const { codexHomePath } = require("./codex.cjs");
 const { smartDockBounds, windowMetrics, windowModeOptions } = require("./window-layout.cjs");
@@ -703,6 +703,23 @@ ipcMain.handle("refresh-pricing", () => pull(true));
 ipcMain.handle("get-settings", () => loadSettings());
 ipcMain.handle("get-window-state", () => windowState());
 ipcMain.handle("get-model-usage", (_event, range) => runDataTask("get-model-usage", { range }));
+ipcMain.handle("get-quota-timeline", (_event, payload) => runDataTask("get-quota-timeline", payload || {}));
+ipcMain.handle("query-usage-events", (_event, payload) => runDataTask("query-usage-events", payload || {}));
+ipcMain.handle("get-pricing-catalog", (_event, payload) => runDataTask("get-pricing-catalog", payload || {}));
+ipcMain.handle("save-text-file", async (_event, payload) => {
+  if (!win) return { ok: false, error: "窗口未就绪" };
+  const result = await dialog.showSaveDialog(win, {
+    defaultPath: payload?.name || "export.txt",
+    filters: [
+      { name: "CSV", extensions: ["csv"] },
+      { name: "JSON", extensions: ["json"] },
+      { name: "文本", extensions: ["txt"] },
+    ],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+  fs.writeFileSync(result.filePath, String(payload?.content ?? ""), "utf8");
+  return { ok: true, path: result.filePath };
+});
 ipcMain.handle("toggle-fullscreen", (_event, force) => toggleFullscreen(force));
 ipcMain.handle("save-settings", (_event, partial) => applySettings(partial));
 ipcMain.handle("pointer-presence", (_event, present) => handlePointerPresence(Boolean(present)));

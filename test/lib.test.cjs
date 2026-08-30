@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { normalizeModelDescriptor, buildModelBreakdowns, buildTrendSeries, collapseCursorSnapshots, costSummary, currentCodexRateWindow, inferPoolQuota, isCursorModel, speedUsageSummary, buildModelUsage } = require("../src/lib.cjs");
+const { normalizeModelDescriptor, buildModelBreakdowns, buildTrendSeries, collapseCursorSnapshots, costSummary, currentCodexRateWindow, inferPoolQuota, isCursorModel, pickUsagePercent, speedUsageSummary, buildModelUsage } = require("../src/lib.cjs");
 
 function event(timestamp, model, input = 0, output = 0, cacheRead = 0, chargedCents = 0) {
   return {
@@ -30,6 +30,17 @@ test("classifies Grok and Composer in Cursor Models and infers pools independent
   const estimate = inferPoolQuota({ equivalentCostCents: 6_100 }, 61);
   assert.equal(estimate.inferredTotalCents, 10_000);
   assert.equal(estimate.packageTotalSource, "usage-percent");
+});
+
+test("uses the higher-precision Cursor usage percent to infer pool capacity", () => {
+  assert.equal(pickUsagePercent(98.1, 98.109), 98.109);
+  assert.equal(pickUsagePercent(3.64, 3.64123), 3.64123);
+  assert.equal(pickUsagePercent(1.47, 1.4666666666666666), 1.4666666666666666);
+  assert.equal(pickUsagePercent(null, 61.37), 61.37);
+  const coarse = inferPoolQuota({ equivalentCostCents: 4_367.78 }, 3.64);
+  const fine = inferPoolQuota({ equivalentCostCents: 4_367.78 }, 3.64123);
+  assert.notEqual(coarse.inferredTotalCents, fine.inferredTotalCents);
+  assert.ok(Math.abs(fine.inferredTotalCents - 4_367.78 / 0.0364123) < 1e-6);
 });
 
 test("builds the three requested model precision levels", () => {

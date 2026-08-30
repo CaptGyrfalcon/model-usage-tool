@@ -83,7 +83,7 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
       quotaEquivalent: { equivalentCostCents: 2_975, equivalentCostLowCents: 2_975, equivalentCostHighCents: 4_900, inferredTotalCents: 4_648, inferredTotalLowCents: 4_648, inferredTotalHighCents: 7_656 },
       tierEvidence: { response: 38, local: 21, unknown: 5 },
     },
-    combined: { tokens: { today: { effective: 8_700_000, total: 29_400_000 }, h1: { effective: 1_420_000, total: 5_160_000 } }, eventCount: 95, lastEvent: { source: "codex", model: "gpt-5.6-sol", effort: "high", at: now - 90_000, equivalentCostCents: 86, tokens: { input: 120_000, output: 24_000, cacheRead: 410_000, cacheWrite: 0 } } },
+    combined: { tokens: { today: { effective: 8_700_000, total: 29_400_000 }, h1: { effective: 1_420_000, total: 5_160_000 } }, eventCount: 95, lastEvent: { source: "codex", model: "gpt-5.6-sol", effort: "high", at: now - 90_000, equivalentCostCents: 86, cacheWriteCostCents: 18, cacheReadCostCents: 12, tokens: { input: 120_000, output: 24_000, cacheRead: 410_000, cacheWrite: 36_000 } } },
     persistence: { count: 6_148, earliest: now - 45 * 86_400_000 },
     sources: { all: source("全部"), cursor: source("Cursor"), codex: source("Codex") },
     sourceStatus: { cursor: { ok: true }, codex: { ok: true } },
@@ -98,7 +98,85 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     { id: "codex-10080", label: "Codex 每周", usedPercent: 27, remainingPercent: 73, resetsAt: data.codex.quota.secondary.resetsAt, forecast: { status: "safe", exhaustionAt: now + 11 * 86_400_000 } },
   ];
   const previewQuery = new URLSearchParams(location.search);
-  const previewSettings = { opacity: 0.96, compact: false, orbMode: previewQuery.get("orb") === "1", orbPool: previewQuery.get("orbPool") || "cursor-models", orbDisplayMode: previewQuery.get("orbDisplay") || "quota", intervalMs: 30_000, activeTab: previewQuery.get("tab") || "models", modelRange: "month1", modelPrecision: "speed", trendRange: "day", trendMetric: "total", trendBreakdown: true, trendSpeedBreakdown: previewQuery.get("speed") === "1", dataSource: "all", tokenDisplayVersion: 2, smartDock: false, privacyMode: previewQuery.get("privacy") === "1", quotaAlerts: true, alertThreshold: 20 };
+  const previewSettings = { opacity: 0.96, compact: false, orbMode: previewQuery.get("orb") === "1", orbPool: previewQuery.get("orbPool") || "cursor-models", orbDisplayMode: previewQuery.get("orbDisplay") || "quota", intervalMs: 30_000, activeTab: previewQuery.get("tab") || "models", modelRange: "month1", modelPrecision: "speed", trendRange: "day", trendMetric: "total", trendBreakdown: true, trendSpeedBreakdown: previewQuery.get("speed") === "1", dataSource: "all", quotaLevelPool: previewQuery.get("pool") || "cursor-models", eventSource: "all", pricingSource: "all", tokenDisplayVersion: 2, smartDock: false, privacyMode: previewQuery.get("privacy") === "1", quotaAlerts: true, alertThreshold: 20 };
+  const previewEvents = [
+    { source: "codex", timestamp: now - 90_000, model: "gpt-5.6-sol", effort: "high", fast: true, fastKnown: true, input: 120_000, output: 24_000, cacheRead: 410_000, cacheWrite: 36_000, equivalentCostCents: 86 },
+    { source: "cursor", timestamp: now - 25 * 60_000, model: "grok-4.6", effort: null, fast: false, fastKnown: true, input: 88_000, output: 16_000, cacheRead: 260_000, cacheWrite: 0, equivalentCostCents: 42 },
+    { source: "cursor", timestamp: now - 3 * 60 * 60_000, model: "composer-2.5", effort: null, fast: true, fastKnown: true, input: 54_000, output: 11_000, cacheRead: 190_000, cacheWrite: 8_000, equivalentCostCents: 31 },
+    { source: "codex", timestamp: now - 26 * 60 * 60_000, model: "gpt-5.6-terra", effort: "medium", fast: false, fastKnown: false, input: 40_000, output: 9_000, cacheRead: 120_000, cacheWrite: 0, equivalentCostCents: 18 },
+  ];
+  const previewPricingCurrent = {
+    id: 2,
+    fetchedAt: now,
+    status: "remote",
+    note: "预览用当日官方价目表",
+    modelsBySource: {
+      cursor: {
+        "grok-4.6": { standard: { short: { input: 2, cacheRead: 0.5, cacheWrite: 0, output: 6 } }, fast: { short: { input: 4, cacheRead: 1, cacheWrite: 0, output: 12 } } },
+        "composer-2.5": { standard: { short: { input: 0.5, cacheRead: 0.2, cacheWrite: 0, output: 2.5 } }, fast: { short: { input: 3, cacheRead: 0.5, cacheWrite: 0, output: 15 } } },
+      },
+      codex: {
+        "gpt-5.6-sol": {
+          standard: { short: { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 }, long: { input: 8, cacheRead: 0.8, cacheWrite: 10, output: 30 } },
+          fast: { short: { input: 8, cacheRead: 0.8, cacheWrite: 10, output: 40 }, long: { input: 16, cacheRead: 1.6, cacheWrite: 20, output: 60 } },
+        },
+      },
+    },
+  };
+  const previewPricingHistory = {
+    id: 1,
+    fetchedAt: now - 12 * 86_400_000,
+    status: "remote",
+    note: "预览用历史价目表",
+    modelsBySource: {
+      cursor: {
+        "grok-4.6": { standard: { short: { input: 2.2, cacheRead: 0.55, cacheWrite: 0, output: 6.5 } }, fast: { short: { input: 4.4, cacheRead: 1.1, cacheWrite: 0, output: 13 } } },
+      },
+      codex: {
+        "gpt-5.6-sol": { standard: { short: { input: 5, cacheRead: 0.5, cacheWrite: 6, output: 22 } }, fast: { short: { input: 10, cacheRead: 1, cacheWrite: 12, output: 44 } } },
+      },
+    },
+  };
+  const flattenPreviewPricing = (snapshot, source = "all") => {
+    const rows = [];
+    for (const [catalog, models] of Object.entries(snapshot.modelsBySource || {})) {
+      if (source !== "all" && source !== catalog) continue;
+      for (const [name, model] of Object.entries(models)) {
+        for (const speed of ["standard", "fast"]) {
+          const tier = model[speed];
+          if (!tier?.short) continue;
+          rows.push({ source: catalog, model: name, speed, speedLabel: speed === "fast" ? "Fast" : "非 Fast", context: "default", contextLabel: tier.long ? "默认上下文" : "全部上下文", ...tier.short });
+          if (tier.long) rows.push({ source: catalog, model: name, speed, speedLabel: speed === "fast" ? "Fast" : "非 Fast", context: "long", contextLabel: "长上下文", ...tier.long });
+        }
+      }
+    }
+    return rows;
+  };
+  const previewCycles = [
+    { key: "reset:current", label: "当前 · 8月12日 – 9月11日", startAt: now - 11 * 86_400_000, endAt: now + 19 * 86_400_000, current: true, sampleCount: 24 },
+    { key: "reset:prev", label: "7月13日 – 8月12日", startAt: now - 41 * 86_400_000, endAt: now - 11 * 86_400_000, current: false, sampleCount: 20 },
+  ];
+  const previewSeries = (cycleKey) => {
+    const current = cycleKey !== "reset:prev";
+    const start = current ? now - 11 * 86_400_000 : now - 41 * 86_400_000;
+    return Array.from({ length: current ? 24 : 20 }, (_unused, index) => {
+      const used = 8 + index * (current ? 2.3 : 3.1);
+      return { at: start + index * 12 * 60 * 60_000, usedPercent: used, remainingPercent: Math.max(0, 100 - used) };
+    });
+  };
+  const previewTimeline = (pool = "cursor-models", cycleKey = "reset:current") => ({
+    pools: [
+      { id: "cursor-models", label: "Cursor 模型池", hasData: true },
+      { id: "other-models", label: "Cursor 三方模型池", hasData: true },
+      { id: "codex-300", label: "Codex 5 小时", hasData: true },
+      { id: "codex-10080", label: "Codex 每周", hasData: true },
+    ],
+    pool,
+    cycles: previewCycles,
+    cycle: previewCycles.find((item) => item.key === cycleKey) || previewCycles[0],
+    series: previewSeries(cycleKey),
+  });
+  data.quotaTimeline = previewTimeline();
   const previewWindowState = { fullscreen: new URLSearchParams(location.search).get("fullscreen") === "1" };
   const listeners = { snapshot: [], settings: [], windowState: [] };
   window.widget = {
@@ -108,6 +186,40 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     getSettings: async () => previewSettings,
     getWindowState: async () => previewWindowState,
     getModelUsage: async (range) => previewModelUsage(range),
+    getQuotaTimeline: async (payload = {}) => previewTimeline(payload.pool || previewSettings.quotaLevelPool, payload.cycleKey || "reset:current"),
+    queryUsageEvents: async (payload = {}) => {
+      const source = payload.source && payload.source !== "all" ? payload.source : null;
+      const query = String(payload.query || "").trim().toLowerCase();
+      const filtered = previewEvents.filter((event) => (
+        (!source || event.source === source)
+        && (!query || event.model.toLowerCase().includes(query) || String(event.effort || "").includes(query))
+      ));
+      const offset = Number(payload.offset) || 0;
+      const limit = Number(payload.limit) || 40;
+      return { total: filtered.length, offset, limit, events: filtered.slice(offset, offset + limit) };
+    },
+    getPricingCatalog: async (payload = {}) => {
+      const snapshot = Number(payload.snapshotId) === 1 ? previewPricingHistory : previewPricingCurrent;
+      return {
+        snapshots: [
+          { id: 2, fetchedAt: previewPricingCurrent.fetchedAt, status: "remote" },
+          { id: 1, fetchedAt: previewPricingHistory.fetchedAt, status: "remote" },
+        ],
+        selectedId: snapshot.id,
+        snapshot: { id: snapshot.id, fetchedAt: snapshot.fetchedAt, status: snapshot.status, note: snapshot.note, modelCount: Object.values(snapshot.modelsBySource).reduce((sum, models) => sum + Object.keys(models).length, 0), rowCount: flattenPreviewPricing(snapshot).length },
+        rows: flattenPreviewPricing(snapshot, payload.source || "all"),
+      };
+    },
+    saveTextFile: async ({ name, content }) => {
+      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name || "export.txt";
+      link.click();
+      URL.revokeObjectURL(url);
+      return { ok: true };
+    },
     toggleFullscreen: async (force) => {
       previewWindowState.fullscreen = typeof force === "boolean" ? force : !previewWindowState.fullscreen;
       listeners.windowState.forEach((callback) => callback(previewWindowState));

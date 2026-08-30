@@ -575,6 +575,86 @@ class UsageHistory {
     return row?.timestamp == null ? null : Number(row.timestamp);
   }
 
+  getQuotaSamples() {
+    return this.db.prepare(`
+      SELECT source, pool, bucket, timestamp, used_percent, window_minutes, resets_at
+      FROM quota_samples
+      ORDER BY timestamp ASC
+    `).all().map((row) => ({
+      source: row.source,
+      pool: row.pool,
+      bucket: Number(row.bucket),
+      timestamp: Number(row.timestamp),
+      usedPercent: row.used_percent == null ? null : Number(row.used_percent),
+      windowMinutes: row.window_minutes == null ? null : Number(row.window_minutes),
+      resetsAt: row.resets_at == null ? null : Number(row.resets_at),
+    }));
+  }
+
+  queryEvents({ sources, query = "", offset = 0, limit = 40 } = {}) {
+    const sourceList = Array.isArray(sources) ? sources.filter(Boolean) : sources ? [sources] : [];
+    const clauses = ["1 = 1"];
+    const params = [];
+    if (sourceList.length) {
+      clauses.push(`source IN (${sourceList.map(() => "?").join(",")})`);
+      params.push(...sourceList);
+    }
+    const needle = String(query || "").trim();
+    if (needle) {
+      const like = `%${needle.replaceAll("%", "").replaceAll("_", "")}%`;
+      clauses.push("(model LIKE ? OR IFNULL(effort, '') LIKE ?)");
+      params.push(like, like);
+    }
+    const where = clauses.join(" AND ");
+    const total = Number(this.db.prepare(`SELECT COUNT(*) AS count FROM usage_events WHERE ${where}`).get(...params)?.count || 0);
+    const safeLimit = Math.max(1, Math.min(200, Math.trunc(Number(limit) || 40)));
+    const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
+    const rows = this.db.prepare(`
+      SELECT * FROM usage_events
+      WHERE ${where}
+      ORDER BY timestamp DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, safeLimit, safeOffset);
+    return {
+      total,
+      offset: safeOffset,
+      limit: safeLimit,
+      events: rows.map((row) => ({
+        source: row.source,
+        eventKey: row.event_key,
+        timestamp: Number(row.timestamp),
+        model: row.model,
+        effort: row.effort,
+        fast: row.fast === 1,
+        fastKnown: row.fast != null,
+        pool: row.pool,
+        input: Number(row.input_tokens) || 0,
+        output: Number(row.output_tokens) || 0,
+        cacheRead: Number(row.cache_read_tokens) || 0,
+        cacheWrite: Number(row.cache_write_tokens) || 0,
+        reasoning: Number(row.reasoning_tokens) || 0,
+        equivalentCostCents: row.equivalent_cost_cents,
+        inputCostCents: row.input_cost_cents,
+        cacheReadCostCents: row.cache_read_cost_cents,
+        cacheWriteCostCents: row.cache_write_cost_cents,
+        outputCostCents: row.output_cost_cents,
+      })),
+    };
+  }
+
+  listPricingSnapshots(limit = 24) {
+    return this.db.prepare(`
+      SELECT id, fetched_at, status
+      FROM pricing_snapshots
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(Math.max(1, Math.trunc(finite(limit, 24)))).map((row) => ({
+      id: Number(row.id),
+      fetchedAt: Number(row.fetched_at),
+      status: row.status,
+    }));
+  }
+
   saveQuotaSample(sample) {
     if (!sample?.source || !sample?.pool || !Number.isFinite(Number(sample.timestamp))) return;
     const timestamp = Math.trunc(Number(sample.timestamp));

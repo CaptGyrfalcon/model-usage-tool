@@ -457,3 +457,27 @@ test("backs up and removes duplicate Codex cumulative broadcasts", () => {
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test("pages request history and lists quota samples", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "usage-query-test-"));
+  const history = new UsageHistory(path.join(temp, "history.sqlite"));
+  try {
+    history.upsertEvents([
+      { source: "cursor", eventKey: "query-a", timestamp: 1_000, model: "unique-query-grok", input: 10, output: 2 },
+      { source: "codex", eventKey: "query-b", timestamp: 2_000, model: "gpt-5.6-sol", effort: "high", input: 20, output: 4 },
+      { source: "cursor", eventKey: "query-c", timestamp: 3_000, model: "composer-2.5", input: 8, output: 1 },
+    ]);
+    assert.equal(history.stats().count, 3);
+    history.saveQuotaSample({ source: "cursor", pool: "cursor-models", timestamp: 3_000, usedPercent: 41, resetsAt: 9_000 });
+    const page = history.queryEvents({ sources: "cursor", query: "unique-query-grok", offset: 0, limit: 10 });
+    assert.equal(page.total, 1);
+    assert.equal(page.events[0].model, "unique-query-grok");
+    const samples = history.getQuotaSamples().filter((sample) => sample.usedPercent === 41 && sample.resetsAt === 9_000);
+    assert.equal(samples.length, 1);
+    const snapshots = history.listPricingSnapshots();
+    assert.equal(Array.isArray(snapshots), true);
+  } finally {
+    history.close();
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
