@@ -69,6 +69,22 @@ test("uses hourly buckets for day and daily buckets for week/month", () => {
   assert.equal(buildTrendSeries(events, "month", now).length, 30);
 });
 
+test("splits trend buckets into Fast and non-Fast, folding unknown speed into non-Fast", () => {
+  const now = new Date(2026, 7, 24, 12, 30).getTime();
+  const hour = new Date(2026, 7, 24, 12, 5).getTime();
+  const trend = buildTrendSeries([
+    { timestamp: hour, input: 100, output: 20, cacheRead: 0, cacheWrite: 0, fast: false, fastKnown: true, equivalentCostCents: 4 },
+    { timestamp: hour, input: 50, output: 10, cacheRead: 0, cacheWrite: 0, fast: true, fastKnown: true, equivalentCostCents: 8 },
+    { timestamp: hour, input: 25, output: 5, cacheRead: 0, cacheWrite: 0, fast: false, fastKnown: false, equivalentCostCents: 1 },
+  ], "day", now)[12];
+  assert.equal(trend.input, 175);
+  assert.equal(trend.speed.normal.input, 125);
+  assert.equal(trend.speed.fast.input, 50);
+  assert.equal(trend.speed.unknown, undefined);
+  assert.equal(trend.speed.fast.equivalentCostCents, 8);
+  assert.equal(trend.speed.normal.effective, 150);
+});
+
 test("keeps cache-read and cache-write tokens and costs separate in every aggregation", () => {
   const now = new Date(2026, 7, 24, 12, 30).getTime();
   const row = {

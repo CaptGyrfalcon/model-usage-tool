@@ -5,6 +5,26 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     const cacheWrite = index % 3 === 0 ? (index % 2 + 1) * 90_000 : 0;
     const cacheRead = (index % 4 + 1) * 420_000;
     const output = (index % 3 + 1) * 75_000;
+    const inputCostCents = input / 1_000_000 * 400;
+    const cacheWriteCostCents = cacheWrite / 1_000_000 * 500;
+    const cacheReadCostCents = cacheRead / 1_000_000 * 40;
+    const outputCostCents = output / 1_000_000 * 2_000;
+    const slice = (ratio) => ({
+      input: input * ratio,
+      output: output * ratio,
+      cacheRead: cacheRead * ratio,
+      cacheWrite: cacheWrite * ratio,
+      effective: (input + output) * ratio,
+      total: (input + output + cacheWrite + cacheRead) * ratio,
+      inputCostCents: inputCostCents * ratio,
+      cacheWriteCostCents: cacheWriteCostCents * ratio,
+      cacheReadCostCents: cacheReadCostCents * ratio,
+      cacheCostCents: (cacheWriteCostCents + cacheReadCostCents) * ratio,
+      outputCostCents: outputCostCents * ratio,
+      equivalentCostCents: (inputCostCents + cacheWriteCostCents + cacheReadCostCents + outputCostCents) * ratio,
+    });
+    const fastRatio = 0.22 + (index % 5) * 0.07;
+    const normalRatio = Math.max(0, 1 - fastRatio);
     return {
       start: now - (count - index) * (hourly ? 3_600_000 : 86_400_000),
       label: hourly ? `${String(index).padStart(2, "0")}:00–${String(index + 1).padStart(2, "0")}:00` : `8月${index + 1}日`,
@@ -12,13 +32,17 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
       input, output, cacheRead, cacheWrite,
       effective: input + output,
       total: input + output + cacheWrite + cacheRead,
-      inputCostCents: input / 1_000_000 * 400,
-      cacheWriteCostCents: cacheWrite / 1_000_000 * 500,
-      cacheReadCostCents: cacheRead / 1_000_000 * 40,
-      cacheCostCents: cacheWrite / 1_000_000 * 500 + cacheRead / 1_000_000 * 40,
-      outputCostCents: output / 1_000_000 * 2_000,
-      equivalentCostCents: input / 1_000_000 * 400 + cacheWrite / 1_000_000 * 500 + cacheRead / 1_000_000 * 40 + output / 1_000_000 * 2_000,
+      inputCostCents,
+      cacheWriteCostCents,
+      cacheReadCostCents,
+      cacheCostCents: cacheWriteCostCents + cacheReadCostCents,
+      outputCostCents,
+      equivalentCostCents: inputCostCents + cacheWriteCostCents + cacheReadCostCents + outputCostCents,
       count: index % 4 + 1,
+      speed: {
+        normal: slice(normalRatio),
+        fast: slice(fastRatio),
+      },
     };
   });
   const trends = { day: makeSeries(24, true), week: makeSeries(7, false), month: makeSeries(30, false) };
@@ -40,6 +64,8 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
   });
   const data = {
     fetchedAt: now,
+    billingCycleStart: now - 11 * 86_400_000,
+    billingCycleEnd: now + 19 * 86_400_000,
     email: "preview@example.com",
     planName: "Pro",
     cursorModels: { name: "Cursor 模型", hint: "Grok / Composer", percentUsed: 61.37, percentRemaining: 38.63, speedUsage: { normal: 4_600, fast: 3_000, unknown: 0, total: 7_600, basis: "equivalent-cost" }, tokens: { effective: 22_000_000, total: 68_000_000 }, apiEquivalent: { equivalentCostCents: 7_600, inputCostCents: 2_000, cacheWriteCostCents: 1_500, cacheReadCostCents: 600, outputCostCents: 3_500 }, quotaEstimate: { usedCents: 7_600, inferredTotalCents: 12_459 } },
@@ -49,8 +75,8 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     codex: {
       planName: "Plus", files: 89, periodLabel: "5 小时额度", eventCount: 64,
       quota: {
-        primary: { slot: "primary", name: "5 小时额度", windowMinutes: 300, usedPercent: 64, percentRemaining: 36, resetsAt: now + 2 * 3_600_000, speedUsage: { normal: 1_500, fast: 1_275, unknown: 200, total: 2_975, basis: "equivalent-cost" } },
-        secondary: { slot: "secondary", name: "7 天额度", windowMinutes: 10_080, usedPercent: 27, percentRemaining: 73, resetsAt: now + 4 * 86_400_000, speedUsage: { normal: 5_000, fast: 3_100, unknown: 400, total: 8_500, basis: "equivalent-cost" } },
+        primary: { slot: "primary", name: "5 小时额度", windowMinutes: 300, usedPercent: 64, percentRemaining: 36, resetsAt: now + 2 * 3_600_000, speedUsage: { normal: 1_500, fast: 1_275, unknown: 200, total: 2_975, basis: "equivalent-cost" }, quotaEstimate: { usedCents: 2_975, inferredTotalCents: 4_648 } },
+        secondary: { slot: "secondary", name: "7 天额度", windowMinutes: 10_080, usedPercent: 27, percentRemaining: 73, resetsAt: now + 4 * 86_400_000, speedUsage: { normal: 5_000, fast: 3_100, unknown: 400, total: 8_500, basis: "equivalent-cost" }, quotaEstimate: { usedCents: 8_500, inferredTotalCents: 31_481 } },
       },
       tokens: { period: { effective: 18_500_000, total: 61_500_000 } },
       apiEquivalent: { equivalentCostCents: 2_975, equivalentCostLowCents: 2_975, equivalentCostHighCents: 4_900, inputCostCents: 700, cacheWriteCostCents: 450, cacheReadCostCents: 225, outputCostCents: 1_600, inferredTotalCents: 4_648, inferredTotalLowCents: 4_648, inferredTotalHighCents: 7_656, coveragePercent: 93.4 },
@@ -65,8 +91,14 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     modelUsage: previewModelUsage("month1"),
   };
   data.codex.quota.windows = [data.codex.quota.primary, data.codex.quota.secondary];
+  data.quotaInsights = [
+    { id: "cursor-models", label: "Cursor 模型池", usedPercent: 91.24, remainingPercent: 8.76, resetsAt: data.billingCycleEnd, forecast: { status: "exhaust", exhaustionAt: now + 26 * 3_600_000 } },
+    { id: "cursor-api", label: "Cursor API 池", usedPercent: 34.5, remainingPercent: 65.5, resetsAt: data.billingCycleEnd, forecast: { status: "safe", exhaustionAt: now + 35 * 86_400_000 } },
+    { id: "codex-300", label: "Codex 5 小时", usedPercent: 64, remainingPercent: 36, resetsAt: data.codex.quota.primary.resetsAt, forecast: { status: "exhaust", exhaustionAt: now + 70 * 60_000 } },
+    { id: "codex-10080", label: "Codex 每周", usedPercent: 27, remainingPercent: 73, resetsAt: data.codex.quota.secondary.resetsAt, forecast: { status: "safe", exhaustionAt: now + 11 * 86_400_000 } },
+  ];
   const previewQuery = new URLSearchParams(location.search);
-  const previewSettings = { opacity: 0.96, compact: false, orbMode: previewQuery.get("orb") === "1", orbPool: previewQuery.get("orbPool") || "cursor-models", orbDisplayMode: previewQuery.get("orbDisplay") || "quota", intervalMs: 30_000, activeTab: "models", modelRange: "month1", modelPrecision: "speed", trendRange: "day", trendMetric: "total", trendBreakdown: true, dataSource: "all", tokenDisplayVersion: 2 };
+  const previewSettings = { opacity: 0.96, compact: false, orbMode: previewQuery.get("orb") === "1", orbPool: previewQuery.get("orbPool") || "cursor-models", orbDisplayMode: previewQuery.get("orbDisplay") || "quota", intervalMs: 30_000, activeTab: previewQuery.get("tab") || "models", modelRange: "month1", modelPrecision: "speed", trendRange: "day", trendMetric: "total", trendBreakdown: true, trendSpeedBreakdown: previewQuery.get("speed") === "1", dataSource: "all", tokenDisplayVersion: 2, smartDock: false, privacyMode: previewQuery.get("privacy") === "1", quotaAlerts: true, alertThreshold: 20 };
   const previewWindowState = { fullscreen: new URLSearchParams(location.search).get("fullscreen") === "1" };
   const listeners = { snapshot: [], settings: [], windowState: [] };
   window.widget = {
@@ -82,6 +114,7 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
       return previewWindowState;
     },
     saveSettings: async (partial) => { Object.assign(previewSettings, partial); listeners.settings.forEach((callback) => callback(previewSettings)); },
+    setPointerPresence: async () => null,
     setOpacity: async () => null,
     hide: async () => null,
     openDashboard: async () => null,
@@ -89,5 +122,6 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     onSnapshot: (callback) => { listeners.snapshot.push(callback); return () => {}; },
     onSettings: (callback) => { listeners.settings.push(callback); return () => {}; },
     onWindowState: (callback) => { listeners.windowState.push(callback); return () => {}; },
+    onWindowMotion: () => () => {},
   };
 }

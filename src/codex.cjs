@@ -70,6 +70,92 @@ function rateWindow(raw) {
   };
 }
 
+function isMainCodexRateLimit(rateLimits) {
+  const limitId = String(rateLimits?.limit_id || "").toLowerCase();
+  const limitName = String(rateLimits?.limit_name || "").toLowerCase();
+  return limitId !== "base_model_inference" && limitName !== "gpt-reserve";
+}
+
+function responseHeader(body, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return String(body || "").match(new RegExp(`"${escaped}"\\s*:\\s*"([^"]*)"`, "i"))?.[1] ?? null;
+}
+
+function numberHeader(body, name) {
+  const value = responseHeader(body, name);
+  if (value == null || !Number.isFinite(Number(value))) return null;
+  return Number(value);
+}
+
+function headerRateWindow(body, slot, timestampSeconds) {
+  const prefix = `x-codex-${slot}`;
+  const windowMinutes = numberHeader(body, `${prefix}-window-minutes`);
+  const usedPercent = numberHeader(body, `${prefix}-used-percent`);
+  if (windowMinutes == null || usedPercent == null) return null;
+  const resetAt = numberHeader(body, `${prefix}-reset-at`);
+  const resetAfter = numberHeader(body, `${prefix}-reset-after-seconds`);
+  const resetsAt = resetAt != null
+    ? resetAt * 1000
+    : resetAfter != null ? (timestampSeconds + resetAfter) * 1000 : null;
+  return {
+    usedPercent,
+    percentRemaining: Math.max(0, 100 - usedPercent),
+    windowMinutes,
+    resetsAt,
+  };
+}
+
+function rateLimitFromResponseHeaders(body, timestampSeconds) {
+  const primary = headerRateWindow(body, "primary", timestampSeconds);
+  const secondary = headerRateWindow(body, "secondary", timestampSeconds);
+  if (!primary && !secondary) return null;
+  const boolHeader = (name) => responseHeader(body, name)?.toLowerCase() === "true";
+  const planType = responseHeader(body, "x-codex-plan-type");
+  return {
+    timestamp: Number(timestampSeconds) * 1000,
+    limitId: responseHeader(body, "x-codex-active-limit"),
+    primary,
+    secondary,
+    windows: [
+      primary ? { slot: "primary", ...primary } : null,
+      secondary ? { slot: "secondary", ...secondary } : null,
+    ].filter(Boolean),
+    credits: {
+      has_credits: boolHeader("x-codex-credits-has-credits"),
+      unlimited: boolHeader("x-codex-credits-unlimited"),
+      balance: responseHeader(body, "x-codex-credits-balance"),
+    },
+    planType,
+  };
+}
+
+function mergeRateLimitSnapshots(snapshots, maxAgeMs = 8 * 86_400_000) {
+  const ordered = snapshots
+    .filter(Boolean)
+    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
+  if (!ordered.length) return null;
+  const newest = ordered[0];
+  const windowsByMinutes = new Map();
+  for (const snapshot of ordered) {
+    if (newest.timestamp - snapshot.timestamp > maxAgeMs) continue;
+    for (const window of snapshot.windows || []) {
+      const minutes = Number(window.windowMinutes);
+      if (!Number.isFinite(minutes) || windowsByMinutes.has(minutes)) continue;
+      if (Number.isFinite(Number(window.resetsAt)) && Number(window.resetsAt) < newest.timestamp) continue;
+      windowsByMinutes.set(minutes, { ...window });
+    }
+  }
+  const windows = [...windowsByMinutes.values()]
+    .sort((a, b) => Number(a.windowMinutes) - Number(b.windowMinutes))
+    .map((window, index) => ({ ...window, slot: index === 0 ? "primary" : index === 1 ? "secondary" : `window-${index}` }));
+  return {
+    ...newest,
+    primary: windows[0] || null,
+    secondary: windows[1] || null,
+    windows,
+  };
+}
+
 function normalizeServiceTier(value) {
   const tier = String(value || "").toLowerCase();
   if (["priority", "fast", "default", "standard"].includes(tier)) return tier;
@@ -148,6 +234,36 @@ class CodexUsageScanner {
     }
   }
 
+  loadRateLimitFromLogs() {
+    const dbPath = path.join(this.home, "logs_2.sqlite");
+    if (!fs.existsSync(dbPath)) return;
+    let db;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const rows = db.prepare(`
+        SELECT ts, feedback_log_body
+        FROM logs
+        WHERE target = 'codex_http_client::client'
+          AND (
+            feedback_log_body LIKE '%x-codex-primary-window-minutes%'
+            OR feedback_log_body LIKE '%x-codex-secondary-window-minutes%'
+          )
+        ORDER BY ts DESC, id DESC
+        LIMIT 512
+      `).all();
+      const snapshots = rows
+        .map((row) => rateLimitFromResponseHeaders(row.feedback_log_body, Number(row.ts)))
+        .filter(Boolean);
+      const rateLimit = mergeRateLimitSnapshots(snapshots);
+      if (rateLimit && (!this.latestRateLimit || rateLimit.timestamp >= this.latestRateLimit.timestamp)) this.latestRateLimit = rateLimit;
+      if (rateLimit?.planType) this.planType = String(rateLimit.planType);
+    } catch {
+      // Response headers are optional and the database can be briefly locked while Codex writes to it.
+    } finally {
+      try { db?.close(); } catch {}
+    }
+  }
+
   tierAt(sessionId, timestamp) {
     const timeline = this.tierTimelines.get(sessionId);
     if (!timeline?.length) return null;
@@ -181,6 +297,7 @@ class CodexUsageScanner {
         // A session can be moved to the archive while it is being scanned; the next refresh retries it.
       }
     }
+    this.loadRateLimitFromLogs();
     for (const file of this.fileStates.keys()) {
       if (!present.has(file)) this.fileStates.delete(file);
     }
@@ -263,13 +380,14 @@ class CodexUsageScanner {
 
     const timestamp = Date.parse(record.timestamp);
     const rateLimits = payload.rate_limits;
-    if (Number.isFinite(timestamp) && (rateLimits?.primary || rateLimits?.secondary)) {
+    if (Number.isFinite(timestamp) && (rateLimits?.primary || rateLimits?.secondary) && isMainCodexRateLimit(rateLimits)) {
       if (!this.latestRateLimit || timestamp >= this.latestRateLimit.timestamp) {
         const primary = rateWindow(rateLimits.primary);
         const secondary = rateWindow(rateLimits.secondary);
         this.latestRateLimit = {
           timestamp,
           limitId: rateLimits.limit_id || null,
+          limitName: rateLimits.limit_name || null,
           primary,
           secondary,
           windows: [
@@ -343,6 +461,8 @@ module.exports = {
   collapseCumulativeEvents,
   cumulativeEventKey,
   normalizeServiceTier,
+  mergeRateLimitSnapshots,
   responseTierFromRecord,
+  rateLimitFromResponseHeaders,
   scanCodexUsage,
 };

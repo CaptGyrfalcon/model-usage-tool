@@ -10,6 +10,21 @@ let chartHoveredIndex = -1;
 let chartTooltipFrame = null;
 let chartTooltipVisible = false;
 let chartTooltipPosition = { x: 0, y: 0, targetX: 0, targetY: 0 };
+let smartPanelOpen = false;
+const LIQUID_NODES = 25;
+const liquidState = {
+  configs: [],
+  levels: new Map(),
+  wave: Array(LIQUID_NODES).fill(0),
+  velocity: Array(LIQUID_NODES).fill(0),
+  particles: [],
+  lastFrame: 0,
+  lastMotion: null,
+  raf: null,
+};
+let liquidPoolBaseline = new Map();
+let pendingLiquidEffects = new Map();
+let lastLiquidSnapshotAt = null;
 let settings = {
   opacity: 0.96,
   compact: false,
@@ -23,7 +38,12 @@ let settings = {
   trendRange: "day",
   trendMetric: "total",
   trendBreakdown: false,
+  trendSpeedBreakdown: false,
   dataSource: "all",
+  smartDock: false,
+  privacyMode: false,
+  quotaAlerts: true,
+  alertThreshold: 20,
 };
 
 function escapeHtml(value) {
@@ -36,6 +56,7 @@ function escapeHtml(value) {
 }
 
 function formatTokens(n, digits = 1) {
+  if (settings.privacyMode) return "••••";
   const v = Number(n) || 0;
   const abs = Math.abs(v);
   if (abs >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}B`;
@@ -45,6 +66,7 @@ function formatTokens(n, digits = 1) {
 }
 
 function formatUsd(cents) {
+  if (settings.privacyMode) return "••••";
   if (cents == null || Number.isNaN(Number(cents))) return "—";
   const dollars = Number(cents) / 100;
   const absolute = Math.abs(dollars);
@@ -96,6 +118,32 @@ function formatQuotaReset(ts) {
   return `${formatDate(ts)} ${time} 重置`;
 }
 
+function formatUntil(ts) {
+  const remaining = Number(ts) - Date.now();
+  if (!Number.isFinite(remaining)) return "等待同步";
+  if (remaining <= 0) return "已到重置时间";
+  const minutes = Math.max(1, Math.ceil(remaining / 60_000));
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  if (days) return `${days}天${hours ? `${hours}小时` : ""}`;
+  if (hours) return `${hours}小时${mins ? `${mins}分` : ""}`;
+  return `${mins}分钟`;
+}
+
+function forecastText(insight) {
+  if (!insight?.forecast || insight.forecast.status === "unknown") return "预测数据积累中";
+  if (insight.forecast.status === "safe") return "按当前速度可撑到重置";
+  if (Number(insight.remainingPercent) <= 0 || Number(insight.forecast.exhaustionAt) <= Date.now()) return "额度已耗尽，等待重置";
+  return `预计 ${formatUntil(insight.forecast.exhaustionAt)}后耗尽`;
+}
+
+function forecastHtml(insight) {
+  if (!insight) return "";
+  const atRisk = insight.forecast?.status === "exhaust";
+  return `<div class="quota-forecast ${atRisk ? "at-risk" : "safe"}"><i></i><span>${escapeHtml(forecastText(insight))}</span></div>`;
+}
+
 function formatInteger(value) {
   return new Intl.NumberFormat("zh-CN").format(Number(value) || 0);
 }
@@ -134,10 +182,18 @@ function quotaPools(d) {
     });
   };
   if (d.cursorModels) {
-    addPool("cursor-models", "Cursor 模型池", d.cursorModels.percentUsed, d.cursorModels.percentRemaining, "Grok / Composer", 2, d.cursorModels.speedUsage);
+    addPool("cursor-models", "Cursor 模型池", d.cursorModels.percentUsed, d.cursorModels.percentRemaining, "Grok / Composer", 2, d.cursorModels.speedUsage, {
+      capacityCents: window.LiquidPool.capacityOf(d.cursorModels),
+      usedCents: Number(d.cursorModels.quotaEstimate?.usedCents) || null,
+      capacityEstimated: d.cursorModels.quotaEstimate?.packageTotalSource !== "cursor-api",
+    });
   }
   if (d.otherModels) {
-    addPool("cursor-api", "Cursor API 池", d.otherModels.percentUsed, d.otherModels.percentRemaining, "Claude / GPT 等", 2, d.otherModels.speedUsage);
+    addPool("cursor-api", "Cursor API 池", d.otherModels.percentUsed, d.otherModels.percentRemaining, "Claude / GPT 等", 2, d.otherModels.speedUsage, {
+      capacityCents: window.LiquidPool.capacityOf(d.otherModels),
+      usedCents: Number(d.otherModels.quotaEstimate?.usedCents) || null,
+      capacityEstimated: d.otherModels.quotaEstimate?.packageTotalSource !== "cursor-api",
+    });
   }
   const addCodexPool = (quota, fallbackSlot) => {
     if (!quota) return;
@@ -150,11 +206,35 @@ function quotaPools(d) {
     addPool(`codex-window-${windowKey}`, `Codex · ${quota.name || "额度窗口"}`, used, quota.percentRemaining, reset, 0, quota.speedUsage, {
       source: "codex",
       windowMinutes: Number.isFinite(minutes) ? minutes : null,
+      quotaEstimate: quota.quotaEstimate || null,
+      capacityCents: window.LiquidPool.capacityOf(quota),
+      capacityEstimated: true,
     });
   };
   codexQuotaWindows(d.codex)
     .forEach((quota, index) => addCodexPool(quota, `slot-${index}`));
   return pools;
+}
+
+function usagePools(d) {
+  const regular = quotaPools(d).filter((pool) => pool.source !== "codex");
+  const thirdParty = regular.find((pool) => pool.id === "cursor-api");
+  if (thirdParty) {
+    thirdParty.name = "Cursor 三方模型池";
+    thirdParty.capacityCents = Number(d?.otherModels?.quotaEstimate?.inferredTotalCents) || thirdParty.capacityCents;
+    thirdParty.capacityEstimated = true;
+  }
+  const codex = window.LiquidPool.codexPool(
+    codexQuotaWindows(d?.codex),
+    d?.codex?.quotaEquivalent?.inferredTotalCents
+  );
+  if (codex) regular.push(codex);
+  const scales = window.LiquidPool.sizeScales(regular);
+  return regular.map((pool, index) => ({ ...pool, sizeScale: scales[index] }));
+}
+
+function orbPools(d, displayMode = settings.orbDisplayMode) {
+  return displayMode === "pool" ? usagePools(d) : quotaPools(d);
 }
 
 function codexQuotaWindows(codex) {
@@ -166,28 +246,369 @@ function codexQuotaWindows(codex) {
     .sort((a, b) => (Number(a.windowMinutes) || Number.MAX_SAFE_INTEGER) - (Number(b.windowMinutes) || Number.MAX_SAFE_INTEGER));
 }
 
+function quotaInsightsForDisplay(d) {
+  const supplied = Array.isArray(d?.quotaInsights) ? d.quotaInsights : [];
+  const byId = new Map(supplied.map((insight) => [String(insight.id), insight]));
+  const actualCodexIds = new Set();
+  codexQuotaWindows(d?.codex).forEach((quota, index, windows) => {
+    const minutes = Number(quota.windowMinutes);
+    const id = Number.isFinite(minutes) && minutes > 0 ? `codex-${minutes}` : `codex-${quota.slot || index}`;
+    const existing = byId.get(id);
+    const usedPercent = Number.isFinite(Number(quota.usedPercent))
+      ? Number(quota.usedPercent)
+      : Math.max(0, 100 - (Number(quota.percentRemaining) || 100));
+    const label = minutes <= 360
+      ? "Codex 5 小时"
+      : minutes >= 6 * 24 * 60
+        ? "Codex 每周"
+        : `Codex ${quota.name || (windows.length > 1 ? `窗口 ${index + 1}` : "额度")}`;
+    actualCodexIds.add(id);
+    byId.set(id, {
+      ...existing,
+      id,
+      label,
+      usedPercent,
+      remainingPercent: Number.isFinite(Number(quota.percentRemaining))
+        ? Number(quota.percentRemaining)
+        : Math.max(0, 100 - usedPercent),
+      resetsAt: Number.isFinite(Number(quota.resetsAt)) ? Number(quota.resetsAt) : null,
+      forecast: existing && !existing.pending
+        ? existing.forecast
+        : { status: "unknown", exhaustionAt: null },
+      pending: false,
+    });
+  });
+  return [...byId.values()]
+    .filter((insight) => !insight.pending || !actualCodexIds.has(String(insight.id)))
+    .sort((a, b) => {
+      const order = { "cursor-models": 0, "cursor-api": 1, cursor: 1, "codex-300": 2, "codex-10080": 3 };
+      return (order[a.id] ?? 10) - (order[b.id] ?? 10);
+    });
+}
+
 function selectedQuotaPool(pools) {
   return pools.find((pool) => pool.id === settings.orbPool)
     || (String(settings.orbPool).startsWith("codex-") ? pools.find((pool) => pool.source === "codex") : null)
     || pools[0];
 }
 
+function liquidCapacityText(pool) {
+  if (!pool?.capacityCents) return "容量待估算";
+  return `${pool.capacityEstimated ? "估算容量 " : "容量 "}${formatUsd(pool.capacityCents)}`;
+}
+
+function liquidPath(ctx, width, height, levelPercent, time, phase, amplitude) {
+  const padding = 3;
+  const usableHeight = height - padding * 2;
+  const baseline = height - padding - usableHeight * window.LiquidPool.clamp(levelPercent) / 100;
+  ctx.beginPath();
+  for (let index = 0; index < LIQUID_NODES; index += 1) {
+    const progress = index / (LIQUID_NODES - 1);
+    const x = progress * width;
+    const ambient = Math.sin(progress * Math.PI * 3.2 + time * 0.0028 + phase) * amplitude;
+    const y = baseline + liquidState.wave[index] * (0.62 + amplitude * 0.12) + ambient;
+    if (!index) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.lineTo(width, height);
+  ctx.lineTo(0, height);
+  ctx.closePath();
+}
+
+function liquidFill(ctx, width, height, level, time, options) {
+  if (level <= 0.01) return;
+  liquidPath(ctx, width, height, level, time, options.phase, options.amplitude);
+  const gradient = ctx.createLinearGradient(0, 0, 0, height);
+  gradient.addColorStop(0, options.top);
+  gradient.addColorStop(1, options.bottom);
+  ctx.fillStyle = gradient;
+  ctx.fill();
+  ctx.save();
+  liquidPath(ctx, width, height, level, time, options.phase, options.amplitude);
+  ctx.clip();
+  ctx.globalAlpha = 0.28;
+  ctx.fillStyle = "#ffffff";
+  const surface = height - 3 - (height - 6) * window.LiquidPool.clamp(level) / 100;
+  ctx.fillRect(0, surface - 1, width, 1.3);
+  ctx.restore();
+}
+
+function drawLiquidCanvas(canvas, config, levels, time) {
+  if (!canvas || !config || !levels) return;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const pixelWidth = Math.round(rect.width * dpr);
+  const pixelHeight = Math.round(rect.height * dpr);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(rect.width / 2, rect.height / 2, rect.width / 2 - 1.5, rect.height / 2 - 1.5, 0, 0, Math.PI * 2);
+  ctx.clip();
+  if (config.source === "codex") {
+    liquidFill(ctx, rect.width, rect.height, levels.weeklyLevel, time, {
+      top: "rgba(122, 137, 255, 0.92)", bottom: "rgba(58, 75, 176, 0.96)", phase: 1.8, amplitude: 0.75,
+    });
+  }
+  liquidFill(ctx, rect.width, rect.height, levels.level, time, {
+    top: "rgba(76, 226, 186, 0.94)", bottom: "rgba(22, 126, 132, 0.98)", phase: 0, amplitude: 1.05,
+  });
+  const levelY = rect.height - 3 - (rect.height - 6) * window.LiquidPool.clamp(levels.level) / 100;
+  for (const particle of liquidState.particles) {
+    ctx.globalAlpha = Math.max(0, particle.life);
+    ctx.fillStyle = config.source === "codex" && particle.weekly ? "#8b9aff" : "#7cf2ce";
+    ctx.beginPath();
+    ctx.arc(particle.x, levelY + particle.y, particle.radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawLiquid(time) {
+  const configs = new Map(liquidState.configs.map((config) => [config.id, config]));
+  document.querySelectorAll(".usage-liquid").forEach((canvas) => {
+    const config = configs.get(canvas.dataset.poolId);
+    drawLiquidCanvas(canvas, config, liquidState.levels.get(config?.id), time);
+  });
+}
+
+function maxLiquidLevel() {
+  return Math.max(0, ...[...liquidState.levels.values()].map((levels) => Number(levels.level) || 0));
+}
+
+function stepLiquid(time) {
+  liquidState.raf = null;
+  if (!document.body.classList.contains("orb-mode") || settings.orbDisplayMode !== "pool") return;
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const dt = liquidState.lastFrame ? Math.min(0.034, Math.max(0.008, (time - liquidState.lastFrame) / 1000)) : 1 / 60;
+  liquidState.lastFrame = time;
+  for (const config of liquidState.configs) {
+    const levels = liquidState.levels.get(config.id);
+    if (!levels) continue;
+    levels.level += ((config.remaining || 0) - levels.level) * Math.min(1, dt * 6.5);
+    levels.weeklyLevel += ((config.weeklyRemaining || config.remaining || 0) - levels.weeklyLevel) * Math.min(1, dt * 6.5);
+  }
+  if (!reducedMotion) {
+    const nextVelocity = liquidState.velocity.slice();
+    for (let index = 0; index < LIQUID_NODES; index += 1) {
+      const current = liquidState.wave[index];
+      const left = liquidState.wave[Math.max(0, index - 1)];
+      const right = liquidState.wave[Math.min(LIQUID_NODES - 1, index + 1)];
+      const acceleration = -34 * current + 105 * (left + right - current * 2);
+      nextVelocity[index] = (liquidState.velocity[index] + acceleration * dt) * Math.pow(0.985, dt * 60);
+    }
+    for (let index = 0; index < LIQUID_NODES; index += 1) {
+      liquidState.velocity[index] = nextVelocity[index];
+      liquidState.wave[index] = Math.max(-10, Math.min(10, liquidState.wave[index] + nextVelocity[index] * dt));
+    }
+    for (const particle of liquidState.particles) {
+      particle.vy += 42 * dt;
+      particle.x += particle.vx * dt;
+      particle.y += particle.vy * dt;
+      particle.life -= dt * 1.55;
+    }
+    liquidState.particles = liquidState.particles.filter((particle) => particle.life > 0 && particle.y < 18);
+  } else {
+    liquidState.wave.fill(0);
+    liquidState.velocity.fill(0);
+    liquidState.particles = [];
+  }
+  drawLiquid(time);
+  liquidState.raf = requestAnimationFrame(stepLiquid);
+}
+
+function ensureLiquidAnimation(configs) {
+  liquidState.configs = Array.isArray(configs) ? configs : [configs].filter(Boolean);
+  for (const config of liquidState.configs) {
+    if (!liquidState.levels.has(config.id)) {
+      liquidState.levels.set(config.id, { level: 0, weeklyLevel: 0 });
+    }
+  }
+  if (!liquidState.raf) {
+    liquidState.lastFrame = 0;
+    liquidState.raf = requestAnimationFrame(stepLiquid);
+  }
+}
+
+function splashLiquid(strength, direction = 0) {
+  const amount = Math.min(6, Math.max(2, Math.round(strength * 3)));
+  for (let index = 0; index < amount; index += 1) {
+    liquidState.particles.push({
+      x: 56 + direction * 25 + (Math.random() - 0.5) * 20,
+      y: -1,
+      vx: direction * 12 + (Math.random() - 0.5) * 24,
+      vy: -18 - Math.random() * 25 * strength,
+      radius: 0.9 + Math.random() * 1.4,
+      life: 0.75 + Math.random() * 0.25,
+      weekly: Math.random() > 0.55,
+    });
+  }
+}
+
+function triggerLiquidRefresh(effect) {
+  if (!(Number(effect?.amountCents) > 0)) return;
+  const card = [...document.querySelectorAll("[data-usage-pool]")].find((element) => element.dataset.usagePool === effect?.id);
+  const damage = card?.querySelector(".orb-damage");
+  const drain = card?.querySelector(".orb-drain");
+  if (!damage || !drain || !effect) return;
+  const parts = settings.privacyMode
+    ? { major: "-$••.••", minor: "••" }
+    : window.LiquidPool.damageParts(effect.amountCents);
+  damage.innerHTML = `<span>${parts.major}</span><small>${parts.minor}</small>`;
+  damage.setAttribute("aria-label", settings.privacyMode ? "本次用量已隐藏" : `本次用量${parts.major}${parts.minor}`);
+  const strength = Math.min(2, 0.65 + effect.levelDelta * 0.12 + Math.sqrt(effect.amountCents || 0) * 0.035);
+  const durationMs = window.LiquidPool.refreshEffectDuration(effect.amountCents, settings.intervalMs);
+  drain.style.setProperty("--drain-strength", strength.toFixed(2));
+  drain.style.setProperty("--drain-duration", `${durationMs}ms`);
+  damage.classList.remove("active");
+  drain.classList.remove("active");
+  void damage.offsetWidth;
+  damage.classList.add("active");
+  drain.classList.add("active");
+  for (let index = 0; index < LIQUID_NODES; index += 1) {
+    const progress = index / (LIQUID_NODES - 1);
+    liquidState.velocity[index] = Math.max(-90, Math.min(90,
+      liquidState.velocity[index] + Math.sin(progress * Math.PI * 2.4) * 15 * strength
+    ));
+  }
+  if (maxLiquidLevel() > 3) splashLiquid(Math.min(1.25, strength * 0.7), 1);
+}
+
+function recordLiquidSnapshot(next, animate = true) {
+  if (!next?.data || next.loading) return;
+  const snapshotAt = Number(next.fetchedAt || next.data.fetchedAt) || Date.now();
+  if (lastLiquidSnapshotAt != null && snapshotAt <= lastLiquidSnapshotAt) return;
+  const pools = usagePools(next.data);
+  const nextBaseline = new Map(pools.map((pool) => [pool.id, pool]));
+  if (animate && liquidPoolBaseline.size && settings.orbMode && settings.orbDisplayMode === "pool") {
+    for (const pool of pools) {
+      const previous = liquidPoolBaseline.get(pool.id);
+      const spend = window.LiquidPool.refreshSpend(previous, pool);
+      if (!spend) continue;
+      pendingLiquidEffects.set(pool.id, {
+        id: pool.id,
+        amountCents: spend.amountCents,
+        levelDelta: spend.levelDelta,
+        at: snapshotAt,
+      });
+    }
+  }
+  liquidPoolBaseline = nextBaseline;
+  lastLiquidSnapshotAt = snapshotAt;
+}
+
+function handleWindowMotion(sample) {
+  if (!sample || settings.orbDisplayMode !== "pool" || !settings.orbMode) return;
+  const previous = liquidState.lastMotion;
+  const current = { x: Number(sample.x), y: Number(sample.y), at: Number(sample.at), vx: 0, vy: 0 };
+  if (!previous || !Number.isFinite(current.x + current.y + current.at)) {
+    liquidState.lastMotion = current;
+    return;
+  }
+  const dt = Math.max(8, Math.min(80, current.at - previous.at));
+  current.vx = sample.settled ? 0 : (current.x - previous.x) / dt;
+  current.vy = sample.settled ? 0 : (current.y - previous.y) / dt;
+  const deltaVx = Math.max(-3, Math.min(3, current.vx - previous.vx));
+  const deltaVy = Math.max(-3, Math.min(3, current.vy - previous.vy));
+  for (let index = 0; index < LIQUID_NODES; index += 1) {
+    const side = index / (LIQUID_NODES - 1) - 0.5;
+    liquidState.velocity[index] += -deltaVx * side * 155 - deltaVy * Math.cos(side * Math.PI) * 20;
+  }
+  const impact = Math.hypot(deltaVx, deltaVy);
+  if (impact > 0.42 && maxLiquidLevel() > 3) splashLiquid(Math.min(1.8, impact), Math.sign(-deltaVx));
+  liquidState.lastMotion = current;
+}
+
+function renderOrbResets(d) {
+  const insights = quotaInsightsForDisplay(d);
+  const compact = settings.orbDisplayMode === "pool";
+  $("orbResetList").innerHTML = insights.length
+    ? insights.map((insight) => {
+      const atRisk = insight.forecast?.status === "exhaust";
+      const detail = compact
+        ? ""
+        : `<small>${escapeHtml(formatQuotaReset(insight.resetsAt) || "等待重置时间")} · ${escapeHtml(forecastText(insight))}</small>`;
+      return `<div class="orb-reset-row ${atRisk ? "at-risk" : "safe"}">
+        <span><b>${escapeHtml(insight.label)}</b>${detail}</span>
+        <em class="orb-reset-time">${escapeHtml(formatUntil(insight.resetsAt))}</em>
+      </div>`;
+    }).join("")
+    : `<div class="orb-reset-empty">正在同步全部额度重置时间…</div>`;
+}
+
+function renderUsagePoolGallery(pools) {
+  const gallery = $("orbPoolGallery");
+  const signature = JSON.stringify(pools.map((pool) => [
+    pool.id, pool.remaining, pool.shortRemaining, pool.weeklyRemaining, pool.weeklyOnlyRemaining,
+    pool.capacityCents, pool.shortCapacityCents, pool.sizeScale, settings.privacyMode,
+  ]));
+  if (gallery.dataset.signature !== signature) {
+    gallery.dataset.signature = signature;
+    gallery.innerHTML = pools.map((pool) => {
+      const displayedRemaining = pool.source === "codex" ? pool.shortRemaining : pool.remaining;
+      const pct = pool.precision === 2 ? formatCursorPct(displayedRemaining) : formatPct(displayedRemaining);
+      const scale = Number(pool.sizeScale) > 0 ? Number(pool.sizeScale) : 1;
+      const codexLegend = pool.source === "codex"
+        ? `<div class="usage-pool-legend"><span><i class="immediate"></i>5 小时可用 ${escapeHtml(formatCursorPct(pool.shortRemaining))}</span><span><i class="weekly"></i>仅周池可用 ${escapeHtml(formatPct(pool.weeklyOnlyRemaining))}</span></div>`
+        : "";
+      const capacity = pool.source === "codex"
+        ? `7天 ${formatUsd(pool.capacityCents)} · 5小时 ${formatUsd(pool.shortCapacityCents)}`
+        : liquidCapacityText(pool);
+      return `<article class="usage-pool-card" data-usage-pool="${escapeHtml(pool.id)}">
+        <div class="usage-pool-slot">
+          <div class="usage-pool-tank${pool.source === "codex" ? " codex" : ""}" data-tank-scale="${scale.toFixed(4)}" role="meter" aria-label="${escapeHtml(pool.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(displayedRemaining).toFixed(2)}">
+            <canvas class="usage-liquid" data-pool-id="${escapeHtml(pool.id)}" aria-hidden="true"></canvas>
+            <i class="orb-drain" aria-hidden="true"></i>
+            <output class="orb-damage" aria-live="polite"></output>
+          </div>
+        </div>
+        <div class="usage-pool-info">
+          <b>${escapeHtml(pool.name)}</b>
+          <strong>${escapeHtml(pct)}<small>${pool.source === "codex" ? " 5小时可用" : " 可用"}</small></strong>
+          <span>${escapeHtml(capacity)}</span>
+          ${codexLegend}
+        </div>
+      </article>`;
+    }).join("");
+    // CSP style-src 'self' strips inline style="--tank-size", so scale via CSSOM + data-*.
+    gallery.querySelectorAll(".usage-pool-tank").forEach((tank) => {
+      const scale = Number(tank.dataset.tankScale);
+      if (scale > 0) tank.style.setProperty("--tank-scale", String(scale));
+    });
+  }
+}
+
 function renderOrb(d) {
-  const pools = quotaPools(d);
+  const displayMode = ["quota", "speed", "pool"].includes(settings.orbDisplayMode) ? settings.orbDisplayMode : "quota";
+  const pools = orbPools(d, displayMode);
   const selected = selectedQuotaPool(pools);
-  const displayMode = settings.orbDisplayMode === "speed" ? "speed" : "quota";
   const ring = $("orbRing");
+  renderOrbResets(d);
   document.querySelectorAll("[data-orb-display]").forEach((button) => {
     button.classList.toggle("active", button.dataset.orbDisplay === displayMode);
   });
   $("orbRefreshBtn").classList.toggle("spinning", Boolean(snapshot.loading));
-  $("orbPrevBtn").disabled = pools.length < 2;
-  $("orbNextBtn").disabled = pools.length < 2;
+  $("orbPrevBtn").disabled = displayMode === "pool" || pools.length < 2;
+  $("orbNextBtn").disabled = displayMode === "pool" || pools.length < 2;
+  if (displayMode === "pool") renderUsagePoolGallery(pools);
   if (!selected) {
+    pendingLiquidEffects.clear();
+    liquidState.configs = [];
+    liquidState.levels.clear();
+    const canvas = $("orbLiquid");
+    canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
     ring.style.setProperty("--orb-used", "0");
     ring.className = `orb-ring ${displayMode}-mode`;
     ring.removeAttribute("aria-valuenow");
     $("orbPercent").textContent = "—";
+    $("orbValueLabel").textContent = displayMode === "pool" ? "可用" : "已用";
+    $("orbCapacity").textContent = "";
     $("orbPoolName").textContent = snapshot.loading ? "正在同步" : "暂无额度";
     $("orbPoolDetail").textContent = snapshot.error || "等待可用额度池";
     return;
@@ -200,22 +621,36 @@ function renderOrb(d) {
   const unknownPoints = Math.max(0, selected.used - normalPoints - fastPoints);
   const normalEnd = normalPoints;
   const fastEnd = Math.min(selected.used, normalEnd + fastPoints);
+  ring.style.setProperty("--pool-scale", String(selected.sizeScale || 1));
+  ring.style.setProperty("--pool-size", `${(126 * (selected.sizeScale || 1)).toFixed(1)}px`);
   ring.style.setProperty("--orb-used", selected.used.toFixed(2));
   ring.style.setProperty("--orb-normal-end", `${normalEnd.toFixed(3)}%`);
   ring.style.setProperty("--orb-fast-end", `${fastEnd.toFixed(3)}%`);
   ring.style.setProperty("--orb-used-end", `${selected.used.toFixed(3)}%`);
-  ring.className = `orb-ring ${displayMode}-mode${displayMode === "speed" && fastPoints > 0.001 ? " has-fast" : ""}`;
-  ring.setAttribute("aria-valuenow", selected.used.toFixed(1));
-  ring.setAttribute("aria-valuetext", `${selected.name}已用${formatPct(selected.used)}`);
-  $("orbPercent").textContent = pct(selected.used);
+  ring.className = `orb-ring ${displayMode}-mode${displayMode === "speed" && fastPoints > 0.001 ? " has-fast" : ""}${displayMode === "pool" && selected.source === "codex" ? " codex-pool" : ""}`;
+  const meterValue = displayMode === "pool" ? selected.remaining : selected.used;
+  ring.setAttribute("aria-valuenow", Number(meterValue).toFixed(1));
+  ring.setAttribute("aria-valuetext", `${selected.name}${displayMode === "pool" ? "可用" : "已用"}${formatPct(meterValue)}`);
+  $("orbPercent").textContent = pct(meterValue);
+  $("orbValueLabel").textContent = displayMode === "pool" ? "可用" : "已用";
+  $("orbCapacity").textContent = displayMode === "pool" ? liquidCapacityText(selected) : "";
   $("orbPoolName").textContent = selected.name;
   $("orbPoolDetail").textContent = displayMode === "speed"
     ? `普通 ${pct(normalPoints)} · Fast ${pct(fastPoints)}${unknownPoints > 0.01 ? ` · 未知 ${pct(unknownPoints)}` : ""}`
-    : `剩余 ${pct(selected.remaining)} · ${selected.detail}`;
+    : displayMode === "pool"
+      ? selected.source === "codex"
+        ? `青色 5 小时可用 ${pct(selected.remaining)} · 蓝色仅周池 ${pct(selected.weeklyOnlyRemaining)}`
+        : `水位 ${pct(selected.remaining)} · ${liquidCapacityText(selected)}`
+      : `剩余 ${pct(selected.remaining)} · ${selected.detail}`;
+  if (displayMode === "pool") {
+    ensureLiquidAnimation(pools);
+    for (const effect of pendingLiquidEffects.values()) triggerLiquidRefresh(effect);
+    pendingLiquidEffects.clear();
+  }
 }
 
 function changeOrbPool(direction) {
-  const pools = quotaPools(snapshot.data);
+  const pools = orbPools(snapshot.data);
   if (pools.length < 2) return;
   const selected = selectedQuotaPool(pools);
   const current = Math.max(0, pools.findIndex((pool) => pool.id === selected?.id));
@@ -257,14 +692,17 @@ function costPartsHtml(costs) {
 
 function codexQuotaWindowsHtml(codex) {
   const windows = codexQuotaWindows(codex);
-  if (!windows.length) return `<div class="empty-state codex-window-empty">当前套餐额度窗口暂不可用</div>`;
-  return `<div class="codex-window-list">${windows.map((quota) => {
+  const insights = quotaInsightsForDisplay(snapshot.data);
+  const pending = insights.filter((item) => item.pending && String(item.id).startsWith("codex-"));
+  if (!windows.length && !pending.length) return `<div class="empty-state codex-window-empty">当前套餐额度窗口暂不可用</div>`;
+  const windowRows = windows.map((quota) => {
     const used = Math.min(100, Math.max(0, Number(quota.usedPercent) || 0));
     const remaining = Number.isFinite(Number(quota.percentRemaining)) ? Number(quota.percentRemaining) : Math.max(0, 100 - used);
     const name = quota.name || (quota.windowMinutes ? `${quota.windowMinutes} 分钟额度` : "额度窗口");
     const reset = quota.expired
       ? "已重置 · 等待新请求同步"
       : formatQuotaReset(quota.resetsAt) || "等待重置时间";
+    const insight = insights.find((item) => item.id === `codex-${Number(quota.windowMinutes)}`);
     return `<section class="codex-window-row" aria-label="${escapeHtml(name)}">
       <div class="codex-window-head">
         <span><b>${escapeHtml(name)}</b><small>${escapeHtml(reset)}</small></span>
@@ -272,8 +710,17 @@ function codexQuotaWindowsHtml(codex) {
       </div>
       <progress class="quota-progress codex" max="100" value="${used}" aria-label="${escapeHtml(name)}已用比例">${used}%</progress>
       <div class="codex-window-stats"><span>已用 <b>${formatPct(used)}</b></span><span>剩余 <b>${formatPct(remaining)}</b></span></div>
+      ${forecastHtml(insight)}
     </section>`;
-  }).join("")}</div>`;
+  }).join("");
+  const pendingRows = pending.map((insight) => `<section class="codex-window-row pending" aria-label="${escapeHtml(insight.label)}等待同步">
+    <div class="codex-window-head">
+      <span><b>${escapeHtml(insight.label.replace(/^Codex\s*/, ""))}</b><small>暂未包含在最新响应中</small></span>
+      <strong>— <em>剩余</em></strong>
+    </div>
+    <div class="quota-forecast"><i></i><span>保留窗口 · 等待下次响应同步</span></div>
+  </section>`).join("");
+  return `<div class="codex-window-list">${windowRows}${pendingRows}</div>`;
 }
 
 function renderOverview(d) {
@@ -285,6 +732,10 @@ function renderOverview(d) {
   const cursorPoolQuota = d.cursorModels?.quotaEstimate || {};
   const otherPoolCost = d.otherModels?.apiEquivalent || {};
   const otherPoolQuota = d.otherModels?.quotaEstimate || {};
+  const cursorModelInsight = (d.quotaInsights || []).find((item) => item.id === "cursor-models")
+    || (d.quotaInsights || []).find((item) => item.id === "cursor");
+  const otherModelInsight = (d.quotaInsights || []).find((item) => item.id === "cursor-api")
+    || (d.quotaInsights || []).find((item) => item.id === "cursor");
   $("heroGrid").innerHTML = `
     <div class="hero-metric primary"><span>今日总 Token（含缓存）</span><strong>${formatTokens(combined.tokens?.today?.total)}</strong><small>有效 ${formatTokens(combined.tokens?.today?.effective)} · 写缓存 ${formatTokens(combined.tokens?.today?.cacheWrite)} · 读缓存 ${formatTokens(combined.tokens?.today?.cacheRead)} · 近 1 小时总 ${formatTokens(combined.tokens?.h1?.total)}</small></div>
     <div class="hero-metric"><span>Cursor 模型池</span><strong>${formatUsd(cursorPoolQuota.usedCents)}</strong><small>${cursorPoolQuota.inferredTotalCents == null ? "池总额等待用量比例" : `按比例反推总额 ${formatUsd(cursorPoolQuota.inferredTotalCents)}`}</small></div>
@@ -298,6 +749,7 @@ function renderOverview(d) {
       `<div class="quota-credit"><span>本周期 API 等效</span><b>${formatUsd(cursorPoolCost.equivalentCostCents)}</b></div>
        ${costPartsHtml(cursorPoolCost)}
        <div class="quota-credit"><span>按 ${formatCursorPct(d.cursorModels.percentUsed)} 反推池总额</span><b>${formatUsd(cursorPoolQuota.inferredTotalCents)}</b></div>
+       ${forecastHtml(cursorModelInsight)}
        ${d.cursorModels.message ? `<div class="quota-message">${escapeHtml(d.cursorModels.message)}</div>` : ""}`
     );
   } else {
@@ -311,6 +763,7 @@ function renderOverview(d) {
         <span>套餐额度</span>
         <b>${formatUsd(included.used)} <em>/ ${formatUsd(included.limit)}</em></b>
       </div>
+      ${forecastHtml(otherModelInsight)}
       <div class="quota-credit">
         <span>第三方模型 API 等效</span>
         <b>${formatUsd(otherPoolCost.equivalentCostCents)}</b>
@@ -350,7 +803,7 @@ function renderOverview(d) {
   const lastTotal = lastEffective + (last?.tokens?.cacheRead || 0) + (last?.tokens?.cacheWrite || 0);
   const lastCost = last?.equivalentCostCents == null ? "价格不可用" : `${formatUsd(last.equivalentCostCents)} 美元等效`;
   $("recentPanel").innerHTML = last
-    ? `<div class="recent-icon">↗</div><div><span>最近一次调用 · ${last.source === "codex" ? "Codex" : "Cursor"}</span><b>${escapeHtml(last.model)}${last.effort ? ` · ${escapeHtml(last.effort)}` : ""}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>`
+    ? `<div class="recent-icon">↗</div><div><span>最近一次调用 · ${last.source === "codex" ? "Codex" : "Cursor"}</span><b>${settings.privacyMode ? "模型信息已隐藏" : `${escapeHtml(last.model)}${last.effort ? ` · ${escapeHtml(last.effort)}` : ""}`}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>`
     : `<div class="empty-state">本周期还没有可显示的用量事件</div>`;
 }
 
@@ -389,11 +842,13 @@ function renderModels(d) {
   }
   const max = Math.max(1, ...rows.map((row) => Number(row.total) || 0));
   $("modelList").innerHTML = rows
-    .map((row, index) => `
+    .map((row, index) => {
+      const modelLabel = settings.privacyMode ? `模型 ${String(index + 1).padStart(2, "0")}` : row.label;
+      return `
       <article class="model-row">
         <div class="model-rank">${String(index + 1).padStart(2, "0")}</div>
         <div class="model-main">
-          <div class="model-title"><b title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</b><span>${formatTokens(row.total)} 总 Token</span></div>
+          <div class="model-title"><b title="${escapeHtml(modelLabel)}">${escapeHtml(modelLabel)}</b><span>${formatTokens(row.total)} 总 Token</span></div>
           <progress class="model-progress ${row.fast ? "fast" : ""}" max="${max}" value="${Math.max(0, row.total || 0)}"></progress>
           <div class="model-meta"><span>${formatInteger(row.count)} 次 · 有效 ${formatTokens(row.effective)}</span><span>${view.costAvailable ? formatUsd(row.costCents) : `推理 ${formatTokens(row.reasoning)}`}</span></div>
           <div class="model-detail-grid">
@@ -405,7 +860,8 @@ function renderModels(d) {
             <span><small>API 等效合计</small><b>${formatUsd(row.costCents)}</b></span>
           </div>
         </div>
-      </article>`)
+      </article>`;
+    })
     .join("");
 }
 
@@ -436,7 +892,7 @@ function axisValue(value, metric) {
   return formatTokens(value, 0);
 }
 
-function chartSegmentDefinitions(metric) {
+function compositionSegmentDefinitions(metric) {
   if (metric === "equivalentCostCents") {
     return [
       { key: "inputCostCents", label: "输入", className: "input" },
@@ -459,7 +915,55 @@ function chartSegmentDefinitions(metric) {
   ];
 }
 
-function chartSvg(series, metric, range, breakdown = false) {
+function speedLaneDefinitions() {
+  return [
+    { id: "normal", label: "非 Fast", className: "speed-normal" },
+    { id: "fast", label: "Fast", className: "speed-fast" },
+  ];
+}
+
+function readTrendPath(item, path, fallback = 0) {
+  let cursor = item;
+  for (const key of path) {
+    cursor = cursor?.[key];
+  }
+  const value = Number(cursor);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function chartSegmentDefinitions(metric, options = {}) {
+  const breakdown = Boolean(options.breakdown);
+  const speedBreakdown = Boolean(options.speedBreakdown);
+  const parts = breakdown ? compositionSegmentDefinitions(metric) : [];
+  const metricKey = metric === "equivalentCostCents"
+    ? "equivalentCostCents"
+    : metric === "effective" ? "effective" : "total";
+  if (!speedBreakdown) {
+    return parts.map((part) => ({
+      ...part,
+      read: (item) => Math.max(0, Number(item[part.key]) || 0),
+    }));
+  }
+  return speedLaneDefinitions().flatMap((lane) => {
+    const fallback = (item) => (lane.id === "normal" && !item.speed ? Math.max(0, Number(item[metricKey]) || 0) : 0);
+    if (!breakdown) {
+      return [{
+        key: `${lane.id}-${metricKey}`,
+        label: lane.label,
+        className: lane.className,
+        read: (item) => Math.max(0, readTrendPath(item, ["speed", lane.id, metricKey], fallback(item))),
+      }];
+    }
+    return parts.map((part) => ({
+      key: `${lane.id}-${part.key}`,
+      label: `${lane.label} · ${part.label}`,
+      className: `${part.className} ${lane.className}`,
+      read: (item) => Math.max(0, readTrendPath(item, ["speed", lane.id, part.key], lane.id === "normal" && !item.speed ? Number(item[part.key]) || 0 : 0)),
+    }));
+  });
+}
+
+function chartSvg(series, metric, range, breakdown = false, speedBreakdown = false) {
   if (!series?.length) return `<div class="empty-state">暂无趋势数据</div>`;
   const fullscreen = Boolean(windowState.fullscreen);
   const width = fullscreen ? 1400 : 400;
@@ -469,9 +973,10 @@ function chartSvg(series, metric, range, breakdown = false) {
   const plotWidth = fullscreen ? width - left - 28 : 344;
   const plotHeight = fullscreen ? height - top - 76 : 170;
   const baseY = top + plotHeight;
-  const segmentDefs = chartSegmentDefinitions(metric);
-  const segmentValue = (item, def) => Number(item[def.key]) || 0;
-  const values = series.map((item) => breakdown
+  const stacked = breakdown || speedBreakdown;
+  const segmentDefs = chartSegmentDefinitions(metric, { breakdown, speedBreakdown });
+  const segmentValue = (item, def) => (def.read ? def.read(item) : Number(item[def.key]) || 0);
+  const values = series.map((item) => stacked
     ? segmentDefs.reduce((sum, def) => sum + Math.max(0, segmentValue(item, def)), 0)
     : Math.max(0, Number(item[metric]) || 0));
   const maxValue = Math.max(...values, 1);
@@ -501,7 +1006,7 @@ function chartSvg(series, metric, range, breakdown = false) {
         : "";
       const hitX = left + index * slot;
       const hitbox = `<rect class="chart-hitbox" x="${hitX.toFixed(2)}" y="${top}" width="${slot.toFixed(2)}" height="${plotHeight}" />`;
-      if (!breakdown) {
+      if (!stacked) {
         const y = baseY - barHeight;
         return `<g class="chart-column" data-chart-index="${index}">${hitbox}<rect class="chart-bar" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${barHeight.toFixed(2)}" rx="${Math.min(4, barWidth / 2)}"></rect>${label}</g>`;
       }
@@ -525,6 +1030,7 @@ function renderTrends(d) {
   let metric = settings.trendMetric || "total";
   if (metric === "costCents") metric = "equivalentCostCents";
   const breakdown = Boolean(settings.trendBreakdown);
+  const speedBreakdown = Boolean(settings.trendSpeedBreakdown);
   if (metric === "equivalentCostCents" && !view.costAvailable) metric = "total";
   if (breakdown && metric === "effective") metric = "total";
   const series = view.trends?.[range] || [];
@@ -534,11 +1040,9 @@ function renderTrends(d) {
   $("trendResolution").textContent = `${view.label || "全部"} · ${resolution}`;
   $("trendTotal").textContent = formatMetric(total, metric);
   hideChartTooltip();
-  chartTooltipContext = { series, metric };
-  $("trendChart").innerHTML = chartSvg(series, metric, range, breakdown);
-  $("legendItems").innerHTML = breakdown
-    ? `<span class="legend-key input"><i></i>输入</span><span class="legend-key cache-write"><i></i>缓存写入</span><span class="legend-key cache-read"><i></i>缓存读取</span><span class="legend-key output"><i></i>输出</span>`
-    : `<i></i><b id="legendText">${metric === "effective" ? "有效 Token 新增" : metric === "total" ? "总 Token 新增（含缓存）" : "美元等效费用新增"}</b>`;
+  chartTooltipContext = { series, metric, breakdown, speedBreakdown };
+  $("trendChart").innerHTML = chartSvg(series, metric, range, breakdown, speedBreakdown);
+  $("legendItems").innerHTML = trendLegendHtml(metric, breakdown, speedBreakdown);
   $("chartPeak").textContent = peak ? `峰值 ${peak.shortLabel} · ${formatMetric(peak[metric], metric)}` : "峰值 —";
   document.querySelectorAll("[data-range]").forEach((button) => button.classList.toggle("active", button.dataset.range === range));
   document.querySelectorAll("[data-metric]").forEach((button) => {
@@ -548,6 +1052,8 @@ function renderTrends(d) {
   document.querySelectorAll("[data-source]").forEach((button) => button.classList.toggle("active", button.dataset.source === source));
   $("breakdownBtn").classList.toggle("active", breakdown);
   $("breakdownBtn").setAttribute("aria-pressed", String(breakdown));
+  $("speedBreakdownBtn").classList.toggle("active", speedBreakdown);
+  $("speedBreakdownBtn").setAttribute("aria-pressed", String(speedBreakdown));
   const coverage = Number(view.costCoveragePercent);
   const priceDate = d.pricing?.fetchedAt ? formatDate(d.pricing.fetchedAt) : "内置";
   $("trendFootnote").textContent = `美元等效价格按事件入库时锁定 · 覆盖 ${Number.isFinite(coverage) ? formatPct(coverage) : "—"} · 价表 ${priceDate} · Codex 走 OpenAI 官方价并按 Fast 2.5×；Cursor 走 Cursor 官方价。`;
@@ -594,16 +1100,34 @@ function moveChartTooltip(clientX, clientY, immediate = false) {
   if (chartTooltipFrame === null) chartTooltipFrame = requestAnimationFrame(animateChartTooltip);
 }
 
+function trendLegendHtml(metric, breakdown, speedBreakdown) {
+  const composition = breakdown
+    ? `<span class="legend-key input"><i></i>输入</span><span class="legend-key cache-write"><i></i>缓存写入</span><span class="legend-key cache-read"><i></i>缓存读取</span><span class="legend-key output"><i></i>输出</span>`
+    : "";
+  const speed = speedBreakdown
+    ? `<span class="legend-key speed-normal"><i></i>非 Fast</span><span class="legend-key speed-fast"><i></i>Fast</span>`
+    : "";
+  if (speed && composition) return `${speed}${composition}`;
+  if (composition) return composition;
+  if (speed) return speed;
+  return `<i></i><b id="legendText">${metric === "effective" ? "有效 Token 新增" : metric === "total" ? "总 Token 新增（含缓存）" : "美元等效费用新增"}</b>`;
+}
+
 function fillChartTooltip(index) {
   const item = chartTooltipContext.series[index];
   if (!item) return false;
   const metric = chartTooltipContext.metric;
-  const definitions = chartSegmentDefinitions(metric);
+  const breakdown = Boolean(chartTooltipContext.breakdown);
+  const speedBreakdown = Boolean(chartTooltipContext.speedBreakdown);
+  const definitions = breakdown || speedBreakdown
+    ? chartSegmentDefinitions(metric, { breakdown, speedBreakdown })
+    : compositionSegmentDefinitions(metric);
   const parts = definitions.map((definition) => ({
     ...definition,
-    value: Math.max(0, Number(item[definition.key]) || 0),
-  }));
+    value: Math.max(0, definition.read ? definition.read(item) : Number(item[definition.key]) || 0),
+  })).filter((part) => !speedBreakdown || part.value > 0);
   const partTotal = parts.reduce((sum, part) => sum + part.value, 0);
+  $("chartTooltip").classList.toggle("wide", Boolean(speedBreakdown && breakdown));
   $("chartTooltipLabel").textContent = item.label || item.shortLabel || "该时段";
   $("chartTooltipTotal").textContent = formatMetric(item[metric], metric);
   $("chartTooltipRows").innerHTML = parts.map((part) => {
@@ -618,7 +1142,7 @@ function hideChartTooltip() {
   if (!$("chartTooltip")) return;
   chartTooltipVisible = false;
   chartHoveredIndex = -1;
-  $("chartTooltip").classList.remove("visible");
+  $("chartTooltip").classList.remove("visible", "wide");
   $("chartTooltip").setAttribute("aria-hidden", "true");
   $("trendChart")?.querySelector(".bar-chart")?.classList.remove("has-hover");
   $("trendChart")?.querySelectorAll(".chart-column.is-hovered").forEach((column) => column.classList.remove("is-hovered"));
@@ -706,6 +1230,9 @@ function render() {
   document.body.classList.toggle("compact", Boolean(settings.compact) && !windowState.fullscreen && !orbMode);
   document.body.classList.toggle("fullscreen", Boolean(windowState.fullscreen));
   document.body.classList.toggle("orb-mode", orbMode);
+  document.body.classList.toggle("orb-pool-layout", orbMode && settings.orbDisplayMode === "pool");
+  document.body.classList.toggle("privacy", Boolean(settings.privacyMode));
+  document.body.classList.toggle("smart-docked", Boolean(windowState.smartDocked));
   $("compactBtn").classList.toggle("active", Boolean(settings.compact) && !windowState.fullscreen && !orbMode);
   $("compactBtn").disabled = Boolean(windowState.fullscreen);
   $("orbBtn").classList.toggle("active", orbMode);
@@ -713,6 +1240,13 @@ function render() {
   $("fullscreenBtn").classList.toggle("active", Boolean(windowState.fullscreen));
   $("fullscreenBtn").textContent = windowState.fullscreen ? "↙" : "⛶";
   $("fullscreenBtn").title = windowState.fullscreen ? "退出全屏（Esc / F11）" : "全屏仪表盘（F11）";
+  $("smartBtn").classList.toggle("active", smartPanelOpen || settings.smartDock || settings.privacyMode || settings.quotaAlerts);
+  $("smartPanel").hidden = !smartPanelOpen || orbMode;
+  $("smartDockToggle").checked = Boolean(settings.smartDock);
+  $("privacyToggle").checked = Boolean(settings.privacyMode);
+  $("alertToggle").checked = Boolean(settings.quotaAlerts);
+  $("alertThresholdSelect").value = String(settings.alertThreshold || 20);
+  $("alertThresholdSelect").disabled = !settings.quotaAlerts;
   $("opacity").value = Math.round((settings.opacity ?? 0.96) * 100);
   $("intervalSelect").value = String(settings.intervalMs || 30_000);
   $("modelRangeSelect").value = settings.modelRange || "month1";
@@ -727,7 +1261,7 @@ function render() {
   if (d.email) accountParts.push(d.email);
   if (d.cursorModels) accountParts.push(`Cursor ${d.planName || ""}`.trim());
   if (d.codex) accountParts.push(`Codex ${d.codex.planName || ""}`.trim());
-  $("planLine").textContent = accountParts.join(" · ") || "本机用量历史";
+  $("planLine").textContent = settings.privacyMode ? "账户信息已隐藏 · 隐私模式" : accountParts.join(" · ") || "本机用量历史";
   $("priceBtn").title = d.pricing?.fetchedAt
     ? `手动更新官方价目表 · 当前 ${new Date(d.pricing.fetchedAt).toLocaleString("zh-CN")}`
     : "手动更新官方价目表";
@@ -750,6 +1284,12 @@ async function setFullscreen(force) {
   } catch (error) {
     console.error("切换全屏失败", error);
   }
+}
+
+function setSmartPanel(open) {
+  smartPanelOpen = Boolean(open);
+  $("smartPanel").hidden = !smartPanelOpen || Boolean(settings.orbMode);
+  $("smartBtn").classList.toggle("active", smartPanelOpen || settings.smartDock || settings.privacyMode || settings.quotaAlerts);
 }
 
 document.querySelectorAll(".tab").forEach((button) => {
@@ -802,6 +1342,11 @@ $("breakdownBtn").addEventListener("click", () => {
   window.widget.saveSettings(partial);
   if (snapshot.data) renderTrends(snapshot.data);
 });
+$("speedBreakdownBtn").addEventListener("click", () => {
+  settings.trendSpeedBreakdown = !settings.trendSpeedBreakdown;
+  window.widget.saveSettings({ trendSpeedBreakdown: settings.trendSpeedBreakdown });
+  if (snapshot.data) renderTrends(snapshot.data);
+});
 
 $("refreshBtn").addEventListener("click", () => window.widget.refresh());
 $("priceBtn").addEventListener("click", () => window.widget.refreshPricing());
@@ -811,6 +1356,12 @@ $("orbBtn").addEventListener("click", () => window.widget.saveSettings({ orbMode
 $("closeBtn").addEventListener("click", () => window.widget.hide());
 $("dashBtn").addEventListener("click", () => window.widget.openDashboard());
 $("compactBtn").addEventListener("click", () => window.widget.saveSettings({ compact: !settings.compact, orbMode: false }));
+$("smartBtn").addEventListener("click", () => setSmartPanel(!smartPanelOpen));
+$("smartCloseBtn").addEventListener("click", () => setSmartPanel(false));
+$("smartDockToggle").addEventListener("change", (event) => window.widget.saveSettings({ smartDock: event.target.checked }));
+$("privacyToggle").addEventListener("change", (event) => window.widget.saveSettings({ privacyMode: event.target.checked }));
+$("alertToggle").addEventListener("change", (event) => window.widget.saveSettings({ quotaAlerts: event.target.checked }));
+$("alertThresholdSelect").addEventListener("change", (event) => window.widget.saveSettings({ alertThreshold: Number(event.target.value) }));
 $("modelRangeSelect").addEventListener("change", (event) => loadModelRange(event.target.value));
 $("orbPrevBtn").addEventListener("click", () => changeOrbPool(-1));
 $("orbNextBtn").addEventListener("click", () => changeOrbPool(1));
@@ -835,6 +1386,7 @@ $("opacity").addEventListener("input", (event) => {
 });
 
 window.widget.onSnapshot((next) => {
+  recordLiquidSnapshot(next, true);
   snapshot = next;
   if (next.data?.modelUsage?.key === settings.modelRange) modelUsage = next.data.modelUsage;
   scheduleRender();
@@ -847,9 +1399,13 @@ window.widget.onWindowState((next) => {
   windowState = { ...windowState, ...next };
   scheduleRender();
 });
+window.widget.onWindowMotion?.(handleWindowMotion);
 
 window.addEventListener("keydown", (event) => {
-  if (event.key === "F11" || (event.key === "Escape" && windowState.fullscreen)) {
+  if (event.key === "Escape" && smartPanelOpen) {
+    event.preventDefault();
+    setSmartPanel(false);
+  } else if (event.key === "F11" || (event.key === "Escape" && windowState.fullscreen)) {
     event.preventDefault();
     setFullscreen(event.key === "Escape" ? false : undefined);
   } else if (settings.orbMode && event.key === "Escape") {
@@ -861,9 +1417,16 @@ window.addEventListener("keydown", (event) => {
   }
 });
 
-setInterval(renderStatus, 1000);
+document.documentElement.addEventListener("mouseenter", () => window.widget.setPointerPresence?.(true));
+document.documentElement.addEventListener("mouseleave", () => window.widget.setPointerPresence?.(false));
+
+setInterval(() => {
+  renderStatus();
+  if (settings.orbMode) renderOrb(snapshot.data);
+}, 1000);
 Promise.all([window.widget.getSettings(), window.widget.getSnapshot(), window.widget.getWindowState()]).then(([savedSettings, initialSnapshot, initialWindowState]) => {
   settings = { ...settings, ...savedSettings };
+  recordLiquidSnapshot(initialSnapshot, false);
   snapshot = initialSnapshot;
   modelUsage = initialSnapshot.data?.modelUsage || null;
   windowState = { ...windowState, ...initialWindowState };

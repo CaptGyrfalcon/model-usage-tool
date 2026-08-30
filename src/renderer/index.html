@@ -5,7 +5,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI 用量</title>
-    <link rel="stylesheet" href="styles.css?v=8" />
+    <link rel="stylesheet" href="styles.css?v=16" />
   </head>
   <body>
     <div class="shell">
@@ -28,6 +28,7 @@
           <button type="button" id="fullscreenBtn" class="icon-btn fullscreen-btn" title="全屏仪表盘（F11）" aria-label="切换全屏仪表盘">⛶</button>
           <button type="button" id="orbBtn" class="icon-btn orb-btn" title="极简额度球" aria-label="切换极简额度球">◉</button>
           <button type="button" id="compactBtn" class="icon-btn" title="迷你模式" aria-label="切换迷你模式">▱</button>
+          <button type="button" id="smartBtn" class="icon-btn" title="智能功能" aria-label="打开智能功能设置">⚙</button>
           <button type="button" id="closeBtn" class="icon-btn close" title="隐藏到状态栏" aria-label="隐藏到状态栏">×</button>
         </div>
       </header>
@@ -121,10 +122,16 @@
             <button type="button" data-metric="effective">有效 Token</button>
             <button type="button" data-metric="equivalentCostCents">美元等效</button>
           </div>
-          <button type="button" id="breakdownBtn" class="breakdown-btn" aria-pressed="false">
-            <span class="toggle-track"><i></i></span>
-            柱内显示输入构成
-          </button>
+          <div class="breakdown-toggles">
+            <button type="button" id="breakdownBtn" class="breakdown-btn" aria-pressed="false">
+              <span class="toggle-track"><i></i></span>
+              柱内显示输入构成
+            </button>
+            <button type="button" id="speedBreakdownBtn" class="breakdown-btn speed-breakdown-btn" aria-pressed="false">
+              <span class="toggle-track"><i></i></span>
+              柱内显示 Fast 比例
+            </button>
+          </div>
           <article class="chart-card">
             <div class="chart-wrap" id="trendChart"></div>
             <div class="chart-legend">
@@ -153,29 +160,75 @@
         </label>
         <button type="button" id="dashBtn" class="dashboard-btn">账单 ↗</button>
       </footer>
+      <aside id="smartPanel" class="smart-panel" hidden aria-label="智能功能设置">
+        <div class="smart-panel-head">
+          <div><b>智能功能</b><span>按你的工作状态自动调整挂件</span></div>
+          <button type="button" id="smartCloseBtn" class="icon-btn close" aria-label="关闭智能功能设置">×</button>
+        </div>
+        <label class="smart-setting-row">
+          <span><b>智能贴边</b><small>鼠标离开后收进最近的屏幕边缘</small></span>
+          <input id="smartDockToggle" type="checkbox" role="switch" />
+        </label>
+        <label class="smart-setting-row">
+          <span><b>隐私模式</b><small>隐藏账户、模型、Token 和金额</small></span>
+          <input id="privacyToggle" type="checkbox" role="switch" />
+        </label>
+        <label class="smart-setting-row">
+          <span><b>额度提醒</b><small>低于阈值时发送一次 Windows 通知</small></span>
+          <input id="alertToggle" type="checkbox" role="switch" />
+        </label>
+        <label class="smart-setting-row threshold-row">
+          <span><b>提醒阈值</b><small>恢复到阈值以上后才会再次提醒</small></span>
+          <select id="alertThresholdSelect" aria-label="额度提醒阈值">
+            <option value="10">10%</option>
+            <option value="20">20%</option>
+            <option value="30">30%</option>
+          </select>
+        </label>
+        <div class="shortcut-card">
+          <span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>U</kbd> 显示/隐藏</span>
+          <span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>O</kbd> 额度球</span>
+          <span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>M</kbd> 迷你模式</span>
+          <span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>P</kbd> 隐私模式</span>
+        </div>
+      </aside>
     </div>
     <section class="orb-view" id="orbView" aria-label="极简额度球">
       <div class="orb-topbar">
         <div class="orb-mode-switch" aria-label="额度球显示模式">
           <button type="button" data-orb-display="quota" class="active">额度</button>
           <button type="button" data-orb-display="speed">速度</button>
+          <button type="button" data-orb-display="pool">用量池</button>
         </div>
         <button type="button" id="orbHideBtn" class="orb-top-btn" title="隐藏到状态栏" aria-label="隐藏到状态栏">×</button>
       </div>
-      <div class="orb-stage">
-        <button type="button" id="orbPrevBtn" class="orb-arrow" title="上一个额度池" aria-label="上一个额度池">‹</button>
-        <div class="orb-ring" id="orbRing" role="meter" aria-label="额度已用比例" aria-valuemin="0" aria-valuemax="100">
-          <i class="orb-fast-glow" aria-hidden="true"></i>
-          <div class="orb-core">
-            <strong id="orbPercent">—</strong>
-            <span>已用</span>
+      <div class="orb-main">
+        <div class="orb-meter-pane">
+          <div class="orb-stage">
+            <button type="button" id="orbPrevBtn" class="orb-arrow" title="上一个额度池" aria-label="上一个额度池">‹</button>
+            <div class="orb-ring" id="orbRing" role="meter" aria-label="额度已用比例" aria-valuemin="0" aria-valuemax="100">
+              <i class="orb-fast-glow" aria-hidden="true"></i>
+              <canvas id="orbLiquid" class="orb-liquid" aria-hidden="true"></canvas>
+              <i id="orbDrain" class="orb-drain" aria-hidden="true"></i>
+              <output id="orbDamage" class="orb-damage" aria-live="polite"></output>
+              <div class="orb-core">
+                <strong id="orbPercent">—</strong>
+                <span id="orbValueLabel">已用</span>
+                <em id="orbCapacity"></em>
+              </div>
+            </div>
+            <button type="button" id="orbNextBtn" class="orb-arrow" title="下一个额度池" aria-label="下一个额度池">›</button>
+          </div>
+          <div id="orbPoolGallery" class="orb-pool-gallery" aria-label="全部用量池"></div>
+          <div class="orb-copy">
+            <b id="orbPoolName">等待用量</b>
+            <span id="orbPoolDetail">正在读取额度池…</span>
           </div>
         </div>
-        <button type="button" id="orbNextBtn" class="orb-arrow" title="下一个额度池" aria-label="下一个额度池">›</button>
-      </div>
-      <div class="orb-copy">
-        <b id="orbPoolName">等待用量</b>
-        <span id="orbPoolDetail">正在读取额度池…</span>
+        <aside class="orb-resets" aria-label="全部额度重置时间">
+          <div class="orb-resets-title"><span>全部额度</span><b>下次重置</b></div>
+          <div id="orbResetList" class="orb-reset-list"></div>
+        </aside>
       </div>
       <div class="orb-actions">
         <button type="button" id="orbRestoreBtn" class="orb-restore-btn" title="恢复完整窗口">恢复窗口</button>
@@ -190,7 +243,8 @@
       <div id="chartTooltipRows" class="chart-tooltip-rows"></div>
       <div id="chartTooltipMeta" class="chart-tooltip-meta"></div>
     </div>
-    <script src="preview.js?v=2"></script>
-    <script src="app.js?v=11"></script>
+    <script src="preview.js?v=7"></script>
+    <script src="liquid-pool.js?v=4"></script>
+    <script src="app.js?v=21"></script>
   </body>
 </html>

@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("widget", {
   getModelUsage: (range) => ipcRenderer.invoke("get-model-usage", range),
   toggleFullscreen: (force) => ipcRenderer.invoke("toggle-fullscreen", force),
   saveSettings: (partial) => ipcRenderer.invoke("save-settings", partial),
+  setPointerPresence: (present) => ipcRenderer.invoke("pointer-presence", present),
   setOpacity: (value) => ipcRenderer.invoke("set-opacity", value),
   hide: () => ipcRenderer.invoke("hide-window"),
   openDashboard: () => ipcRenderer.invoke("open-dashboard"),
@@ -27,5 +28,10 @@ contextBridge.exposeInMainWorld("widget", {
     const listener = (_event, data) => cb(data);
     ipcRenderer.on("window-state", listener);
     return () => ipcRenderer.removeListener("window-state", listener);
+  },
+  onWindowMotion: (cb) => {
+    const listener = (_event, data) => cb(data);
+    ipcRenderer.on("window-motion", listener);
+    return () => ipcRenderer.removeListener("window-motion", listener);
   },
 });

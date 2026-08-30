@@ -6,6 +6,7 @@ const { getHistory } = require("./history.cjs");
 const { scanCodexUsage } = require("./codex.cjs");
 const { refreshPricing, priceEvent } = require("./pricing.cjs");
 const { cursorEventKey } = require("./identity.cjs");
+const { buildQuotaInsights } = require("./quota-insights.cjs");
 
 const APP_DIR = path.join(os.homedir(), "AppData", "Roaming", "cursor-usage-widget");
 const SETTINGS_PATH = path.join(APP_DIR, "settings.json");
@@ -45,8 +46,13 @@ const DEFAULT_SETTINGS = {
   trendRange: "day",
   trendMetric: "total",
   trendBreakdown: false,
+  trendSpeedBreakdown: false,
   dataSource: "all",
   tokenDisplayVersion: 2,
+  smartDock: false,
+  privacyMode: false,
+  quotaAlerts: true,
+  alertThreshold: 20,
 };
 
 let usageEventCache = [];
@@ -473,6 +479,44 @@ function makeTrendBoundaries(range, now) {
   return Array.from({ length: count + 1 }, (_unused, i) => addLocalDays(first, i));
 }
 
+function emptyTrendSlice() {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    effective: 0,
+    total: 0,
+    equivalentCostCents: 0,
+    inputCostCents: 0,
+    cacheReadCostCents: 0,
+    cacheWriteCostCents: 0,
+    cacheCostCents: 0,
+    outputCostCents: 0,
+  };
+}
+
+function eventSpeedKey(event) {
+  return event?.fast && event?.fastKnown !== false ? "fast" : "normal";
+}
+
+function addTrendSlice(target, tokens, event) {
+  const cost = eventEquivalentCostCents(event);
+  target.input += tokens.input;
+  target.output += tokens.output;
+  target.cacheRead += tokens.cacheRead;
+  target.cacheWrite += tokens.cacheWrite;
+  target.effective += tokens.effective;
+  target.total += tokens.total;
+  target.equivalentCostCents += cost;
+  target.inputCostCents += num(event.inputCostCents);
+  target.cacheReadCostCents += num(event.cacheReadCostCents);
+  target.cacheWriteCostCents += num(event.cacheWriteCostCents);
+  target.cacheCostCents += num(event.cacheCostCents);
+  target.outputCostCents += num(event.outputCostCents);
+  if ("costCents" in target) target.costCents += cost;
+}
+
 function buildTrendSeries(events, range, now = Date.now()) {
   const boundaries = makeTrendBoundaries(range, now);
   const buckets = boundaries.slice(0, -1).map((start, index) => {
@@ -485,20 +529,13 @@ function buildTrendSeries(events, range, now = Date.now()) {
         ? `${String(d.getHours()).padStart(2, "0")}:00–${String((d.getHours() + 1) % 24).padStart(2, "0")}:00`
         : `${d.getMonth() + 1}月${d.getDate()}日`,
       shortLabel: isDay ? String(d.getHours()).padStart(2, "0") : `${d.getMonth() + 1}/${d.getDate()}`,
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      effective: 0,
-      total: 0,
+      ...emptyTrendSlice(),
       costCents: 0,
-      equivalentCostCents: 0,
-      inputCostCents: 0,
-      cacheReadCostCents: 0,
-      cacheWriteCostCents: 0,
-      cacheCostCents: 0,
-      outputCostCents: 0,
       count: 0,
+      speed: {
+        normal: emptyTrendSlice(),
+        fast: emptyTrendSlice(),
+      },
     };
   });
   for (const event of events) {
@@ -508,19 +545,8 @@ function buildTrendSeries(events, range, now = Date.now()) {
     if (index < 0) continue;
     const t = decorateTokens(eventTokens(event));
     const bucket = buckets[index];
-    bucket.input += t.input;
-    bucket.output += t.output;
-    bucket.cacheRead += t.cacheRead;
-    bucket.cacheWrite += t.cacheWrite;
-    bucket.effective += t.effective;
-    bucket.total += t.total;
-    bucket.costCents += eventEquivalentCostCents(event);
-    bucket.equivalentCostCents += eventEquivalentCostCents(event);
-    bucket.inputCostCents += num(event.inputCostCents);
-    bucket.cacheReadCostCents += num(event.cacheReadCostCents);
-    bucket.cacheWriteCostCents += num(event.cacheWriteCostCents);
-    bucket.cacheCostCents += num(event.cacheCostCents);
-    bucket.outputCostCents += num(event.outputCostCents);
+    addTrendSlice(bucket, t, event);
+    addTrendSlice(bucket.speed[eventSpeedKey(event)], t, event);
     bucket.count += 1;
   }
   return buckets;
@@ -878,10 +904,19 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
   const quotaWindows = rateWindows.map((window) => {
     const start = window.expired ? window.expiredAt : codexPeriodStart({ primary: window }, now);
     const events = history.getEvents({ sources: "codex", start, end: now + 60_000 });
+    const quotaEquivalent = quotaCostSummary(events);
+    const ratio = Number(window.usedPercent) > 0 ? Number(window.usedPercent) / 100 : null;
     return {
       ...window,
       name: quotaWindowLabel(window.windowMinutes),
       speedUsage: speedUsageSummary(events, { quota: true }),
+      quotaEstimate: {
+        usedCents: quotaEquivalent.equivalentCostCents,
+        inferredTotalCents: ratio ? quotaEquivalent.equivalentCostCents / ratio : null,
+        inferredTotalLowCents: ratio ? quotaEquivalent.equivalentCostLowCents / ratio : null,
+        inferredTotalHighCents: ratio ? quotaEquivalent.equivalentCostHighCents / ratio : null,
+        packageTotalSource: "usage-percent",
+      },
     };
   });
   const primaryQuota = quotaWindows.find((window) => window.slot === "primary") || null;
@@ -1078,6 +1113,7 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
   const combinedToday = combinedEvents.filter((event) => event.timestamp >= startOfLocalDay(now));
   const combinedHour = combinedEvents.filter((event) => event.timestamp >= now - 60 * 60_000);
   const combinedFiveMinutes = combinedEvents.filter((event) => event.timestamp >= now - 5 * 60_000);
+  const codexTrendCosts = costSummary(codexTrendEvents);
 
   const cursorView = cursor ? {
     label: "Cursor",
@@ -1092,8 +1128,8 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
     label: "Codex",
     periodLabel: codex.periodLabel,
     eventCount: codex.eventCount,
-    costAvailable: Boolean(codex.costAvailable),
-    costCoveragePercent: codex.apiEquivalent?.coveragePercent ?? 0,
+    costAvailable: codexTrendCosts.pricedEvents > 0,
+    costCoveragePercent: codexTrendCosts.coveragePercent,
     modelBreakdowns: codex.modelBreakdowns,
     trends: codex.trends,
   } : sourceView("Codex", "最近 30 天", codexTrendEvents, now);
@@ -1116,7 +1152,7 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
     eventCount: 0,
   };
 
-  return {
+  const result = {
     ...base,
     fetchedAt: now,
     codex,
@@ -1152,6 +1188,8 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
       updated: pricingResult.updated,
     },
   };
+  result.quotaInsights = buildQuotaInsights(result, now);
+  return result;
 }
 
 module.exports = {

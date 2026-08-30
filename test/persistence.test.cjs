@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { UsageHistory } = require("../src/history.cjs");
-const { CodexUsageScanner } = require("../src/codex.cjs");
+const { CodexUsageScanner, mergeRateLimitSnapshots } = require("../src/codex.cjs");
 const { DatabaseSync } = require("node:sqlite");
 
 test("persists normalized events and deduplicates by source/event key", () => {
@@ -99,6 +99,118 @@ test("extracts Codex token metadata without reading message bodies", () => {
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test("recovers current Codex five-hour and weekly quotas from response-header logs", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-rate-log-test-"));
+  const dbPath = path.join(temp, "logs_2.sqlite");
+  try {
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE logs (
+        id INTEGER PRIMARY KEY,
+        ts INTEGER NOT NULL,
+        target TEXT,
+        thread_id TEXT,
+        feedback_log_body TEXT
+      )
+    `);
+    const headers = JSON.stringify({
+      "x-codex-active-limit": "premium",
+      "x-codex-plan-type": "plus",
+      "x-codex-primary-used-percent": "56",
+      "x-codex-secondary-used-percent": "16",
+      "x-codex-primary-window-minutes": "300",
+      "x-codex-secondary-window-minutes": "10080",
+      "x-codex-primary-reset-at": "1800009000",
+      "x-codex-secondary-reset-at": "1800500000",
+      "x-codex-credits-has-credits": "False",
+      "x-codex-credits-unlimited": "False",
+      "x-codex-credits-balance": "0",
+    });
+    db.prepare("INSERT INTO logs (ts, target, feedback_log_body) VALUES (?, ?, ?)")
+      .run(1_800_000_000, "codex_http_client::client", `response headers: ${headers}`);
+    db.close();
+
+    const result = new CodexUsageScanner(temp).scan();
+    assert.equal(result.planType, "plus");
+    assert.deepEqual(result.rateLimit.windows.map((window) => [window.slot, window.windowMinutes, window.usedPercent]), [
+      ["primary", 300, 56],
+      ["secondary", 10_080, 16],
+    ]);
+    assert.equal(result.rateLimit.primary.resetsAt, 1_800_009_000_000);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("does not replace the main Codex quota with the separate gpt-reserve pool", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-reserve-rate-test-"));
+  const sessions = path.join(temp, "sessions", "2026", "08", "27");
+  fs.mkdirSync(sessions, { recursive: true });
+  const dbPath = path.join(temp, "logs_2.sqlite");
+  try {
+    const db = new DatabaseSync(dbPath);
+    db.exec("CREATE TABLE logs (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, target TEXT, thread_id TEXT, feedback_log_body TEXT)");
+    const headers = JSON.stringify({
+      "x-codex-active-limit": "premium",
+      "x-codex-plan-type": "plus",
+      "x-codex-primary-used-percent": "4",
+      "x-codex-secondary-used-percent": "1",
+      "x-codex-primary-window-minutes": "300",
+      "x-codex-secondary-window-minutes": "10080",
+      "x-codex-primary-reset-at": "1800009000",
+      "x-codex-secondary-reset-at": "1800500000",
+    });
+    db.prepare("INSERT INTO logs (ts, target, feedback_log_body) VALUES (?, ?, ?)")
+      .run(1_800_000_000, "codex_http_client::client", `response headers: ${headers}`);
+    db.close();
+    fs.writeFileSync(path.join(sessions, "rollout-reserve.jsonl"), `${JSON.stringify({
+      timestamp: "2027-01-15T08:00:01.500Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: {
+          limit_id: "base_model_inference",
+          limit_name: "gpt-reserve",
+          primary: { used_percent: 0, window_minutes: 10_080, resets_at: 1_800_600_000 },
+          secondary: null,
+          plan_type: "plus",
+        },
+      },
+    })}\n`);
+
+    const result = new CodexUsageScanner(temp).scan();
+    assert.equal(result.rateLimit.limitId, "premium");
+    assert.deepEqual(result.rateLimit.windows.map((window) => [window.windowMinutes, window.usedPercent]), [
+      [300, 4],
+      [10_080, 1],
+    ]);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("merges partial Codex quota responses by window duration", () => {
+  const weeklyReset = 1_800_500_000_000;
+  const merged = mergeRateLimitSnapshots([
+    {
+      timestamp: 1_800_000_100_000,
+      primary: { windowMinutes: 300, usedPercent: 24, percentRemaining: 76, resetsAt: 1_800_010_000_000 },
+      secondary: null,
+      windows: [{ slot: "primary", windowMinutes: 300, usedPercent: 24, percentRemaining: 76, resetsAt: 1_800_010_000_000 }],
+    },
+    {
+      timestamp: 1_800_000_000_000,
+      primary: { windowMinutes: 10_080, usedPercent: 17, percentRemaining: 83, resetsAt: weeklyReset },
+      secondary: null,
+      windows: [{ slot: "primary", windowMinutes: 10_080, usedPercent: 17, percentRemaining: 83, resetsAt: weeklyReset }],
+    },
+  ]);
+  assert.deepEqual(merged.windows.map((window) => [window.slot, window.windowMinutes, window.usedPercent]), [
+    ["primary", 300, 24],
+    ["secondary", 10_080, 17],
+  ]);
 });
 
 test("extracts official nested Codex cache-write usage without double-counting input", () => {

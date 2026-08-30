@@ -1,29 +1,41 @@
+const fs = require("node:fs");
 const path = require("node:path");
 const { Worker } = require("node:worker_threads");
-const { app, BrowserWindow, ipcMain, shell, Menu, screen, Tray, nativeImage } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, Menu, screen, Tray, nativeImage, Notification, globalShortcut } = require("electron");
 const { loadSettings, saveSettings } = require("./lib.cjs");
+const { codexHomePath } = require("./codex.cjs");
+const { smartDockBounds, windowMetrics, windowModeOptions } = require("./window-layout.cjs");
+const { alertLevel } = require("./quota-insights.cjs");
 
-const WINDOW_WIDTH = 456;
-const WINDOW_HEIGHT = 700;
-const COMPACT_HEIGHT = 390;
-const ORB_WIDTH = 218;
-const ORB_HEIGHT = 252;
 const MIN_INTERVAL = 15_000;
 const MAX_INTERVAL = 300_000;
+const SMART_DOCK_REVEAL = 12;
+const SMART_DOCK_DELAY = 280;
+const SMART_DOCK_DURATION = 210;
 
 let win;
 let tray;
 let pollTimer;
+let codexWatcher;
+let codexRefreshTimer;
 let activePull;
 let isQuitting = false;
 let fullscreenRestore = null;
 let fullscreenRestoreTimer = null;
 let boundsSaveTimer = null;
+let lastWindowMotionAt = 0;
 let dashboardFullscreen = false;
+let presentationDisplayId = null;
+let smartDockTimer = null;
+let dockAnimationTimer = null;
+let smartDockState = null;
+let dockTransition = false;
+let shortcutStatus = {};
 let latest = { ok: false, loading: true, data: null };
 let dataWorker = null;
 let dataTaskId = 0;
 const dataTasks = new Map();
+const quotaAlertState = new Map();
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -33,6 +45,78 @@ if (!app.requestSingleInstanceLock()) {
 
 function clampInterval(value) {
   return Math.min(MAX_INTERVAL, Math.max(MIN_INTERVAL, Number(value) || 30_000));
+}
+
+function resetDescription(timestamp) {
+  if (!Number.isFinite(Number(timestamp))) return "等待同步重置时间";
+  return new Date(Number(timestamp)).toLocaleString("zh-CN", {
+    month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function checkQuotaAlerts(data) {
+  const settings = loadSettings();
+  if (!settings.quotaAlerts || !Notification.isSupported()) return;
+  const threshold = Number(settings.alertThreshold) || 20;
+  const pending = [];
+  for (const insight of data?.quotaInsights || []) {
+    const level = alertLevel(insight.remainingPercent, threshold);
+    const resetKey = Number(insight.resetsAt) || 0;
+    const previous = quotaAlertState.get(insight.id);
+    if (!level) {
+      if (Number(insight.remainingPercent) > threshold + 2) quotaAlertState.delete(insight.id);
+      continue;
+    }
+    const severity = level === "critical" ? 2 : 1;
+    if (!previous || previous.resetKey !== resetKey || severity > previous.severity) {
+      pending.push({ ...insight, level, severity });
+      quotaAlertState.set(insight.id, { resetKey, severity });
+    }
+  }
+  if (!pending.length) return;
+  const critical = pending.some((item) => item.level === "critical");
+  const body = pending
+    .slice(0, 3)
+    .map((item) => `${item.label} 剩余 ${Number(item.remainingPercent).toFixed(String(item.id).startsWith("cursor") ? 2 : 0)}% · ${resetDescription(item.resetsAt)}`)
+    .join("\n");
+  const notification = new Notification({
+    title: critical ? "额度即将耗尽" : "额度余量提醒",
+    body,
+    icon: appImage(64),
+    timeoutType: critical ? "never" : "default",
+  });
+  notification.on("click", () => showWindow());
+  notification.show();
+}
+
+function registerGlobalShortcuts() {
+  const shortcuts = {
+    "CommandOrControl+Alt+U": () => toggleWindow(),
+    "CommandOrControl+Alt+O": () => {
+      const settings = loadSettings();
+      applySettings({ orbMode: !settings.orbMode, compact: false });
+      showWindow();
+    },
+    "CommandOrControl+Alt+M": () => {
+      const settings = loadSettings();
+      applySettings({ compact: !settings.compact, orbMode: false });
+      showWindow();
+    },
+    "CommandOrControl+Alt+P": () => {
+      const settings = loadSettings();
+      applySettings({ privacyMode: !settings.privacyMode });
+      showWindow();
+    },
+  };
+  shortcutStatus = {};
+  for (const [accelerator, action] of Object.entries(shortcuts)) {
+    try {
+      shortcutStatus[accelerator] = globalShortcut.register(accelerator, action);
+    } catch {
+      shortcutStatus[accelerator] = false;
+    }
+  }
+  broadcastWindowState();
 }
 
 function rejectDataTasks(error, targetWorker = null) {
@@ -90,14 +174,17 @@ function stopDataWorker() {
   if (worker) worker.terminate();
 }
 
-function widgetSize(settings) {
-  if (settings.orbMode) return { width: ORB_WIDTH, height: ORB_HEIGHT };
-  return { width: WINDOW_WIDTH, height: settings.compact ? COMPACT_HEIGHT : WINDOW_HEIGHT };
+function widgetSize(settings, display = screen.getPrimaryDisplay()) {
+  const { width, height } = windowMetrics(settings, display);
+  return { width, height };
 }
 
 function safeWindowPosition(settings) {
   const displays = screen.getAllDisplays();
-  const size = widgetSize(settings);
+  const targetDisplay = Number.isFinite(settings.x) && Number.isFinite(settings.y)
+    ? screen.getDisplayNearestPoint({ x: settings.x, y: settings.y })
+    : screen.getPrimaryDisplay();
+  const size = widgetSize(settings, targetDisplay);
   const desired = { x: settings.x, y: settings.y, ...size };
   if (Number.isFinite(settings.x) && Number.isFinite(settings.y)) {
     const visible = displays.some((display) => {
@@ -107,18 +194,18 @@ function safeWindowPosition(settings) {
     });
     if (visible) return { x: settings.x, y: settings.y };
   }
-  const area = screen.getPrimaryDisplay().workArea;
+  const area = targetDisplay.workArea;
   return { x: area.x + area.width - size.width - 20, y: area.y + 20 };
 }
 
-function trayImage() {
+function appImage(size = 20) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
     <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#9DF5D0"/><stop offset="1" stop-color="#7C8CFF"/></linearGradient></defs>
     <rect x="2" y="2" width="28" height="28" rx="8" fill="#171A23"/>
     <path d="M9 22V15h4v7H9zm5.5 0V9h4v13h-4zM20 22v-9h4v9h-4z" fill="url(#g)"/>
   </svg>`;
   const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
-  return image.resize({ width: 20, height: 20 });
+  return image.resize({ width: size, height: size });
 }
 
 function trayMenu() {
@@ -134,10 +221,10 @@ function trayMenu() {
     },
     { type: "separator" },
     {
-      label: "始终置顶",
+      label: "窗口始终置顶",
       type: "checkbox",
-      checked: settings.alwaysOnTop !== false,
-      click: (item) => applySettings({ alwaysOnTop: item.checked }),
+      checked: true,
+      enabled: false,
     },
     {
       label: "迷你模式",
@@ -152,6 +239,24 @@ function trayMenu() {
       click: (item) => applySettings({ orbMode: item.checked }),
     },
     {
+      label: "智能贴边",
+      type: "checkbox",
+      checked: Boolean(settings.smartDock),
+      click: (item) => applySettings({ smartDock: item.checked }),
+    },
+    {
+      label: "隐私模式",
+      type: "checkbox",
+      checked: Boolean(settings.privacyMode),
+      click: (item) => applySettings({ privacyMode: item.checked }),
+    },
+    {
+      label: `额度提醒（${Number(settings.alertThreshold) || 20}%）`,
+      type: "checkbox",
+      checked: Boolean(settings.quotaAlerts),
+      click: (item) => applySettings({ quotaAlerts: item.checked }),
+    },
+    {
       label: "开机启动",
       type: "checkbox",
       checked: Boolean(settings.openAtLogin),
@@ -164,7 +269,7 @@ function trayMenu() {
 }
 
 function createTray() {
-  tray = new Tray(trayImage());
+  tray = new Tray(appImage());
   tray.setToolTip("AI 用量 · 正在同步");
   tray.setContextMenu(trayMenu());
   tray.on("click", () => toggleWindow());
@@ -188,7 +293,10 @@ function updateTray() {
 function createWindow() {
   const settings = loadSettings();
   const position = safeWindowPosition(settings);
-  const size = widgetSize(settings);
+  const initialDisplay = screen.getDisplayNearestPoint(position);
+  const metrics = windowMetrics(settings, initialDisplay);
+  const mode = windowModeOptions(settings);
+  const size = { width: metrics.width, height: metrics.height };
   win = new BrowserWindow({
     ...size,
     ...position,
@@ -198,11 +306,12 @@ function createWindow() {
     maximizable: false,
     minimizable: false,
     fullscreenable: true,
-    skipTaskbar: true,
-    alwaysOnTop: settings.alwaysOnTop !== false,
+    skipTaskbar: mode.skipTaskbar,
+    alwaysOnTop: mode.alwaysOnTop,
     hasShadow: true,
     show: false,
     backgroundColor: "#00000000",
+    icon: appImage(64),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -211,11 +320,19 @@ function createWindow() {
     },
   });
 
-  if (settings.alwaysOnTop !== false) win.setAlwaysOnTop(true, "floating");
+  presentationDisplayId = initialDisplay.id;
+  win.webContents.setZoomFactor(metrics.zoomFactor);
+  win.setAlwaysOnTop(mode.alwaysOnTop, "floating");
   win.setOpacity(Math.min(1, Math.max(0.65, settings.opacity ?? 0.96)));
   win.loadFile(path.join(__dirname, "renderer", "index.html"));
   win.once("ready-to-show", () => showWindow());
-  win.on("moved", persistBounds);
+  win.on("move", () => broadcastWindowMotion(false));
+  win.on("moved", () => {
+    broadcastWindowMotion(true);
+    persistBounds();
+    const display = screen.getDisplayMatching(win.getBounds());
+    if (display.id !== presentationDisplayId) applyWindowMode(loadSettings(), display);
+  });
   win.on("enter-full-screen", () => {
     if (fullscreenRestoreTimer) clearTimeout(fullscreenRestoreTimer);
     fullscreenRestoreTimer = null;
@@ -230,18 +347,30 @@ function createWindow() {
   win.on("close", (event) => {
     if (isQuitting) return;
     event.preventDefault();
+    restoreSmartDock(false);
     win.hide();
     updateTray();
   });
   win.on("closed", () => {
+    cancelDockAnimation();
+    dockTransition = false;
     if (fullscreenRestoreTimer) clearTimeout(fullscreenRestoreTimer);
     fullscreenRestoreTimer = null;
     win = null;
   });
 }
 
+function broadcastWindowMotion(settled = false) {
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+  const at = Date.now();
+  if (!settled && at - lastWindowMotionAt < 16) return;
+  lastWindowMotionAt = at;
+  const [x, y] = win.getPosition();
+  win.webContents.send("window-motion", { x, y, at, settled });
+}
+
 function persistBounds() {
-  if (!win || win.isFullScreen()) return;
+  if (!win || win.isFullScreen() || smartDockState || dockTransition) return;
   if (boundsSaveTimer) clearTimeout(boundsSaveTimer);
   boundsSaveTimer = setTimeout(() => {
     boundsSaveTimer = null;
@@ -251,8 +380,101 @@ function persistBounds() {
   }, 180);
 }
 
+function cancelSmartDockTimer() {
+  if (smartDockTimer) clearTimeout(smartDockTimer);
+  smartDockTimer = null;
+}
+
+function cancelDockAnimation() {
+  if (dockAnimationTimer) clearInterval(dockAnimationTimer);
+  dockAnimationTimer = null;
+}
+
+function animateWindowBounds(target, duration = SMART_DOCK_DURATION, easing = "smooth") {
+  cancelDockAnimation();
+  if (!win || win.isDestroyed()) return;
+  if (!duration) {
+    dockTransition = true;
+    win.setBounds(target, false);
+    dockTransition = false;
+    return;
+  }
+  const start = win.getBounds();
+  const startedAt = Date.now();
+  const ease = easing === "out"
+    ? (value) => 1 - Math.pow(1 - value, 3)
+    : (value) => -(Math.cos(Math.PI * value) - 1) / 2;
+  dockTransition = true;
+  const tick = () => {
+    if (!win || win.isDestroyed()) {
+      cancelDockAnimation();
+      dockTransition = false;
+      return;
+    }
+    const progress = Math.min(1, (Date.now() - startedAt) / duration);
+    const value = ease(progress);
+    const bounds = {};
+    for (const key of ["x", "y", "width", "height"]) {
+      bounds[key] = Math.round(start[key] + (target[key] - start[key]) * value);
+    }
+    win.setBounds(bounds, false);
+    if (progress >= 1) {
+      cancelDockAnimation();
+      dockTransition = false;
+    }
+  };
+  tick();
+  dockAnimationTimer = setInterval(tick, 16);
+}
+
+function restoreSmartDock(animate = true) {
+  cancelSmartDockTimer();
+  cancelDockAnimation();
+  if (!win || !smartDockState) return false;
+  const state = smartDockState;
+  smartDockState = null;
+  const display = screen.getAllDisplays().find((item) => item.id === state.displayId)
+    || screen.getDisplayMatching(state.restoreBounds);
+  const area = display.workArea;
+  const target = {
+    ...state.restoreBounds,
+    x: state.edge === "left"
+      ? area.x + 8
+      : area.x + area.width - state.restoreBounds.width - 8,
+    y: Math.min(area.y + area.height - state.restoreBounds.height, Math.max(area.y, state.restoreBounds.y)),
+  };
+  animateWindowBounds(target, animate ? 180 : 0, "out");
+  broadcastWindowState();
+  return true;
+}
+
+function dockSmartWindow() {
+  smartDockTimer = null;
+  const settings = loadSettings();
+  if (!win || !win.isVisible() || smartDockState || dashboardFullscreen || win.isFullScreen() || settings.orbMode || !settings.smartDock) return;
+  const bounds = win.getBounds();
+  const display = screen.getDisplayMatching(bounds);
+  const area = display.workArea;
+  const { edge, restoreBounds, dockedBounds } = smartDockBounds(bounds, area, SMART_DOCK_REVEAL);
+  smartDockState = { edge, displayId: display.id, restoreBounds };
+  saveSettings({ x: restoreBounds.x, y: restoreBounds.y });
+  animateWindowBounds(dockedBounds, SMART_DOCK_DURATION, "smooth");
+  broadcastWindowState();
+}
+
+function handlePointerPresence(present) {
+  if (present) {
+    cancelSmartDockTimer();
+    restoreSmartDock(true);
+    return;
+  }
+  cancelSmartDockTimer();
+  if (loadSettings().smartDock) smartDockTimer = setTimeout(dockSmartWindow, SMART_DOCK_DELAY);
+}
+
 function showWindow() {
   if (!win) return;
+  restoreSmartDock(false);
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
@@ -261,7 +483,10 @@ function showWindow() {
 
 function toggleWindow() {
   if (!win) return;
-  if (win.isVisible()) win.hide();
+  if (win.isVisible()) {
+    restoreSmartDock(false);
+    win.hide();
+  }
   else showWindow();
   updateTray();
 }
@@ -271,11 +496,15 @@ function quitApp() {
   app.quit();
 }
 
-function applyWindowMode(settings = loadSettings()) {
+function applyWindowMode(settings = loadSettings(), targetDisplay = null) {
   if (!win || dashboardFullscreen || win.isFullScreen()) return;
-  const size = widgetSize(settings);
+  restoreSmartDock(false);
+  const display = targetDisplay || screen.getDisplayMatching(win.getBounds());
+  const metrics = windowMetrics(settings, display);
+  const mode = windowModeOptions(settings);
+  const size = { width: metrics.width, height: metrics.height };
   const current = win.getBounds();
-  const area = screen.getDisplayMatching(current).workArea;
+  const area = display.workArea;
   const maxX = area.x + Math.max(0, area.width - size.width);
   const maxY = area.y + Math.max(0, area.height - size.height);
   win.setBounds({
@@ -283,10 +512,25 @@ function applyWindowMode(settings = loadSettings()) {
     y: Math.min(maxY, Math.max(area.y, current.y)),
     ...size,
   }, true);
+  presentationDisplayId = display.id;
+  win.webContents.setZoomFactor(metrics.zoomFactor);
+  win.setSkipTaskbar(mode.skipTaskbar);
+  win.setAlwaysOnTop(mode.alwaysOnTop, "floating");
+  broadcastWindowState();
 }
 
 function windowState() {
-  return { fullscreen: dashboardFullscreen };
+  const settings = loadSettings();
+  const display = win ? screen.getDisplayMatching(win.getBounds()) : screen.getPrimaryDisplay();
+  const mode = windowModeOptions(settings, dashboardFullscreen);
+  return {
+    fullscreen: dashboardFullscreen,
+    uiScale: dashboardFullscreen ? 1 : windowMetrics(settings, display).zoomFactor,
+    taskbarVisible: !mode.skipTaskbar,
+    smartDocked: Boolean(smartDockState),
+    dockEdge: smartDockState?.edge || null,
+    shortcuts: shortcutStatus,
+  };
 }
 
 function broadcastWindowState() {
@@ -297,14 +541,19 @@ function broadcastWindowState() {
 function restoreWidgetWindow() {
   if (!win || !fullscreenRestore || win.isFullScreen()) return false;
   const settings = loadSettings();
-  const size = widgetSize(settings);
+  const display = screen.getDisplayMatching(fullscreenRestore.bounds);
+  const metrics = windowMetrics(settings, display);
+  const mode = windowModeOptions(settings);
+  const size = { width: metrics.width, height: metrics.height };
   const targetBounds = {
     ...fullscreenRestore.bounds,
     ...size,
   };
   win.setOpacity(Math.min(1, Math.max(0.65, settings.opacity ?? 0.96)));
-  if (settings.alwaysOnTop !== false) win.setAlwaysOnTop(true, "floating");
-  else win.setAlwaysOnTop(false);
+  win.webContents.setZoomFactor(metrics.zoomFactor);
+  win.setSkipTaskbar(mode.skipTaskbar);
+  win.setAlwaysOnTop(mode.alwaysOnTop, "floating");
+  presentationDisplayId = display.id;
   win.setResizable(false);
   win.setMaximizable(false);
   win.setBounds(targetBounds, false);
@@ -335,7 +584,10 @@ function toggleFullscreen(force) {
     dashboardFullscreen = true;
     broadcastWindowState();
     fullscreenRestore = { bounds: win.getBounds() };
-    win.setAlwaysOnTop(false);
+    const mode = windowModeOptions(loadSettings(), true);
+    win.setSkipTaskbar(mode.skipTaskbar);
+    win.setAlwaysOnTop(mode.alwaysOnTop);
+    win.webContents.setZoomFactor(1);
     win.setOpacity(1);
     win.setResizable(true);
     win.setMaximizable(true);
@@ -359,9 +611,9 @@ function applySettings(partial) {
   if ("intervalMs" in clean) clean.intervalMs = clampInterval(clean.intervalMs);
   if (clean.orbMode === true) clean.compact = false;
   if (clean.compact === true) clean.orbMode = false;
+  if (clean.smartDock === false || "compact" in clean || "orbMode" in clean || "orbDisplayMode" in clean) restoreSmartDock(false);
   const next = saveSettings(clean);
-  if (win && "alwaysOnTop" in clean && !dashboardFullscreen && !win.isFullScreen()) win.setAlwaysOnTop(Boolean(next.alwaysOnTop), "floating");
-  if ("compact" in clean || "orbMode" in clean) applyWindowMode(next);
+  if ("compact" in clean || "orbMode" in clean || "orbDisplayMode" in clean) applyWindowMode(next);
   if ("openAtLogin" in clean) app.setLoginItemSettings({ openAtLogin: Boolean(next.openAtLogin) });
   if ("intervalMs" in clean) startPoll();
   if (win) win.webContents.send("settings", next);
@@ -389,6 +641,7 @@ async function pull(forcePricing = false) {
       activePull = null;
     }
     if (win) win.webContents.send("snapshot", latest);
+    if (latest.ok) checkQuotaAlerts(latest.data);
     updateTray();
     return latest;
   })();
@@ -400,14 +653,32 @@ function startPoll() {
   pollTimer = setInterval(() => pull(), clampInterval(loadSettings().intervalMs));
 }
 
+function startCodexWatch() {
+  try { codexWatcher?.close(); } catch {}
+  codexWatcher = null;
+  try {
+    codexWatcher = fs.watch(codexHomePath(), { persistent: false }, (_event, filename) => {
+      const changed = String(filename || "").replaceAll("\\", "/");
+      if (!/(^|\/)logs_2\.sqlite(?:-(?:wal|shm))?$/.test(changed)) return;
+      clearTimeout(codexRefreshTimer);
+      codexRefreshTimer = setTimeout(() => pull(), 1200);
+    });
+  } catch {
+    // The regular polling loop remains available when the Codex directory cannot be watched.
+  }
+}
+
 app.whenReady().then(() => {
   app.setAppUserModelId("com.cursor.usage-widget");
   createTray();
   createWindow();
+  registerGlobalShortcuts();
   createDataWorker();
   app.setLoginItemSettings({ openAtLogin: Boolean(loadSettings().openAtLogin) });
   startPoll();
+  startCodexWatch();
   pull();
+  screen.on("display-metrics-changed", () => applyWindowMode(loadSettings()));
 });
 
 app.on("activate", () => showWindow());
@@ -417,6 +688,10 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   isQuitting = true;
   clearInterval(pollTimer);
+  clearTimeout(codexRefreshTimer);
+  try { codexWatcher?.close(); } catch {}
+  cancelSmartDockTimer();
+  globalShortcut.unregisterAll();
   if (boundsSaveTimer) clearTimeout(boundsSaveTimer);
   boundsSaveTimer = null;
   stopDataWorker();
@@ -430,13 +705,17 @@ ipcMain.handle("get-window-state", () => windowState());
 ipcMain.handle("get-model-usage", (_event, range) => runDataTask("get-model-usage", { range }));
 ipcMain.handle("toggle-fullscreen", (_event, force) => toggleFullscreen(force));
 ipcMain.handle("save-settings", (_event, partial) => applySettings(partial));
+ipcMain.handle("pointer-presence", (_event, present) => handlePointerPresence(Boolean(present)));
 ipcMain.handle("set-opacity", (_event, value) => {
   const opacity = Math.min(1, Math.max(0.65, Number(value) || 0.96));
   if (win) win.setOpacity(opacity);
   return saveSettings({ opacity });
 });
 ipcMain.handle("hide-window", () => {
-  if (win) win.hide();
+  if (win) {
+    restoreSmartDock(false);
+    win.hide();
+  }
   updateTray();
 });
 ipcMain.handle("open-dashboard", () => shell.openExternal("https://cursor.com/dashboard/spending"));
