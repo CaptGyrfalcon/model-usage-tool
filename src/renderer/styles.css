@@ -2641,24 +2641,31 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .orb-damage {
   position: absolute;
   left: 50%;
-  top: 17%;
+  top: 22%;
   z-index: 7;
   display: flex;
   align-items: baseline;
-  color: #ffb56f;
+  color: #ffc183;
   opacity: 0;
   font-variant-numeric: tabular-nums;
-  font-weight: 820;
+  font-weight: 850;
   line-height: 1;
-  letter-spacing: -0.035em;
-  text-shadow: 0 2px 3px rgba(0, 0, 0, 0.66), 0 0 10px rgba(255, 126, 63, 0.55);
+  letter-spacing: -0.025em;
+  -webkit-font-smoothing: antialiased;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.82), 0 0 12px rgba(255, 137, 72, 0.68);
   white-space: nowrap;
   pointer-events: none;
-  transform: translate(-50%, 7px) scale(0.84);
+  transform: translate3d(-50%, 10px, 0);
+  backface-visibility: hidden;
+  will-change: transform, opacity;
 }
-.orb-damage span { font-size: 23px; }
-.orb-damage small { margin-left: 1px; font-size: 12px; font-weight: 760; letter-spacing: -0.02em; }
-.orb-damage.active { animation: orb-damage-float 2.1s cubic-bezier(0.17, 0.67, 0.24, 1) both; }
+.orb-damage span { font-size: 29px; }
+.orb-damage small { margin-left: 2px; font-size: 15px; font-weight: 800; letter-spacing: -0.01em; }
+.orb-damage.active {
+  animation:
+    orb-damage-rise 3.6s linear both,
+    orb-damage-opacity 3.6s linear both;
+}
 
 @keyframes orb-drain-valve {
   0% { opacity: 0; transform: scale(0.75); }
@@ -2673,13 +2680,15 @@ button:active:not(:disabled) { transform: scale(0.97); }
   100% { opacity: 0; transform: scaleY(0.12) translateX(2px); }
 }
 
-@keyframes orb-damage-float {
-  0% { opacity: 0; transform: translate(-50%, 8px) scale(0.82); filter: blur(1px); }
-  10% { opacity: 1; transform: translate(-50%, -2px) scale(1.08); filter: blur(0); }
-  28% { opacity: 1; transform: translate(-50%, -10px) scale(1); }
-  62% { opacity: 0.96; transform: translate(-48%, -26px) scale(0.98); }
-  84% { opacity: 0.55; transform: translate(-46%, -42px) scale(0.95); }
-  100% { opacity: 0; transform: translate(-44%, -56px) scale(0.92); filter: blur(0.7px); }
+@keyframes orb-damage-rise {
+  from { transform: translate3d(-50%, 10px, 0); }
+  to { transform: translate3d(-50%, -102px, 0); }
+}
+
+@keyframes orb-damage-opacity {
+  0% { opacity: 0; }
+  8%, 70% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
