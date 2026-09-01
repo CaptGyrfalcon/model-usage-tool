@@ -38,6 +38,8 @@ const DEFAULT_SETTINGS = {
   orbMode: false,
   orbPool: "cursor-models",
   orbDisplayMode: "quota",
+  orbPoolShape: "sphere",
+  orbPoolCombined: false,
   intervalMs: 30_000,
   x: null,
   y: null,

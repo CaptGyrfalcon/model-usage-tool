@@ -611,9 +611,9 @@ function applySettings(partial) {
   if ("intervalMs" in clean) clean.intervalMs = clampInterval(clean.intervalMs);
   if (clean.orbMode === true) clean.compact = false;
   if (clean.compact === true) clean.orbMode = false;
-  if (clean.smartDock === false || "compact" in clean || "orbMode" in clean || "orbDisplayMode" in clean) restoreSmartDock(false);
+  if (clean.smartDock === false || "compact" in clean || "orbMode" in clean || "orbDisplayMode" in clean || "orbPoolCombined" in clean) restoreSmartDock(false);
   const next = saveSettings(clean);
-  if ("compact" in clean || "orbMode" in clean || "orbDisplayMode" in clean) applyWindowMode(next);
+  if ("compact" in clean || "orbMode" in clean || "orbDisplayMode" in clean || "orbPoolCombined" in clean) applyWindowMode(next);
   if ("openAtLogin" in clean) app.setLoginItemSettings({ openAtLogin: Boolean(next.openAtLogin) });
   if ("intervalMs" in clean) startPoll();
   if (win) win.webContents.send("settings", next);

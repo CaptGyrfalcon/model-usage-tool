@@ -25,6 +25,14 @@ test("gives the multi-pool overview a wider dedicated canvas", () => {
   assert.deepEqual(windowMetrics({ orbMode: true, orbDisplayMode: "pool" }, display), { width: 760, height: 400, zoomFactor: 1 });
 });
 
+test("makes the combined tank window taller so one vessel can fill the pane", () => {
+  const display = { size: { width: 1920, height: 1080 }, scaleFactor: 1 };
+  assert.deepEqual(
+    windowMetrics({ orbMode: true, orbDisplayMode: "pool", orbPoolCombined: true }, display),
+    { width: 448, height: 560, zoomFactor: 1 }
+  );
+});
+
 test("does not grow a full widget beyond a heavily scaled display", () => {
   const display = { size: { width: 1280, height: 720 }, workArea: { width: 1280, height: 680 }, scaleFactor: 3 };
   assert.deepEqual(windowMetrics({}, display), { width: 456, height: 700, zoomFactor: 1 });

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { codexPool, damageParts, refreshEffectDuration, refreshSpend, sizeScales } = require("../src/renderer/liquid-pool.js");
+const { codexPool, combinedTank, damageParts, refreshEffectDuration, refreshSpend, sizeScales } = require("../src/renderer/liquid-pool.js");
 
 test("combines Codex rolling windows into immediately usable and weekly-only water", () => {
   const pool = codexPool([
@@ -33,6 +33,54 @@ test("does not invent a quarter-week five-hour tank when the short window has no
   assert.equal(pool.shortCapacityCents, null);
   assert.equal(pool.remaining, 0);
   assert.equal(pool.weeklyOnlyRemaining, 73);
+});
+
+test("normalizes tank shapes and clips a closed path for each vessel", () => {
+  const { TANK_SHAPES, clipTankShape, normalizeTankShape } = require("../src/renderer/liquid-pool.js");
+  assert.equal(normalizeTankShape("sphere"), "sphere");
+  assert.equal(normalizeTankShape("flask"), "flask");
+  assert.equal(normalizeTankShape("unknown"), "sphere");
+  assert.deepEqual(TANK_SHAPES.map((shape) => shape.id), ["sphere", "flask", "cube", "cylinder", "beaker", "bowl"]);
+  const calls = [];
+  const ctx = {
+    beginPath() { calls.push("beginPath"); },
+    moveTo() { calls.push("moveTo"); },
+    lineTo() { calls.push("lineTo"); },
+    quadraticCurveTo() { calls.push("quad"); },
+    bezierCurveTo() { calls.push("bezier"); },
+    ellipse() { calls.push("ellipse"); },
+    arcTo() { calls.push("arcTo"); },
+    closePath() { calls.push("close"); },
+    clip() { calls.push("clip"); },
+  };
+  for (const { id } of TANK_SHAPES) {
+    calls.length = 0;
+    clipTankShape(ctx, 120, 120, id, 5);
+    assert.ok(calls.includes("beginPath"), `${id} starts a path`);
+    assert.ok(calls.includes("clip"), `${id} clips the path`);
+  }
+});
+
+test("stacks remaining quota from every pool into one shared tank", () => {
+  const tank = combinedTank([
+    { id: "cursor-models", name: "Cursor 模型池", remaining: 50, capacityCents: 10_000 },
+    { id: "cursor-api", name: "Cursor 三方模型池", remaining: 25, capacityCents: 4_000 },
+    { id: "codex-combined", source: "codex", remaining: 10, weeklyOnlyRemaining: 40, capacityCents: 20_000 },
+  ]);
+  assert.equal(tank.id, "usage-combined");
+  assert.equal(tank.capacityCents, 34_000);
+  assert.equal(tank.layers.length, 4);
+  assert.equal(tank.layers[0].tone, "cursor-models");
+  assert.equal(tank.layers[0].remainingCents, 5_000);
+  assert.equal(tank.layers[1].tone, "cursor-api");
+  assert.equal(tank.layers[1].remainingCents, 1_000);
+  assert.equal(tank.layers[2].tone, "codex-weekly");
+  assert.equal(tank.layers[2].remainingCents, 8_000);
+  assert.equal(tank.layers[3].tone, "codex-immediate");
+  assert.equal(tank.layers[3].remainingCents, 2_000);
+  assert.equal(tank.remainingCents, 16_000);
+  assert.ok(Math.abs(tank.remaining - 16_000 / 34_000 * 100) < 1e-10);
+  assert.ok(tank.layers[3].level > tank.layers[2].level);
 });
 
 test("tank volume is proportional to comparable quota capacity", () => {

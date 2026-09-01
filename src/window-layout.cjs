@@ -5,6 +5,8 @@ const ORB_WIDTH = 432;
 const ORB_HEIGHT = 260;
 const POOL_ORB_WIDTH = 760;
 const POOL_ORB_HEIGHT = 400;
+const COMBINED_POOL_WIDTH = 448;
+const COMBINED_POOL_HEIGHT = 560;
 
 function physicalLongEdge(display) {
   const width = Number(display?.size?.width) || 0;
@@ -37,8 +39,9 @@ function cappedScale(baseHeight, display) {
 function windowMetrics(settings = {}, display = {}) {
   if (settings.orbMode) {
     const poolMode = settings.orbDisplayMode === "pool";
-    const baseWidth = poolMode ? POOL_ORB_WIDTH : ORB_WIDTH;
-    const baseHeight = poolMode ? POOL_ORB_HEIGHT : ORB_HEIGHT;
+    const combined = poolMode && Boolean(settings.orbPoolCombined);
+    const baseWidth = combined ? COMBINED_POOL_WIDTH : poolMode ? POOL_ORB_WIDTH : ORB_WIDTH;
+    const baseHeight = combined ? COMBINED_POOL_HEIGHT : poolMode ? POOL_ORB_HEIGHT : ORB_HEIGHT;
     const zoomFactor = cappedScale(baseHeight, display);
     return {
       width: Math.round(baseWidth * zoomFactor),

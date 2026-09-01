@@ -41,6 +41,8 @@ let settings = {
   orbMode: false,
   orbPool: "cursor-models",
   orbDisplayMode: "quota",
+  orbPoolShape: "sphere",
+  orbPoolCombined: false,
   intervalMs: 30_000,
   activeTab: "overview",
   modelRange: "month1",
@@ -305,6 +307,14 @@ function selectedQuotaPool(pools) {
     || pools[0];
 }
 
+function currentTankShape() {
+  return window.LiquidPool.normalizeTankShape(settings.orbPoolShape);
+}
+
+function poolViewCombined() {
+  return settings.orbDisplayMode === "pool" && Boolean(settings.orbPoolCombined);
+}
+
 function liquidCapacityText(pool) {
   if (!pool?.capacityCents) return "容量待估算";
   return `${pool.capacityEstimated ? "估算容量 " : "容量 "}${formatUsd(pool.capacityCents)}`;
@@ -361,21 +371,34 @@ function drawLiquidCanvas(canvas, config, levels, time) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, rect.width, rect.height);
   ctx.save();
-  ctx.beginPath();
-  ctx.ellipse(rect.width / 2, rect.height / 2, rect.width / 2 - 1.5, rect.height / 2 - 1.5, 0, 0, Math.PI * 2);
-  ctx.clip();
-  if (config.source === "codex") {
-    liquidFill(ctx, rect.width, rect.height, levels.weeklyLevel, time, {
-      top: "rgba(122, 137, 255, 0.92)", bottom: "rgba(58, 75, 176, 0.96)", phase: 1.8, amplitude: 0.75,
+  window.LiquidPool.clipTankShape(ctx, rect.width, rect.height, currentTankShape(), 5);
+  if (Array.isArray(config.layers) && config.layers.length) {
+    const animated = levels.layers || {};
+    for (let index = config.layers.length - 1; index >= 0; index -= 1) {
+      const layer = config.layers[index];
+      const level = animated[layer.id] ?? layer.level;
+      if (!(level > 0.01)) continue;
+      liquidFill(ctx, rect.width, rect.height, level, time, {
+        top: layer.top, bottom: layer.bottom, phase: layer.phase, amplitude: layer.amplitude,
+      });
+    }
+  } else {
+    if (config.source === "codex") {
+      liquidFill(ctx, rect.width, rect.height, levels.weeklyLevel, time, {
+        top: "rgba(122, 137, 255, 0.92)", bottom: "rgba(58, 75, 176, 0.96)", phase: 1.8, amplitude: 0.75,
+      });
+    }
+    liquidFill(ctx, rect.width, rect.height, levels.level, time, {
+      top: "rgba(76, 226, 186, 0.94)", bottom: "rgba(22, 126, 132, 0.98)", phase: 0, amplitude: 1.05,
     });
   }
-  liquidFill(ctx, rect.width, rect.height, levels.level, time, {
-    top: "rgba(76, 226, 186, 0.94)", bottom: "rgba(22, 126, 132, 0.98)", phase: 0, amplitude: 1.05,
-  });
-  const levelY = rect.height - 3 - (rect.height - 6) * window.LiquidPool.clamp(levels.level) / 100;
+  const surfaceLevel = Array.isArray(config.layers) && config.layers.length
+    ? (levels.layers?.[config.layers[config.layers.length - 1].id] ?? config.remaining ?? levels.level)
+    : levels.level;
+  const levelY = rect.height - 3 - (rect.height - 6) * window.LiquidPool.clamp(surfaceLevel) / 100;
   for (const particle of liquidState.particles) {
     ctx.globalAlpha = Math.max(0, particle.life);
-    ctx.fillStyle = config.source === "codex" && particle.weekly ? "#8b9aff" : "#7cf2ce";
+    ctx.fillStyle = particle.weekly ? "#8b9aff" : "#7cf2ce";
     ctx.beginPath();
     ctx.arc(particle.x, levelY + particle.y, particle.radius, 0, Math.PI * 2);
     ctx.fill();
@@ -406,6 +429,13 @@ function stepLiquid(time) {
     if (!levels) continue;
     levels.level += ((config.remaining || 0) - levels.level) * Math.min(1, dt * 6.5);
     levels.weeklyLevel += ((config.weeklyRemaining || config.remaining || 0) - levels.weeklyLevel) * Math.min(1, dt * 6.5);
+    if (Array.isArray(config.layers)) {
+      levels.layers = levels.layers || {};
+      for (const layer of config.layers) {
+        const current = Number(levels.layers[layer.id]) || 0;
+        levels.layers[layer.id] = current + ((layer.level || 0) - current) * Math.min(1, dt * 6.5);
+      }
+    }
   }
   if (!reducedMotion) {
     const nextVelocity = liquidState.velocity.slice();
@@ -440,8 +470,10 @@ function ensureLiquidAnimation(configs) {
   liquidState.configs = Array.isArray(configs) ? configs : [configs].filter(Boolean);
   for (const config of liquidState.configs) {
     if (!liquidState.levels.has(config.id)) {
-      liquidState.levels.set(config.id, { level: 0, weeklyLevel: 0 });
+      liquidState.levels.set(config.id, { level: 0, weeklyLevel: 0, layers: {} });
     }
+    const levels = liquidState.levels.get(config.id);
+    if (Array.isArray(config.layers) && !levels.layers) levels.layers = {};
   }
   if (!liquidState.raf) {
     liquidState.lastFrame = 0;
@@ -450,10 +482,12 @@ function ensureLiquidAnimation(configs) {
 }
 
 function splashLiquid(strength, direction = 0) {
+  const tank = document.querySelector(".usage-pool-tank");
+  const width = tank?.getBoundingClientRect().width || 112;
   const amount = Math.min(6, Math.max(2, Math.round(strength * 3)));
   for (let index = 0; index < amount; index += 1) {
     liquidState.particles.push({
-      x: 56 + direction * 25 + (Math.random() - 0.5) * 20,
+      x: width / 2 + direction * width * 0.18 + (Math.random() - 0.5) * width * 0.16,
       y: -1,
       vx: direction * 12 + (Math.random() - 0.5) * 24,
       vy: -18 - Math.random() * 25 * strength,
@@ -466,7 +500,9 @@ function splashLiquid(strength, direction = 0) {
 
 function triggerLiquidRefresh(effect) {
   if (!(Number(effect?.amountCents) > 0)) return;
-  const card = [...document.querySelectorAll("[data-usage-pool]")].find((element) => element.dataset.usagePool === effect?.id);
+  const cards = [...document.querySelectorAll("[data-usage-pool]")];
+  const card = cards.find((element) => element.dataset.usagePool === effect?.id)
+    || (poolViewCombined() ? cards.find((element) => element.dataset.usagePool === "usage-combined") : null);
   const damage = card?.querySelector(".orb-damage");
   const drain = card?.querySelector(".orb-drain");
   if (!damage || !drain || !effect) return;
@@ -555,46 +591,98 @@ function renderOrbResets(d) {
     : `<div class="orb-reset-empty">正在同步全部额度重置时间…</div>`;
 }
 
+function renderOrbShapeSwitch() {
+  const root = $("orbShapeSwitch");
+  if (!root) return;
+  const shape = currentTankShape();
+  if (root.dataset.ready !== "1") {
+    root.dataset.ready = "1";
+    root.innerHTML = window.LiquidPool.TANK_SHAPES.map((item) => (
+      `<button type="button" data-orb-shape="${escapeHtml(item.id)}" title="${escapeHtml(item.label)}" aria-label="${escapeHtml(item.label)}"><i></i></button>`
+    )).join("");
+  }
+  root.querySelectorAll("[data-orb-shape]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.orbShape === shape);
+  });
+}
+
 function renderUsagePoolGallery(pools) {
   const gallery = $("orbPoolGallery");
-  const signature = JSON.stringify(pools.map((pool) => [
-    pool.id, pool.remaining, pool.shortRemaining, pool.weeklyRemaining, pool.weeklyOnlyRemaining,
-    pool.capacityCents, pool.shortCapacityCents, pool.sizeScale, settings.privacyMode,
-  ]));
+  const shape = currentTankShape();
+  const combined = poolViewCombined();
+  const tank = combined ? window.LiquidPool.combinedTank(pools) : null;
+  const signature = JSON.stringify({
+    combined,
+    shape,
+    privacy: settings.privacyMode,
+    pools: (combined ? [tank] : pools).map((pool) => [
+      pool.id, pool.remaining, pool.shortRemaining, pool.weeklyRemaining, pool.weeklyOnlyRemaining,
+      pool.capacityCents, pool.shortCapacityCents, pool.sizeScale,
+      pool.layers?.map((layer) => [layer.id, layer.level, layer.remainingCents]),
+    ]),
+  });
   if (gallery.dataset.signature !== signature) {
     gallery.dataset.signature = signature;
-    gallery.innerHTML = pools.map((pool) => {
-      const displayedRemaining = pool.source === "codex" ? pool.shortRemaining : pool.remaining;
-      const pct = pool.precision === 2 ? formatCursorPct(displayedRemaining) : formatPct(displayedRemaining);
-      const scale = Number(pool.sizeScale) > 0 ? Number(pool.sizeScale) : 1;
-      const codexLegend = pool.source === "codex"
-        ? `<div class="usage-pool-legend"><span><i class="immediate"></i>5 小时可用 ${escapeHtml(formatCursorPct(pool.shortRemaining))}</span><span><i class="weekly"></i>仅周池可用 ${escapeHtml(formatPct(pool.weeklyOnlyRemaining))}</span></div>`
-        : "";
-      const capacity = pool.source === "codex"
-        ? `7天 ${formatUsd(pool.capacityCents)} · 5小时 ${formatUsd(pool.shortCapacityCents)}`
-        : liquidCapacityText(pool);
-      return `<article class="usage-pool-card" data-usage-pool="${escapeHtml(pool.id)}">
-        <div class="usage-pool-slot">
-          <div class="usage-pool-tank${pool.source === "codex" ? " codex" : ""}" data-tank-scale="${scale.toFixed(4)}" role="meter" aria-label="${escapeHtml(pool.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(displayedRemaining).toFixed(2)}">
-            <canvas class="usage-liquid" data-pool-id="${escapeHtml(pool.id)}" aria-hidden="true"></canvas>
-            <i class="orb-drain" aria-hidden="true"></i>
-            <output class="orb-damage" aria-live="polite"></output>
-          </div>
-        </div>
-        <div class="usage-pool-info">
-          <b>${escapeHtml(pool.name)}</b>
-          <strong>${escapeHtml(pct)}<small>${pool.source === "codex" ? " 5小时可用" : " 可用"}</small></strong>
-          <span>${escapeHtml(capacity)}</span>
-          ${codexLegend}
-        </div>
-      </article>`;
-    }).join("");
-    // CSP style-src 'self' strips inline style="--tank-size", so scale via CSSOM + data-*.
-    gallery.querySelectorAll(".usage-pool-tank").forEach((tank) => {
-      const scale = Number(tank.dataset.tankScale);
-      if (scale > 0) tank.style.setProperty("--tank-scale", String(scale));
+    gallery.innerHTML = combined
+      ? renderCombinedPoolCard(tank, shape)
+      : pools.map((pool) => renderUsagePoolCard(pool, shape)).join("");
+    gallery.querySelectorAll(".usage-pool-tank").forEach((element) => {
+      const scale = Number(element.dataset.tankScale);
+      if (scale > 0) element.style.setProperty("--tank-scale", String(scale));
     });
   }
+}
+
+function renderUsagePoolCard(pool, shape) {
+  const displayedRemaining = pool.source === "codex" ? pool.shortRemaining : pool.remaining;
+  const pct = pool.precision === 2 ? formatCursorPct(displayedRemaining) : formatPct(displayedRemaining);
+  const scale = Number(pool.sizeScale) > 0 ? Number(pool.sizeScale) : 1;
+  const codexLegend = pool.source === "codex"
+    ? `<div class="usage-pool-legend"><span><i class="immediate"></i>5 小时可用 ${escapeHtml(formatCursorPct(pool.shortRemaining))}</span><span><i class="weekly"></i>仅周池可用 ${escapeHtml(formatPct(pool.weeklyOnlyRemaining))}</span></div>`
+    : "";
+  const capacity = pool.source === "codex"
+    ? `7天 ${formatUsd(pool.capacityCents)} · 5小时 ${formatUsd(pool.shortCapacityCents)}`
+    : liquidCapacityText(pool);
+  return `<article class="usage-pool-card" data-usage-pool="${escapeHtml(pool.id)}">
+    <div class="usage-pool-slot">
+      <div class="usage-pool-tank${pool.source === "codex" ? " codex" : ""}" data-tank-shape="${escapeHtml(shape)}" data-tank-scale="${scale.toFixed(4)}" role="meter" aria-label="${escapeHtml(pool.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(displayedRemaining).toFixed(2)}">
+        <span class="usage-pool-glass" aria-hidden="true"></span>
+        <canvas class="usage-liquid" data-pool-id="${escapeHtml(pool.id)}" aria-hidden="true"></canvas>
+        <i class="orb-drain" aria-hidden="true"></i>
+        <output class="orb-damage" aria-live="polite"></output>
+      </div>
+    </div>
+    <div class="usage-pool-info">
+      <b>${escapeHtml(pool.name)}</b>
+      <strong>${escapeHtml(pct)}<small>${pool.source === "codex" ? " 5小时可用" : " 可用"}</small></strong>
+      <span>${escapeHtml(capacity)}</span>
+      ${codexLegend}
+    </div>
+  </article>`;
+}
+
+function renderCombinedPoolCard(tank, shape) {
+  const pct = formatCursorPct(tank.remaining);
+  const legend = `<div class="usage-pool-legend combined-legend">${tank.layers.map((layer) => {
+    const amount = settings.privacyMode ? "••••" : formatUsd(layer.remainingCents);
+    return `<span><i data-tone="${escapeHtml(layer.tone)}"></i>${escapeHtml(layer.name)} ${escapeHtml(formatPct(layer.share))} · ${escapeHtml(amount)}</span>`;
+  }).join("")}</div>`;
+  return `<article class="usage-pool-card combined" data-usage-pool="${escapeHtml(tank.id)}">
+    <div class="usage-pool-slot">
+      <div class="usage-pool-tank" data-tank-shape="${escapeHtml(shape)}" data-tank-scale="1" role="meter" aria-label="${escapeHtml(tank.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(tank.remaining).toFixed(2)}">
+        <span class="usage-pool-glass" aria-hidden="true"></span>
+        <canvas class="usage-liquid" data-pool-id="${escapeHtml(tank.id)}" aria-hidden="true"></canvas>
+        <i class="orb-drain" aria-hidden="true"></i>
+        <output class="orb-damage" aria-live="polite"></output>
+      </div>
+    </div>
+    <div class="usage-pool-info">
+      <b>${escapeHtml(tank.name)}</b>
+      <strong>${escapeHtml(pct)}<small> 合计可用</small></strong>
+      <span>${escapeHtml(liquidCapacityText(tank))}</span>
+      ${legend}
+    </div>
+  </article>`;
 }
 
 function renderOrb(d) {
@@ -603,6 +691,13 @@ function renderOrb(d) {
   const selected = selectedQuotaPool(pools);
   const ring = $("orbRing");
   renderOrbResets(d);
+  renderOrbShapeSwitch();
+  document.body.dataset.tankShape = currentTankShape();
+  const combinedBtn = $("orbCombinedBtn");
+  if (combinedBtn) {
+    combinedBtn.classList.toggle("active", poolViewCombined());
+    combinedBtn.setAttribute("aria-pressed", poolViewCombined() ? "true" : "false");
+  }
   document.querySelectorAll("[data-orb-display]").forEach((button) => {
     button.classList.toggle("active", button.dataset.orbDisplay === displayMode);
   });
@@ -656,8 +751,18 @@ function renderOrb(d) {
         : `水位 ${pct(selected.remaining)} · ${liquidCapacityText(selected)}`
       : `剩余 ${pct(selected.remaining)} · ${selected.detail}`;
   if (displayMode === "pool") {
-    ensureLiquidAnimation(pools);
-    for (const effect of pendingLiquidEffects.values()) triggerLiquidRefresh(effect);
+    const liquidConfigs = poolViewCombined() ? [window.LiquidPool.combinedTank(pools)] : pools;
+    ensureLiquidAnimation(liquidConfigs);
+    if (poolViewCombined()) {
+      const merged = [...pendingLiquidEffects.values()].reduce((total, effect) => ({
+        id: "usage-combined",
+        amountCents: total.amountCents + effect.amountCents,
+        levelDelta: total.levelDelta + effect.levelDelta,
+      }), { amountCents: 0, levelDelta: 0 });
+      if (merged.amountCents > 0) triggerLiquidRefresh(merged);
+    } else {
+      for (const effect of pendingLiquidEffects.values()) triggerLiquidRefresh(effect);
+    }
     pendingLiquidEffects.clear();
   }
 }
@@ -1467,6 +1572,7 @@ function render() {
   document.body.classList.toggle("fullscreen", Boolean(windowState.fullscreen));
   document.body.classList.toggle("orb-mode", orbMode);
   document.body.classList.toggle("orb-pool-layout", orbMode && settings.orbDisplayMode === "pool");
+  document.body.classList.toggle("orb-pool-combined", orbMode && poolViewCombined());
   document.body.classList.toggle("privacy", Boolean(settings.privacyMode));
   document.body.classList.toggle("smart-docked", Boolean(windowState.smartDocked));
   $("compactBtn").classList.toggle("active", Boolean(settings.compact) && !windowState.fullscreen && !orbMode);
@@ -1788,6 +1894,26 @@ document.querySelectorAll("[data-orb-display]").forEach((button) => {
     renderOrb(snapshot.data);
   });
 });
+const orbShapeSwitch = $("orbShapeSwitch");
+if (orbShapeSwitch) {
+  orbShapeSwitch.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-orb-shape]");
+    if (!button) return;
+    const shape = window.LiquidPool.normalizeTankShape(button.dataset.orbShape);
+    if (shape === currentTankShape()) return;
+    settings.orbPoolShape = shape;
+    window.widget.saveSettings({ orbPoolShape: shape });
+    renderOrb(snapshot.data);
+  });
+}
+const orbCombinedBtn = $("orbCombinedBtn");
+if (orbCombinedBtn) {
+  orbCombinedBtn.addEventListener("click", () => {
+    settings.orbPoolCombined = !settings.orbPoolCombined;
+    window.widget.saveSettings({ orbPoolCombined: settings.orbPoolCombined });
+    render();
+  });
+}
 $("orbRestoreBtn").addEventListener("click", () => window.widget.saveSettings({ orbMode: false }));
 $("orbRefreshBtn").addEventListener("click", () => window.widget.refresh());
 $("orbHideBtn").addEventListener("click", () => window.widget.hide());

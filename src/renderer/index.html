@@ -5,7 +5,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI 用量</title>
-    <link rel="stylesheet" href="styles.css?v=18" />
+    <link rel="stylesheet" href="styles.css?v=20" />
   </head>
   <body>
     <div class="shell">
@@ -269,6 +269,10 @@
           <button type="button" data-orb-display="speed">速度</button>
           <button type="button" data-orb-display="pool">用量池</button>
         </div>
+        <div class="orb-pool-tools">
+          <div id="orbShapeSwitch" class="orb-shape-switch" aria-label="容器形状"></div>
+          <button type="button" id="orbCombinedBtn" class="orb-combined-btn" aria-pressed="false" title="把各用量合并进一个大容器">总池</button>
+        </div>
         <button type="button" id="orbHideBtn" class="orb-top-btn" title="隐藏到状态栏" aria-label="隐藏到状态栏">×</button>
       </div>
       <div class="orb-main">
@@ -312,8 +316,8 @@
       <div id="chartTooltipRows" class="chart-tooltip-rows"></div>
       <div id="chartTooltipMeta" class="chart-tooltip-meta"></div>
     </div>
-    <script src="preview.js?v=8"></script>
-    <script src="liquid-pool.js?v=4"></script>
-    <script src="app.js?v=23"></script>
+    <script src="preview.js?v=10"></script>
+    <script src="liquid-pool.js?v=6"></script>
+    <script src="app.js?v=25"></script>
   </body>
 </html>
