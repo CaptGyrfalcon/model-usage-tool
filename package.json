@@ -19,6 +19,14 @@
   "os": [
     "win32"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CaptGyrfalcon/model-usage-tool.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CaptGyrfalcon/model-usage-tool/issues"
+  },
+  "homepage": "https://github.com/CaptGyrfalcon/model-usage-tool#readme",
   "main": "src/main.cjs",
   "scripts": {
     "start": "electron .",

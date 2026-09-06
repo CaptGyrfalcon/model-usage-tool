@@ -3,6 +3,8 @@
 > **非官方 / Unofficial.** 本项目与 Cursor、Anysphere、OpenAI 均无隶属关系，也不是它们的官方产品。程序会读取本机 Cursor 登录态并调用未公开文档的账单接口，同时解析本机 Codex 会话文件。接口随时可能失效；使用本工具可能违反相关服务条款，账号存在被限制的风险。请自行判断后再使用。
 >
 > MIT licensed Windows widget. Not affiliated with Cursor or OpenAI. It reads local session tokens and undocumented billing APIs. Use at your own risk.
+>
+> **AI 辅助开发。** 本项目绝大部分代码由 AI agent 生成或辅助完成，并经人工审阅与调整。
 
 一个常驻 Windows 通知区域的 Cursor / Codex 用量小工具。窗口不会占用任务栏位置，点右上角 `×` 只会隐藏；单击通知区域图标可再次显示，右键图标可完全退出。
 
