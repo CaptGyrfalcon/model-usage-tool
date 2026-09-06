@@ -1,5 +1,7 @@
 const { parentPort } = require("node:worker_threads");
 const { fetchSnapshot, getModelUsage, getQuotaTimeline, queryUsageEvents, getPricingCatalog } = require("./lib.cjs");
+const { getHistory } = require("./history.cjs");
+const { exportUsageEvents } = require("./event-export.cjs");
 
 if (!parentPort) throw new Error("data-worker 必须由 worker_threads 启动");
 
@@ -16,6 +18,8 @@ parentPort.on("message", async ({ id, task, payload } = {}) => {
       data = queryUsageEvents(payload || {});
     } else if (task === "get-pricing-catalog") {
       data = getPricingCatalog(payload || {});
+    } else if (task === "export-usage-events") {
+      data = exportUsageEvents(getHistory(), payload);
     } else if (task === "health") {
       data = { ready: true };
     } else {

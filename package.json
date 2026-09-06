@@ -31,6 +31,7 @@
   "scripts": {
     "start": "electron .",
     "widget": "electron .",
+    "preview": "node scripts/preview.cjs",
     "test": "node --test test/*.test.cjs",
     "postinstall": "node scripts/ensure-electron.cjs"
   },

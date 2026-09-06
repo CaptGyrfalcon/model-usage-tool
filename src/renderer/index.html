@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI 用量</title>
     <link rel="stylesheet" href="styles.css?v=20" />
+    <link rel="stylesheet" href="orb.css" />
   </head>
   <body>
     <div class="shell">
@@ -28,7 +29,7 @@
           <button type="button" id="fullscreenBtn" class="icon-btn fullscreen-btn" title="全屏仪表盘（F11）" aria-label="切换全屏仪表盘">⛶</button>
           <button type="button" id="orbBtn" class="icon-btn orb-btn" title="极简额度球" aria-label="切换极简额度球">◉</button>
           <button type="button" id="compactBtn" class="icon-btn" title="迷你模式" aria-label="切换迷你模式">▱</button>
-          <button type="button" id="smartBtn" class="icon-btn" title="智能功能" aria-label="打开智能功能设置">⚙</button>
+          <button type="button" id="smartBtn" class="icon-btn" title="设置" aria-label="打开设置" aria-expanded="false" aria-controls="smartPanel">⚙</button>
           <button type="button" id="closeBtn" class="icon-btn close" title="隐藏到状态栏" aria-label="隐藏到状态栏">×</button>
         </div>
       </header>
@@ -37,6 +38,7 @@
         <span class="live-dot" id="liveDot"></span>
         <span id="statusText">正在连接 Cursor 用量接口…</span>
         <span class="sync-countdown" id="syncCountdown"></span>
+        <button type="button" id="healthBtn" class="sync-detail-btn" title="查看数据来源与同步状态" aria-label="查看同步详情">详情</button>
       </div>
 
       <nav class="tabs" aria-label="数据视图">
@@ -49,7 +51,10 @@
       </nav>
 
       <main class="content">
+        <div id="bootstrapState" class="bootstrap-state" role="status" hidden></div>
         <section class="view active" id="overviewView">
+          <div class="overview-heading"><div><span class="eyebrow">USAGE OVERVIEW</span><h2>用量概览</h2></div><span class="local-badge">本地历史 · 持续保留</span></div>
+          <div id="quotaGlance" class="quota-glance" aria-label="各池剩余额度"></div>
           <div class="hero-grid" id="heroGrid"></div>
           <div class="quota-stack">
             <article class="quota-card cursor-card" id="cursorPool"></article>
@@ -99,6 +104,15 @@
             <button type="button" data-precision="exact">精确</button>
           </div>
           <div class="precision-note" id="precisionNote"></div>
+          <div class="segmented model-view-switch" aria-label="模型展示方式">
+            <button type="button" data-model-view="list" class="active" aria-pressed="true">文字明细</button>
+            <button type="button" data-model-view="donut" aria-pressed="false">环状图</button>
+          </div>
+          <div id="modelDonutPanel" class="model-donut-panel" hidden>
+            <label class="model-range-control"><span>占比指标</span><select id="modelMetricSelect" aria-label="环状图占比指标"><option value="total">总 Token（含缓存）</option><option value="effective">有效 Token</option><option value="costCents">美元等效</option></select></label>
+            <div id="modelDonutContent" class="model-donut-content"></div>
+            <p id="modelDonutNote" class="precision-note"></p>
+          </div>
           <div class="model-list" id="modelList"></div>
         </section>
 
@@ -162,10 +176,12 @@
             <div class="chart-wrap" id="levelChart"></div>
             <div class="chart-legend">
               <span class="legend-items"><i class="level-swatch"></i><b>剩余额度</b></span>
+              <span class="legend-items" id="uniformLegend"><i class="uniform-swatch"></i><b>匀速使用</b></span>
               <span id="levelPeak">—</span>
             </div>
           </article>
           <div class="trend-footnote">曲线来自每次刷新写入的额度采样；当前点会叠加上一次同步结果。</div>
+          <div class="trend-footnote" id="uniformNote"></div>
         </section>
 
         <section class="view" id="eventsView">
@@ -186,6 +202,7 @@
             <button type="button" id="eventExportCsv" class="text-btn">导出 CSV</button>
             <button type="button" id="eventExportJson" class="text-btn">导出 JSON</button>
           </div>
+          <p class="export-note">导出当前来源与搜索结果的全部历史，不受分页限制。</p>
           <div class="event-list" id="eventList"></div>
           <div class="pager" id="eventPager"></div>
         </section>
@@ -229,11 +246,20 @@
         </label>
         <button type="button" id="dashBtn" class="dashboard-btn">账单 ↗</button>
       </footer>
-      <aside id="smartPanel" class="smart-panel" hidden aria-label="智能功能设置">
+      <aside id="smartPanel" class="smart-panel" hidden role="dialog" aria-modal="true" aria-label="应用设置" tabindex="-1">
         <div class="smart-panel-head">
-          <div><b>智能功能</b><span>按你的工作状态自动调整挂件</span></div>
-          <button type="button" id="smartCloseBtn" class="icon-btn close" aria-label="关闭智能功能设置">×</button>
+          <div><b>应用设置</b><span>更安静地关注用量，更清楚地掌握状态</span></div>
+          <button type="button" id="smartCloseBtn" class="icon-btn close" aria-label="关闭设置">×</button>
         </div>
+        <div id="sourceHealth" class="source-health"></div>
+        <label class="smart-setting-row">
+          <span><b>动态效果</b><small>减少动态效果会关闭水波与装饰动画</small></span>
+          <select id="motionSelect" aria-label="动态效果"><option value="system">跟随系统</option><option value="reduce">减少动态效果</option></select>
+        </label>
+        <label class="smart-setting-row">
+          <span><b>开机启动</b><small>登录 Windows 后自动启动挂件</small></span>
+          <input id="startupToggle" type="checkbox" role="switch" />
+        </label>
         <!-- WIP: 智能贴边有严重 bug，入口已关闭。 -->
         <label class="smart-setting-row" hidden>
           <span><b>智能贴边</b><small>鼠标离开后收进最近的屏幕边缘</small></span>
@@ -307,10 +333,12 @@
         </aside>
       </div>
       <div class="orb-actions">
+        <span class="orb-footer-caption"><i aria-hidden="true"></i><span class="orb-footer-default">AI 用量</span><span class="orb-footer-pool">容器大小表示容量 · 水位表示可用</span></span>
         <button type="button" id="orbRestoreBtn" class="orb-restore-btn" title="恢复完整窗口">恢复窗口</button>
         <button type="button" id="orbRefreshBtn" class="orb-refresh-btn" title="立即刷新" aria-label="立即刷新">↻</button>
       </div>
     </section>
+    <div id="actionToast" class="action-toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
     <div id="chartTooltip" class="chart-tooltip" role="tooltip" aria-hidden="true">
       <div class="chart-tooltip-heading">
         <span id="chartTooltipLabel">—</span>
@@ -319,8 +347,11 @@
       <div id="chartTooltipRows" class="chart-tooltip-rows"></div>
       <div id="chartTooltipMeta" class="chart-tooltip-meta"></div>
     </div>
+    <script src="codex-monthly.js"></script>
     <script src="preview.js?v=10"></script>
     <script src="liquid-pool.js?v=6"></script>
+    <script src="motion.js"></script>
+    <script src="usage-charts.js"></script>
     <script src="app.js?v=25"></script>
   </body>
 </html>

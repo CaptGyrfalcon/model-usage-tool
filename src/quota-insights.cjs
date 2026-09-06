@@ -79,7 +79,7 @@ function buildQuotaInsights(data, now = Date.now()) {
       }, now),
     });
   });
-  if (data.codex && !insights.some((item) => item.id === "codex-300")) {
+  if (data.codex && data.codex.quota?.shortLimit !== "absent" && !insights.some((item) => item.id === "codex-300")) {
     insights.push({
       id: "codex-300",
       label: "Codex 5 小时",

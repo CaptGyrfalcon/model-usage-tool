@@ -51,7 +51,10 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     { label: "grok-4.6 · 标准", name: "grok-4.6", fast: false, fastKnown: true, count: 35, input: 7_700_000, cacheRead: 23_900_000, cacheWrite: 0, output: 1_400_000, reasoning: 310_000, effective: 9_100_000, total: 33_000_000, costCents: 2_150 },
     { label: "gpt-5.6-terra · 速度未知", name: "gpt-5.6-terra", fast: false, fastKnown: false, count: 18, input: 4_050_000, cacheRead: 12_200_000, cacheWrite: 0, output: 750_000, reasoning: 180_000, effective: 4_800_000, total: 17_000_000, costCents: 990 },
   ];
-  const source = (label) => ({ label, periodLabel: "最近 30 天", eventCount: 95, costAvailable: true, costCoveragePercent: 93.4, modelBreakdowns: { coarse: modelRows, speed: modelRows, exact: modelRows }, trends });
+  const source = (label) => {
+    const rows = modelRows.filter((row) => label === "全部" || (label === "Cursor") === row.name.startsWith("grok"));
+    return { label, periodLabel: "最近 30 天", eventCount: rows.reduce((sum, row) => sum + row.count, 0), costAvailable: true, costCoveragePercent: 93.4, modelBreakdowns: { coarse: rows, speed: rows, exact: rows }, trends };
+  };
   const modelRangeLabels = { all: "全部历史", months6: "近 6 个月", months3: "近 3 个月", month1: "近 1 个月", days14: "近 14 天", days7: "近 7 天", day1: "近 1 天", hours12: "近 12 小时", hours6: "近 6 小时", hour1: "近 1 小时" };
   const previewModelUsage = (key) => ({
     key,
@@ -156,12 +159,19 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     { key: "reset:current", label: "当前 · 8月12日 – 9月11日", startAt: now - 11 * 86_400_000, endAt: now + 19 * 86_400_000, current: true, sampleCount: 24 },
     { key: "reset:prev", label: "7月13日 – 8月12日", startAt: now - 41 * 86_400_000, endAt: now - 11 * 86_400_000, current: false, sampleCount: 20 },
   ];
+  for (const cycle of previewCycles) {
+    cycle.reference = { startAt: cycle.startAt, endAt: cycle.endAt, estimated: false };
+    const stamp = (at) => new Date(at).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+    cycle.label = `${cycle.current ? "当前 · " : ""}${stamp(cycle.startAt)} – ${stamp(cycle.endAt)}`;
+    cycle.startRemaining = 92;
+    cycle.endRemaining = cycle.current ? 39.1 : 33.1;
+  }
   const previewSeries = (cycleKey) => {
     const current = cycleKey !== "reset:prev";
     const start = current ? now - 11 * 86_400_000 : now - 41 * 86_400_000;
     return Array.from({ length: current ? 24 : 20 }, (_unused, index) => {
       const used = 8 + index * (current ? 2.3 : 3.1);
-      return { at: start + index * 12 * 60 * 60_000, usedPercent: used, remainingPercent: Math.max(0, 100 - used) };
+      return { at: start + index * (current ? 11 * 86_400_000 / 23 : 30 * 86_400_000 / 19), usedPercent: used, remainingPercent: Math.max(0, 100 - used) };
     });
   };
   const previewTimeline = (pool = "cursor-models", cycleKey = "reset:current") => ({
@@ -177,6 +187,22 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     series: previewSeries(cycleKey),
   });
   data.quotaTimeline = previewTimeline();
+  const monthlyWindows = [data.codex.quota.primary, data.codex.quota.secondary];
+  const monthlySamples = Array.from({ length: 6 }, (_, index) => ({
+    source: "codex", windowMinutes: 10080,
+    resetsAt: monthlyWindows[1].resetsAt - (index + 1) * 7 * 86_400_000,
+    timestamp: monthlyWindows[1].resetsAt - (index + 1) * 7 * 86_400_000 - 60_000,
+    usedPercent: 65 + index * 4,
+  }));
+  if (previewQuery.get("shortLimit") === "absent") {
+    data.codex.quota.primary = null;
+    data.codex.quota.shortLimit = "absent";
+    data.codex.quota.windows = [monthlyWindows[1]];
+  }
+  data.codex.monthlyQuota = window.CodexMonthly.buildCodexMonthly({
+    windows: data.codex.quota.windows || monthlyWindows, shortLimit: data.codex.quota.shortLimit,
+    samples: previewQuery.get("monthlyHistory") === "missing" ? [] : previewQuery.get("monthlyHistory") === "partial" ? monthlySamples.slice(1) : monthlySamples, now,
+  });
   const previewWindowState = { fullscreen: new URLSearchParams(location.search).get("fullscreen") === "1" };
   const listeners = { snapshot: [], settings: [], windowState: [] };
   window.widget = {

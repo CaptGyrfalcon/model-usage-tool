@@ -16,9 +16,9 @@
     return value || null;
   }
 
-  function codexPool(windows, fallbackCapacity = null) {
+  function codexPool(windows, fallbackCapacity = null, monthly = null, shortLimit = "unknown") {
     const listed = (Array.isArray(windows) ? windows : [])
-      .filter(Boolean)
+      .filter((window) => window && !(shortLimit === "absent" && Number(window.windowMinutes) === 300))
       .slice()
       .sort((a, b) => (Number(a.windowMinutes) || Infinity) - (Number(b.windowMinutes) || Infinity));
     if (!listed.length) return null;
@@ -37,7 +37,7 @@
       ? (listed.length === 1 ? shortRemaining : 0)
       : Math.min(shortRemaining * share, weeklyRemaining);
     const weeklyOnlyRemaining = Math.max(0, weeklyRemaining - immediateRemaining);
-    return {
+    const pool = {
       id: "codex-combined",
       source: "codex",
       name: listed.length > 1 ? "Codex 联合池" : `Codex · ${short.name || "额度池"}`,
@@ -46,6 +46,7 @@
       weeklyRemaining,
       weeklyOnlyRemaining,
       shortRemaining,
+      shortLimit: shortLimit === "absent" ? "absent" : listed.some((window) => Number(window.windowMinutes) === 300) ? "present" : "unknown",
       capacityCents: weeklyCapacityCents,
       shortCapacityCents,
       usedCents: Number(long?.quotaEstimate?.usedCents) || null,
@@ -55,6 +56,27 @@
         ? `5 小时可用 ${shortRemaining.toFixed(2)}% · 仅周池可用 ${weeklyOnlyRemaining.toFixed(2)}%`
         : `当前可用 ${shortRemaining.toFixed(2)}%`,
     };
+    if (!(monthly?.capacityCents > 0)) return pool;
+    const capacity = monthly.capacityCents;
+    let level = 0;
+    const layers = [
+      ["codex-immediate", monthly.shortLimit === "absent" ? "本周当前可用" : "5h 当前可用", monthly.immediateCents],
+      ["codex-weekly", monthly.immediateKnown ? "本周待 5h 重置" : "本周待用（5h 待拆分）", Math.max(0, monthly.weeklyRemainingCents - monthly.immediateCents)],
+      ["codex-future", "后续周待重置", monthly.futureCents],
+      ["codex-expired", "过期未用（估算）", monthly.expiredUnusedCents],
+      ["codex-unknown", "历史记录不足", monthly.unknownCents],
+    ].filter(([, , cents]) => cents > 0).map(([tone, name, cents]) => {
+      const share = cents / capacity * 100;
+      level += share;
+      return { ...layerTone(tone), id: tone, tone, name, remainingCents: cents, share, level,
+        unavailable: tone === "codex-expired" || tone === "codex-unknown" };
+    });
+    return { ...pool, name: "Codex 月度池", monthly, layers, capacityCents: capacity,
+      shortLimit: monthly.shortLimit,
+      remaining: monthly.immediateCents / capacity * 100,
+      monthlyRemaining: monthly.remainingCents / capacity * 100,
+      weeklyCapacityCents: monthly.weeklyCapacityCents,
+      detail: `自然月 · ${monthly.cycleCount} 个完整周周期 · 后续 ${monthly.futureResetCount} 次周重置` };
   }
 
   const TANK_SHAPES = [
@@ -171,6 +193,9 @@
   }
 
   const LAYER_TONES = {
+    "codex-expired": { id: "codex-expired", swatch: "#b78aef", top: "rgba(183,138,239,.94)", bottom: "rgba(112,64,174,.96)", phase: 2.2, amplitude: .6 },
+    "codex-unknown": { id: "codex-unknown", swatch: "#8491a5", top: "rgba(132,145,165,.9)", bottom: "rgba(70,82,102,.96)", phase: 2.5, amplitude: .5 },
+    "codex-future": { id: "codex-future", swatch: "#4c75cf", top: "rgba(76,117,207,.93)", bottom: "rgba(38,61,125,.96)", phase: 1.5, amplitude: .65 },
     "cursor-models": {
       id: "cursor-models",
       swatch: "#4ce2ba",
@@ -230,8 +255,15 @@
     };
     for (const pool of listed) {
       if (pool.source === "codex") {
+        if (pool.monthly && Array.isArray(pool.layers)) {
+          for (const layer of pool.layers) {
+            pushLayer(layer.id, `Codex ${layer.name}`, layer.tone, layer.remainingCents);
+            layers[layers.length - 1].unavailable = layer.unavailable;
+          }
+          continue;
+        }
         pushLayer(`${pool.id}-weekly`, "Codex 周池", "codex-weekly", remainingCentsOf(pool, pool.weeklyOnlyRemaining));
-        pushLayer(`${pool.id}-immediate`, "Codex 5 小时", "codex-immediate", remainingCentsOf(pool, pool.remaining));
+        pushLayer(`${pool.id}-immediate`, pool.shortLimit === "absent" ? "Codex 本周可用" : "Codex 5 小时", "codex-immediate", remainingCentsOf(pool, pool.remaining));
         continue;
       }
       const tone = pool.id === "cursor-api" ? "cursor-api" : "cursor-models";
@@ -248,17 +280,21 @@
       ? totalCapacity
       : Math.max(1, layers.reduce((sum, layer) => sum + layer.remainingCents, 0));
     let cumulative = 0;
+    const layerOrder = (layer) => layer.tone === "codex-immediate" ? 0 : layer.unavailable ? 3
+      : layer.tone === "codex-weekly" || layer.tone === "codex-future" ? 2 : 1;
+    layers.sort((a, b) => layerOrder(a) - layerOrder(b));
     const stacked = layers.map((layer) => {
       const share = weightTotal > 0 ? layer.remainingCents / weightTotal * 100 : 0;
       cumulative += share;
       return { ...layer, share, level: cumulative };
     });
-    const remainingCents = stacked.reduce((sum, layer) => sum + layer.remainingCents, 0);
+    const remainingCents = stacked.reduce((sum, layer) => sum + (layer.unavailable ? 0 : layer.remainingCents), 0);
     return {
       id: "usage-combined",
       name: "总用量池",
       source: "combined",
-      remaining: cumulative,
+      remaining: remainingCents / weightTotal * 100,
+      hasMonthly: listed.some((pool) => pool.monthly),
       remainingCents,
       capacityCents: totalCapacity || null,
       capacityEstimated: true,
@@ -294,9 +330,11 @@
 
   function refreshSpend(previous, pool) {
     if (!previous || !pool) return null;
-    const levelDelta = Math.max(remainingDrop(previous, pool, "remaining"), remainingDrop(previous, pool, "weeklyRemaining"));
-    const previousUsed = Number(previous.usedCents);
-    const nextUsed = Number(pool.usedCents);
+    if (pool.monthly && (!previous.monthly || previous.monthly.startAt !== pool.monthly.startAt || previous.monthly.currentEnd !== pool.monthly.currentEnd)) return null;
+    const weeklyScale = pool.monthly ? Number(pool.weeklyCapacityCents) / Number(pool.capacityCents) : 1;
+    const levelDelta = Math.max(remainingDrop(previous, pool, "remaining"), remainingDrop(previous, pool, "weeklyRemaining") * weeklyScale);
+    const previousUsed = previous.usedCents == null ? NaN : Number(previous.usedCents);
+    const nextUsed = pool.usedCents == null ? NaN : Number(pool.usedCents);
     const exactDelta = Number.isFinite(previousUsed) && Number.isFinite(nextUsed)
       ? Math.max(0, nextUsed - previousUsed)
       : null;

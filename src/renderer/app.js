@@ -21,6 +21,16 @@ let chartTooltipFrame = null;
 let chartTooltipVisible = false;
 let chartTooltipPosition = { x: 0, y: 0, targetX: 0, targetY: 0 };
 let smartPanelOpen = false;
+const systemMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+let liquidCanvases = [];
+let previousPanelFocus = null;
+function reducedMotion() { return window.WidgetMotion.reduced(settings.motionPreference, systemMotion.matches); }
+function stopLiquidAnimation() {
+  if (liquidState.raf !== null) cancelAnimationFrame(liquidState.raf);
+  liquidState.raf = null;
+  liquidState.lastFrame = 0;
+  liquidState.lastMotion = null;
+}
 const LIQUID_NODES = 25;
 const liquidState = {
   configs: [],
@@ -47,6 +57,8 @@ let settings = {
   activeTab: "overview",
   modelRange: "month1",
   modelPrecision: "coarse",
+  modelView: "list",
+  modelMetric: "total",
   trendRange: "day",
   trendMetric: "total",
   trendBreakdown: false,
@@ -57,6 +69,8 @@ let settings = {
   pricingSource: "all",
   smartDock: false, // WIP: 智能贴边有严重 bug，入口已关闭。
   privacyMode: false,
+  motionPreference: "system",
+  openAtLogin: false,
   quotaAlerts: false, // WIP: 额度提醒有严重 bug，入口已关闭。
   alertThreshold: 20, // WIP: 提醒阈值有严重 bug，入口已关闭。
 };
@@ -186,13 +200,14 @@ function quotaPools(d) {
   if (!d) return [];
   const pools = [];
   const addPool = (id, name, value, remaining, detail, precision, speedUsage, metadata = {}) => {
+    if (value == null || value === "") return;
     const used = Number(value);
     if (!Number.isFinite(used)) return;
     pools.push({
       id,
       name,
       used: Math.min(100, Math.max(0, used)),
-      remaining: Number.isFinite(Number(remaining)) ? Number(remaining) : Math.max(0, 100 - used),
+      remaining: remaining != null && Number.isFinite(Number(remaining)) ? Number(remaining) : Math.max(0, 100 - used),
       detail,
       precision,
       speedUsage: speedUsage || { normal: 0, fast: 0, unknown: 0, total: 0 },
@@ -215,7 +230,8 @@ function quotaPools(d) {
   }
   const addCodexPool = (quota, fallbackSlot) => {
     if (!quota) return;
-    const used = Number.isFinite(Number(quota.usedPercent)) ? Number(quota.usedPercent) : 100 - Number(quota.percentRemaining);
+    const used = quota.usedPercent != null && Number.isFinite(Number(quota.usedPercent)) ? Number(quota.usedPercent)
+      : quota.percentRemaining != null ? 100 - Number(quota.percentRemaining) : null;
     const minutes = Number(quota.windowMinutes);
     const windowKey = Number.isFinite(minutes) && minutes > 0 ? String(minutes) : quota.slot || fallbackSlot;
     const reset = quota.expired
@@ -244,7 +260,9 @@ function usagePools(d) {
   }
   const codex = window.LiquidPool.codexPool(
     codexQuotaWindows(d?.codex),
-    d?.codex?.quotaEquivalent?.inferredTotalCents
+    d?.codex?.quotaEquivalent?.inferredTotalCents,
+    d?.codex?.monthlyQuota,
+    d?.codex?.quota?.shortLimit
   );
   if (codex) regular.push(codex);
   const scales = window.LiquidPool.sizeScales(regular);
@@ -260,6 +278,7 @@ function codexQuotaWindows(codex) {
     ? codex.quota.windows
     : [codex?.quota?.primary, codex?.quota?.secondary].filter(Boolean);
   return windows
+    .filter((quota) => !(codex?.quota?.shortLimit === "absent" && Number(quota.windowMinutes) === 300))
     .slice()
     .sort((a, b) => (Number(a.windowMinutes) || Number.MAX_SAFE_INTEGER) - (Number(b.windowMinutes) || Number.MAX_SAFE_INTEGER));
 }
@@ -297,6 +316,7 @@ function quotaInsightsForDisplay(d) {
     });
   });
   return [...byId.values()]
+    .filter((insight) => !(d?.codex?.quota?.shortLimit === "absent" && String(insight.id) === "codex-300"))
     .filter((insight) => !insight.pending || !actualCodexIds.has(String(insight.id)))
     .sort((a, b) => {
       const order = { "cursor-models": 0, "cursor-api": 1, cursor: 1, "codex-300": 2, "codex-10080": 3 };
@@ -331,7 +351,7 @@ function liquidPath(ctx, width, height, levelPercent, time, phase, amplitude) {
   for (let index = 0; index < LIQUID_NODES; index += 1) {
     const progress = index / (LIQUID_NODES - 1);
     const x = progress * width;
-    const ambient = Math.sin(progress * Math.PI * 3.2 + time * 0.0028 + phase) * amplitude;
+    const ambient = reducedMotion() ? 0 : Math.sin(progress * Math.PI * 3.2 + time * 0.0028 + phase) * amplitude;
     const y = baseline + liquidState.wave[index] * (0.62 + amplitude * 0.12) + ambient;
     if (!index) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
@@ -411,7 +431,7 @@ function drawLiquidCanvas(canvas, config, levels, time) {
 
 function drawLiquid(time) {
   const configs = new Map(liquidState.configs.map((config) => [config.id, config]));
-  document.querySelectorAll(".usage-liquid").forEach((canvas) => {
+  liquidCanvases.forEach((canvas) => {
     const config = configs.get(canvas.dataset.poolId);
     drawLiquidCanvas(canvas, config, liquidState.levels.get(config?.id), time);
   });
@@ -423,24 +443,24 @@ function maxLiquidLevel() {
 
 function stepLiquid(time) {
   liquidState.raf = null;
-  if (!document.body.classList.contains("orb-mode") || settings.orbDisplayMode !== "pool") return;
-  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-  const dt = liquidState.lastFrame ? Math.min(0.034, Math.max(0.008, (time - liquidState.lastFrame) / 1000)) : 1 / 60;
+  if (!window.WidgetMotion.canAnimate({ visible: !document.hidden, orb: document.body.classList.contains("orb-mode"), mode: settings.orbDisplayMode, reduced: reducedMotion() })) return;
+  // A real delta preserves speed on 120/144/240 Hz screens; clamp only long stalls.
+  const dt = liquidState.lastFrame ? Math.min(0.034, Math.max(0, (time - liquidState.lastFrame) / 1000)) : 1 / 60;
   liquidState.lastFrame = time;
   for (const config of liquidState.configs) {
     const levels = liquidState.levels.get(config.id);
     if (!levels) continue;
-    levels.level += ((config.remaining || 0) - levels.level) * Math.min(1, dt * 6.5);
-    levels.weeklyLevel += ((config.weeklyRemaining || config.remaining || 0) - levels.weeklyLevel) * Math.min(1, dt * 6.5);
+    levels.level = window.WidgetMotion.approach(levels.level, config.remaining ?? 0, dt);
+    levels.weeklyLevel = window.WidgetMotion.approach(levels.weeklyLevel, window.WidgetMotion.weeklyLevel(config), dt);
     if (Array.isArray(config.layers)) {
       levels.layers = levels.layers || {};
       for (const layer of config.layers) {
         const current = Number(levels.layers[layer.id]) || 0;
-        levels.layers[layer.id] = current + ((layer.level || 0) - current) * Math.min(1, dt * 6.5);
+        levels.layers[layer.id] = window.WidgetMotion.approach(current, layer.level || 0, dt);
       }
     }
   }
-  if (!reducedMotion) {
+  if (!reducedMotion()) {
     const nextVelocity = liquidState.velocity.slice();
     for (let index = 0; index < LIQUID_NODES; index += 1) {
       const current = liquidState.wave[index];
@@ -471,6 +491,8 @@ function stepLiquid(time) {
 
 function ensureLiquidAnimation(configs) {
   liquidState.configs = Array.isArray(configs) ? configs : [configs].filter(Boolean);
+  const ids = new Set(liquidState.configs.map((config) => config.id));
+  for (const id of liquidState.levels.keys()) if (!ids.has(id)) liquidState.levels.delete(id);
   for (const config of liquidState.configs) {
     if (!liquidState.levels.has(config.id)) {
       liquidState.levels.set(config.id, { level: 0, weeklyLevel: 0, layers: {} });
@@ -478,7 +500,20 @@ function ensureLiquidAnimation(configs) {
     const levels = liquidState.levels.get(config.id);
     if (Array.isArray(config.layers) && !levels.layers) levels.layers = {};
   }
-  if (!liquidState.raf) {
+  if (document.hidden) { stopLiquidAnimation(); return; }
+  if (reducedMotion()) {
+    stopLiquidAnimation();
+    liquidState.wave.fill(0);
+    liquidState.velocity.fill(0);
+    liquidState.particles = [];
+    for (const config of liquidState.configs) {
+      liquidState.levels.set(config.id, { level: config.remaining ?? 0, weeklyLevel: window.WidgetMotion.weeklyLevel(config),
+        layers: Object.fromEntries((config.layers || []).map((layer) => [layer.id, layer.level])) });
+    }
+    drawLiquid(0);
+    return;
+  }
+  if (liquidState.raf === null) {
     liquidState.lastFrame = 0;
     liquidState.raf = requestAnimationFrame(stepLiquid);
   }
@@ -502,6 +537,7 @@ function splashLiquid(strength, direction = 0) {
 }
 
 function triggerLiquidRefresh(effect) {
+  if (reducedMotion() || document.hidden) return;
   if (!(Number(effect?.amountCents) > 0)) return;
   const cards = [...document.querySelectorAll("[data-usage-pool]")];
   const card = cards.find((element) => element.dataset.usagePool === effect?.id)
@@ -554,6 +590,7 @@ function recordLiquidSnapshot(next, animate = true) {
 }
 
 function handleWindowMotion(sample) {
+  if (reducedMotion() || document.hidden) return;
   if (!sample || settings.orbDisplayMode !== "pool" || !settings.orbMode) return;
   const previous = liquidState.lastMotion;
   const current = { x: Number(sample.x), y: Number(sample.y), at: Number(sample.at), vx: 0, vy: 0 };
@@ -578,18 +615,20 @@ function handleWindowMotion(sample) {
 function renderOrbResets(d) {
   const insights = quotaInsightsForDisplay(d);
   const compact = settings.orbDisplayMode === "pool";
-  $("orbResetList").innerHTML = insights.length
+  const html = insights.length
     ? insights.map((insight) => {
       const atRisk = insight.forecast?.status === "exhaust";
       const detail = compact
         ? ""
         : `<small>${escapeHtml(formatQuotaReset(insight.resetsAt) || "等待重置时间")} · ${escapeHtml(forecastText(insight))}</small>`;
-      return `<div class="orb-reset-row ${atRisk ? "at-risk" : "safe"}">
+      const resetDetail = `${formatQuotaReset(insight.resetsAt) || "等待重置时间"} · ${forecastText(insight)}`;
+      return `<div class="orb-reset-row ${atRisk ? "at-risk" : "safe"}" title="${escapeHtml(resetDetail)}">
         <span><b>${escapeHtml(insight.label)}</b>${detail}</span>
         <em class="orb-reset-time">${escapeHtml(formatUntil(insight.resetsAt))}</em>
       </div>`;
     }).join("")
     : `<div class="orb-reset-empty">正在同步全部额度重置时间…</div>`;
+  if ($("orbResetList").innerHTML !== html) $("orbResetList").innerHTML = html;
 }
 
 function renderOrbShapeSwitch() {
@@ -604,6 +643,7 @@ function renderOrbShapeSwitch() {
   }
   root.querySelectorAll("[data-orb-shape]").forEach((button) => {
     button.classList.toggle("active", button.dataset.orbShape === shape);
+    button.setAttribute("aria-pressed", String(button.dataset.orbShape === shape));
   });
 }
 
@@ -618,7 +658,9 @@ function renderUsagePoolGallery(pools) {
     pools: (combined ? [tank] : pools).map((pool) => [
       pool.id, pool.remaining, pool.shortRemaining, pool.weeklyRemaining, pool.weeklyOnlyRemaining,
       pool.capacityCents, pool.shortCapacityCents, pool.sizeScale,
-      pool.layers?.map((layer) => [layer.id, layer.level, layer.remainingCents]),
+      pool.shortLimit, pool.monthly?.currentEnd, pool.monthly?.futureResetCount, pool.monthly?.unknownCents, pool.monthly?.immediateKnown,
+      pool.monthly?.cycles?.map((cycle) => [cycle.startAt, cycle.endAt, cycle.resetAt, cycle.planType, cycle.interrupted, cycle.knownUsedCents, cycle.unpricedCount, cycle.previousMonthUsedCents, cycle.previousMonthUsageKnown]),
+      pool.layers?.map((layer) => [layer.id, layer.name, layer.level, layer.remainingCents]),
     ]),
   });
   if (gallery.dataset.signature !== signature) {
@@ -626,6 +668,7 @@ function renderUsagePoolGallery(pools) {
     gallery.innerHTML = combined
       ? renderCombinedPoolCard(tank, shape)
       : pools.map((pool) => renderUsagePoolCard(pool, shape)).join("");
+    liquidCanvases = [...gallery.querySelectorAll(".usage-liquid")];
     gallery.querySelectorAll(".usage-pool-tank").forEach((element) => {
       const scale = Number(element.dataset.tankScale);
       if (scale > 0) element.style.setProperty("--tank-scale", String(scale));
@@ -634,16 +677,39 @@ function renderUsagePoolGallery(pools) {
 }
 
 function renderUsagePoolCard(pool, shape) {
-  const displayedRemaining = pool.source === "codex" ? pool.shortRemaining : pool.remaining;
+  const displayedRemaining = pool.monthly ? pool.monthlyRemaining : pool.source === "codex" ? pool.shortRemaining : pool.remaining;
   const pct = pool.precision === 2 ? formatCursorPct(displayedRemaining) : formatPct(displayedRemaining);
   const scale = Number(pool.sizeScale) > 0 ? Number(pool.sizeScale) : 1;
-  const codexLegend = pool.source === "codex"
+  const month = pool.monthly;
+  const currentLabel = month?.shortLimit === "absent" ? "本周可用" : month?.shortLimit === "present" ? "5h 可用" : "当前可用";
+  const currentCapacity = month?.shortLimit === "absent" ? month.weeklyCapacityCents : month?.shortCapacityCents;
+  const currentPercent = month?.immediateKnown
+    ? month.immediateCents === 0 ? 0 : currentCapacity > 0 ? window.LiquidPool.clamp(month.immediateCents / currentCapacity * 100) : null
+    : null;
+  const currentValue = currentPercent == null ? "待确认" : month.shortLimit === "absent"
+    ? formatPct(pool.weeklyRemaining) : `${currentPercent > 0 ? "≈" : ""}${formatCursorPct(currentPercent)}`;
+  const monthlyHistory = (month?.cycles || []).filter((cycle) => cycle.state === "completed").map((cycle) => {
+    const date = (at) => new Date(at).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    return `${date(cycle.startAt)}–${date(cycle.endAt)}${cycle.planType ? ` · ${cycle.planType === "prolite" ? "Pro 5×" : cycle.planType}` : ""}${cycle.interrupted ? "（提前重置）" : ""}${cycle.startAt < month.startAt ? "（本月部分）" : ""}：${cycle.usedCents == null
+      ? `已知消耗 ≈${formatUsd(cycle.knownUsedCents || 0)}；${cycle.unpricedCount ? `最后额度快照之后仍有 ${cycle.unpricedCount} 条记录未计价` : "缺少历史依据"}，其余无法区分已用和未用`
+      : `已用 ≈${formatUsd(cycle.usedCents)}，过期未用 ≈${formatUsd(cycle.unusedCents)}`}`;
+  }).join("\n");
+  const carryNote = month?.cycles?.some((cycle) => cycle.startAt < month.startAt)
+    ? `\n月初跨月周已扣除上月已知消耗 ≈${formatUsd(month.previousMonthUsedCents || 0)}${month.previousMonthUsageKnown ? "。" : "；上月记录不完整，扣减仍可能不足。"}` : "";
+  const resetNote = month?.cycles?.some((cycle) => cycle.interrupted)
+    ? "\n已按实际提前重置分段；旧周期容量按该周期记录估算，未沿用新套餐容量。" : "";
+  const monthlyNote = month ? `自然月，计入 ${month.cycleCount} 个相交周周期；后续 ${month.futureResetCount} 次周重置。${carryNote}${resetNote}\n当前可用：${month.immediateKnown ? formatUsd(month.immediateCents) : "待估算"}；本周剩余 ${formatPct(pool.weeklyRemaining)}。${month.shortLimit === "absent" ? "当前服务端未设置 5h 窗口，按周额度判断可用量。" : month.shortLimit === "present" ? `5h 剩余 ${formatCursorPct(pool.shortRemaining)}。` : "5h 限制信息尚不完整。"}\n月总量和历史用量均为估算。紫色为过期或提前重置时未用；灰色为缺少可覆盖的额度快照或后续记录未计价，无法区分已用和未用，不计入可用额度。${monthlyHistory ? `\n${monthlyHistory}` : ""}` : "";
+  const codexLegend = month
+    ? ""
+    : pool.source === "codex" && pool.shortLimit !== "absent"
     ? `<div class="usage-pool-legend"><span><i class="immediate"></i>5 小时可用 ${escapeHtml(formatCursorPct(pool.shortRemaining))}</span><span><i class="weekly"></i>仅周池可用 ${escapeHtml(formatPct(pool.weeklyOnlyRemaining))}</span></div>`
     : "";
-  const capacity = pool.source === "codex"
+  const capacity = month
+    ? `${new Date(month.startAt).getMonth() + 1}月总容量 ≈${formatUsd(month.capacityCents)} ⓘ`
+    : pool.source === "codex" && pool.shortLimit !== "absent"
     ? `7天 ${formatUsd(pool.capacityCents)} · 5小时 ${formatUsd(pool.shortCapacityCents)}`
     : liquidCapacityText(pool);
-  return `<article class="usage-pool-card" data-usage-pool="${escapeHtml(pool.id)}">
+  return `<article class="usage-pool-card${month ? " has-monthly" : ""}" data-usage-pool="${escapeHtml(pool.id)}">
     <div class="usage-pool-slot">
       <div class="usage-pool-tank${pool.source === "codex" ? " codex" : ""}" data-tank-shape="${escapeHtml(shape)}" data-tank-scale="${scale.toFixed(4)}" role="meter" aria-label="${escapeHtml(pool.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(displayedRemaining).toFixed(2)}">
         <span class="usage-pool-glass" aria-hidden="true"></span>
@@ -654,8 +720,9 @@ function renderUsagePoolCard(pool, shape) {
     </div>
     <div class="usage-pool-info">
       <b>${escapeHtml(pool.name)}</b>
-      <strong>${escapeHtml(pct)}<small>${pool.source === "codex" ? " 5小时可用" : " 可用"}</small></strong>
-      <span>${escapeHtml(capacity)}</span>
+      <strong>${escapeHtml(month ? formatCursorPct(pool.monthlyRemaining) : pct)}<small>${month ? " 月内待用" : pool.source === "codex" ? pool.shortLimit === "absent" ? " 本周可用" : " 5小时可用" : " 可用"}</small></strong>
+      ${month ? `<span class="pool-current-availability" title="${escapeHtml(month.shortLimit === "absent" ? "当前周周期剩余可用额度占本周总容量的比例" : "当前可用额度占 5h 总容量的比例，同时受本周剩余额度限制；不含未来周期")}"><i aria-hidden="true"></i><span>${currentLabel}</span><b>${escapeHtml(currentValue)}</b></span>` : ""}
+      <span class="pool-detail-hint" title="${escapeHtml(monthlyNote || capacity)}">${escapeHtml(capacity)}</span>
       ${codexLegend}
     </div>
   </article>`;
@@ -665,7 +732,8 @@ function renderCombinedPoolCard(tank, shape) {
   const pct = formatCursorPct(tank.remaining);
   const legend = `<div class="usage-pool-legend combined-legend">${tank.layers.map((layer) => {
     const amount = formatUsd(layer.remainingCents);
-    return `<span><i data-tone="${escapeHtml(layer.tone)}"></i>${escapeHtml(layer.name)} ${escapeHtml(formatPct(layer.share))} · ${escapeHtml(amount)}</span>`;
+    const names = { "cursor-models": "模型", "cursor-api": "三方", "codex-future": "后续周", "codex-weekly": "本周", "codex-immediate": "可用", "codex-expired": "过期未用", "codex-unknown": "记录不足" };
+    return `<span class="pool-detail-hint" title="${escapeHtml(`${layer.name} · ${formatPct(layer.share)} · ${amount}`)}"><i data-tone="${escapeHtml(layer.tone)}"></i>${escapeHtml(names[layer.tone] || layer.name)}</span>`;
   }).join("")}</div>`;
   return `<article class="usage-pool-card combined" data-usage-pool="${escapeHtml(tank.id)}">
     <div class="usage-pool-slot">
@@ -678,7 +746,7 @@ function renderCombinedPoolCard(tank, shape) {
     </div>
     <div class="usage-pool-info">
       <b>${escapeHtml(tank.name)}</b>
-      <strong>${escapeHtml(pct)}<small> 合计可用</small></strong>
+      <strong>${escapeHtml(pct)}<small>${tank.hasMonthly ? " 合计待用" : " 合计可用"}</small></strong>
       <span>${escapeHtml(liquidCapacityText(tank))}</span>
       ${legend}
     </div>
@@ -686,8 +754,13 @@ function renderCombinedPoolCard(tank, shape) {
 }
 
 function renderOrb(d) {
+  if (!settings.orbMode || windowState.fullscreen) { stopLiquidAnimation(); return; }
   const displayMode = ["quota", "speed", "pool"].includes(settings.orbDisplayMode) ? settings.orbDisplayMode : "quota";
+  if (displayMode !== "pool") stopLiquidAnimation();
   const pools = orbPools(d, displayMode);
+  const poolCaption = document.querySelector(".orb-footer-pool");
+  if (poolCaption) poolCaption.textContent = pools.some((pool) => pool.monthly)
+    ? "青色可用 · 蓝色待重置 · 紫色过期未用" : "容器大小表示容量 · 水位表示可用";
   const selected = selectedQuotaPool(pools);
   const ring = $("orbRing");
   renderOrbResets(d);
@@ -700,12 +773,14 @@ function renderOrb(d) {
   }
   document.querySelectorAll("[data-orb-display]").forEach((button) => {
     button.classList.toggle("active", button.dataset.orbDisplay === displayMode);
+    button.setAttribute("aria-pressed", String(button.dataset.orbDisplay === displayMode));
   });
   $("orbRefreshBtn").classList.toggle("spinning", Boolean(snapshot.loading));
   $("orbPrevBtn").disabled = displayMode === "pool" || pools.length < 2;
   $("orbNextBtn").disabled = displayMode === "pool" || pools.length < 2;
   if (displayMode === "pool") renderUsagePoolGallery(pools);
   if (!selected) {
+    stopLiquidAnimation();
     pendingLiquidEffects.clear();
     liquidState.configs = [];
     liquidState.levels.clear();
@@ -842,6 +917,11 @@ function codexQuotaWindowsHtml(codex) {
 }
 
 function renderOverview(d) {
+  const names = { "cursor-models": "Cursor 模型", "cursor-api": "三方模型", "codex-window-300": "Codex 5h", "codex-window-10080": "Codex 7d" };
+  $("quotaGlance").innerHTML = quotaPools(d).map((pool) => {
+    const target = pool.source === "codex" ? "codexPool" : pool.id === "cursor-models" ? "cursorPool" : "otherPool";
+    return `<button type="button" data-quota-target="${target}" title="${escapeHtml(pool.name)} · 点击查看详情"><span>${escapeHtml(names[pool.id] || pool.name)}</span><b class="${toneClass(pool.used)}">${pool.precision === 2 ? formatCursorPct(pool.remaining) : formatPct(pool.remaining)}</b><small>剩余</small></button>`;
+  }).join("");
   const combined = d.combined || {};
   const codex = d.codex;
   const cursorIncluded = d.otherModels?.includedCents || {};
@@ -956,6 +1036,14 @@ const precisionNotes = {
 function renderModels(d) {
   const precision = settings.modelPrecision || "coarse";
   const source = settings.dataSource || "all";
+  const donut = settings.modelView === "donut";
+  $("modelList").hidden = donut;
+  $("modelDonutPanel").hidden = !donut;
+  document.querySelectorAll("[data-model-view]").forEach((button) => {
+    const selected = (button.dataset.modelView === "donut") === donut;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
   const activeUsage = modelUsage?.key === settings.modelRange ? modelUsage : null;
   const view = activeUsage?.sources?.[source] || activeUsage?.sources?.all;
   if (!view) {
@@ -963,12 +1051,14 @@ function renderModels(d) {
     $("modelCount").textContent = "读取中";
     $("modelSubtitle").textContent = `${option?.textContent || "所选范围"} · 正在聚合持久化历史`;
     $("modelList").innerHTML = `<div class="empty-state">正在计算模型用量…</div>`;
+    $("modelDonutContent").innerHTML = `<div class="empty-state">正在计算模型用量…</div>`;
+    $("modelDonutNote").textContent = "";
     return;
   }
   const rows = view.modelBreakdowns?.[precision] || [];
   $("modelCount").textContent = `${formatInteger(view.eventCount)} 次`;
   $("modelSubtitle").textContent = `${view.label || "全部"} · ${view.periodLabel || "当前周期"} · 按总 Token（含缓存）排序`;
-  const unknownSpeed = source !== "cursor" ? " Codex 优先持久化服务端响应 service_tier；抓不到响应时回退到本地请求记录，旧记录可能显示速度未知。" : "";
+  const unknownSpeed = source !== "cursor" ? donut ? " 环状图中 Codex 速度未知的请求并入非 Fast；原始记录不变。" : " Codex 优先持久化服务端响应 service_tier；抓不到响应时回退到本地请求记录，旧记录可能显示速度未知。" : "";
   $("precisionNote").textContent = precisionNotes[precision] + unknownSpeed;
   document.querySelectorAll("[data-precision]").forEach((button) => {
     button.classList.toggle("active", button.dataset.precision === precision);
@@ -976,6 +1066,7 @@ function renderModels(d) {
   document.querySelectorAll("[data-source]").forEach((button) => {
     button.classList.toggle("active", button.dataset.source === source);
   });
+  if (donut) { renderModelDonut(activeUsage, view); return; }
   if (!rows.length) {
     $("modelList").innerHTML = `<div class="empty-state">暂无模型明细</div>`;
     return;
@@ -1005,6 +1096,44 @@ function renderModels(d) {
     .join("");
 }
 
+let modelDonutState = null;
+function modelColor(key) {
+  let hash = 0;
+  for (const char of key) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) | 0;
+  return `hsl(${Math.abs(hash) % 360} 65% 68%)`;
+}
+function renderModelDonut(usage, view) {
+  const metric = ["total", "effective", "costCents"].includes(settings.modelMetric) ? settings.modelMetric : "total";
+  const label = metric === "costCents" ? "美元等效" : metric === "effective" ? "有效 Token" : "总 Token";
+  const format = metric === "costCents" ? formatUsd : formatTokens;
+  const result = window.UsageCharts.modelSlices(usage.sources, { source: settings.dataSource, precision: settings.modelPrecision, metric });
+  modelDonutState = { ...result, metric, label };
+  $("modelMetricSelect").value = metric;
+  $("modelSubtitle").textContent = `${view.label || "全部"} · ${view.periodLabel || "当前周期"} · ${label}占比`;
+  const coverage = Number(view.costCoveragePercent);
+  $("modelDonutNote").textContent = `占比按${label}计算，所有模型均保留；悬停或聚焦图例查看详情。${metric === "costCents" ? ` 仅统计已知价格，计价覆盖 ${Number.isFinite(coverage) ? formatPct(coverage) : "未知"}；未计价用量不代表免费。` : ""}`;
+  if (!result.rows.length) {
+    $("modelDonutContent").innerHTML = `<div class="empty-state">所选范围暂无模型用量</div>`;
+    return;
+  }
+  const circles = result.rows.map((row, index) => row.percent > 0
+    ? `<circle class="model-donut-slice" data-donut-index="${index}" cx="100" cy="100" r="76" pathLength="100" fill="none" stroke="${modelColor(row.key)}" stroke-width="24" stroke-dasharray="${row.percent} ${100 - row.percent}" stroke-dashoffset="${-row.offset}" transform="rotate(-90 100 100)"><title>${escapeHtml(row.label)} · ${escapeHtml(format(row.value))} · ${row.percent.toFixed(2)}%</title></circle>` : "").join("");
+  const legend = result.rows.map((row, index) => `<button type="button" class="model-donut-legend-row" data-donut-index="${index}"><svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="5" fill="${modelColor(row.key)}"/></svg><span><b>${escapeHtml(row.label)}</b><small>${formatInteger(row.count)} 次 · ${format(row.value)}</small></span><strong>${row.percent.toFixed(2)}%</strong></button>`).join("");
+  $("modelDonutContent").innerHTML = `<div class="model-donut-visual"><svg class="model-donut-svg" viewBox="0 0 200 200" role="img" aria-label="${label}按模型分布"><circle cx="100" cy="100" r="76" fill="none" stroke="var(--line)" stroke-width="24"/>${circles}</svg><div class="model-donut-center"><span id="modelDonutLabel">${label}合计</span><strong id="modelDonutValue">${format(result.total)}</strong><small id="modelDonutShare">${result.total > 0 ? `${result.rows.length} 个分组` : "暂无可计算占比的用量"}</small></div></div><div class="model-donut-legend">${legend}</div>`;
+}
+function highlightModelDonut(index = -1) {
+  if (!modelDonutState || !$("modelDonutValue")) return;
+  const row = modelDonutState.rows[index];
+  const format = modelDonutState.metric === "costCents" ? formatUsd : formatTokens;
+  $("modelDonutContent").querySelectorAll("[data-donut-index]").forEach((element) => {
+    element.classList.toggle("muted", Boolean(row) && Number(element.dataset.donutIndex) !== index);
+    element.classList.toggle("selected", Boolean(row) && Number(element.dataset.donutIndex) === index);
+  });
+  $("modelDonutLabel").textContent = row?.label || `${modelDonutState.label}合计`;
+  $("modelDonutValue").textContent = format(row?.value ?? modelDonutState.total);
+  $("modelDonutShare").textContent = row ? `${row.percent.toFixed(2)}% · ${formatInteger(row.count)} 次` : `${modelDonutState.rows.length} 个分组`;
+}
+
 async function loadModelRange(range) {
   const request = ++modelUsageRequest;
   settings.modelRange = range;
@@ -1020,6 +1149,7 @@ async function loadModelRange(range) {
     if (request !== modelUsageRequest) return;
     $("modelCount").textContent = "失败";
     $("modelList").innerHTML = `<div class="empty-state">模型历史读取失败：${escapeHtml(error?.message || error)}</div>`;
+    $("modelDonutContent").innerHTML = $("modelList").innerHTML;
   }
 }
 
@@ -1232,10 +1362,13 @@ function moveChartTooltip(clientX, clientY, immediate = false) {
   const target = chartTooltipTarget(clientX, clientY);
   chartTooltipPosition.targetX = target.x;
   chartTooltipPosition.targetY = target.y;
-  if (immediate) {
+  if (immediate || reducedMotion()) {
     chartTooltipPosition.x = target.x;
     chartTooltipPosition.y = target.y;
     $("chartTooltip").style.translate = `${target.x.toFixed(2)}px ${target.y.toFixed(2)}px`;
+    if (chartTooltipFrame !== null) cancelAnimationFrame(chartTooltipFrame);
+    chartTooltipFrame = null;
+    return;
   }
   if (chartTooltipFrame === null) chartTooltipFrame = requestAnimationFrame(animateChartTooltip);
 }
@@ -1320,8 +1453,8 @@ function liveQuotaPoints(d) {
     ? d.codex.quota.windows
     : [d.codex?.quota?.primary, d.codex?.quota?.secondary].filter(Boolean);
   return [
-    d.cursorModels && { source: "cursor", pool: "cursor-models", timestamp: at, usedPercent: d.cursorModels.percentUsed, resetsAt: d.billingCycleEnd },
-    d.otherModels && { source: "cursor", pool: "other-models", timestamp: at, usedPercent: d.otherModels.percentUsed, resetsAt: d.billingCycleEnd },
+    d.cursorModels && { source: "cursor", pool: "cursor-models", timestamp: at, usedPercent: d.cursorModels.percentUsed, resetsAt: d.billingCycleEnd, startsAt: d.billingCycleStart },
+    d.otherModels && { source: "cursor", pool: "other-models", timestamp: at, usedPercent: d.otherModels.percentUsed, resetsAt: d.billingCycleEnd, startsAt: d.billingCycleStart },
     ...windows.map((window) => ({
       source: "codex",
       pool: `${window.slot || "window"}-${window.windowMinutes}`,
@@ -1344,7 +1477,7 @@ function speedLabel(event) {
   return event?.fast ? { text: "Fast", className: "fast" } : { text: "非 Fast", className: "normal" };
 }
 
-function levelChartSvg(series) {
+function levelChartSvg(series, cycle) {
   if (!series?.length) return `<div class="empty-state">这个周期还没有水位采样</div>`;
   const fullscreen = Boolean(windowState.fullscreen);
   const width = fullscreen ? 1400 : 400;
@@ -1378,7 +1511,10 @@ function levelChartSvg(series) {
     const widthHit = Math.max(8, plotWidth / Math.max(series.length, 1));
     return `<rect class="chart-hitbox" data-level-index="${index}" x="${(x - widthHit / 2).toFixed(1)}" y="${top}" width="${widthHit.toFixed(1)}" height="${plotHeight}"></rect>`;
   }).join("");
-  return `<svg class="bar-chart level-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="额度水位曲线">${ticks}<polygon class="level-area" points="${area}"></polygon><polyline class="level-line" points="${points.join(" ")}"></polyline>${dots}${hits}${labels}</svg>`;
+  // Clip the reference to the existing data domain; never add its end to series.
+  const reference = window.UsageCharts.uniformSegment(cycle, minAt, maxAt);
+  const uniform = reference.length ? `<polyline class="uniform-line" points="${reference.map((point) => `${xOf(point.at).toFixed(1)},${yOf(point.remainingPercent).toFixed(1)}`).join(" ")}"><title>匀速使用：周期初 100%，周期末 0%</title></polyline>` : "";
+  return `<svg class="bar-chart level-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="额度水位与匀速使用参考线">${ticks}<polygon class="level-area" points="${area}"></polygon>${uniform}<polyline class="level-line" points="${points.join(" ")}"></polyline>${dots}${hits}${labels}</svg>`;
 }
 
 function renderLevels() {
@@ -1401,7 +1537,12 @@ function renderLevels() {
   $("levelPeak").textContent = sampleCount
     ? `${sampleCount} 个采样点`
     : "尚无采样";
-  $("levelChart").innerHTML = levelChartSvg(timeline?.series || []);
+  $("levelChart").innerHTML = levelChartSvg(timeline?.series || [], timeline?.cycle);
+  const reference = timeline?.cycle?.reference;
+  $("uniformLegend").hidden = !reference;
+  $("uniformNote").textContent = reference
+    ? `虚线为匀速使用参考：${formatDateTime(reference.startAt)} 的 100% → ${formatDateTime(reference.endAt)} 的 0%。仅显示已有采样的时间范围。${reference.estimated ? " 周期起点按常规周期长度推算。" : ""}`
+    : "周期结束时间未知，暂不显示匀速参考线。";
 }
 
 function eventCostCents(event) {
@@ -1511,6 +1652,7 @@ function renderPricing() {
 
 function renderActiveView(d) {
   if (!d) return;
+  if (settings.compact && !windowState.fullscreen && !settings.orbMode) { renderOverview(d); return; }
   if (settings.activeTab === "models") renderModels(d);
   else if (settings.activeTab === "trends") renderTrends(d);
   else if (settings.activeTab === "levels") renderLevels();
@@ -1522,9 +1664,13 @@ function renderActiveView(d) {
 function setActiveTab(tab, persist = false) {
   const valid = ["overview", "models", "trends", "levels", "events", "pricing"].includes(tab) ? tab : "overview";
   settings.activeTab = valid;
+  const visible = settings.compact && !windowState.fullscreen && !settings.orbMode ? "overview" : valid;
   if (valid !== "trends" && valid !== "levels") hideChartTooltip();
-  document.querySelectorAll(".tab").forEach((button) => button.classList.toggle("active", button.dataset.tab === valid));
-  document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `${valid}View`));
+  document.querySelectorAll(".tab").forEach((button) => {
+    button.classList.toggle("active", button.dataset.tab === visible);
+    button.setAttribute("aria-current", button.dataset.tab === visible ? "page" : "false");
+  });
+  document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `${visible}View`));
   if (persist) {
     window.widget.saveSettings({ activeTab: valid });
     if (valid === "levels") loadQuotaTimeline();
@@ -1536,8 +1682,20 @@ function setActiveTab(tab, persist = false) {
 
 function renderStatus() {
   const d = snapshot.data;
+  $("bootstrapState").hidden = Boolean(d);
+  if (!d) {
+    $("bootstrapState").innerHTML = snapshot.loading
+      ? '<span class="loading-indicator" aria-hidden="true"></span><b>正在读取用量</b><p>首次扫描可能需要一点时间，历史记录会完整保留。</p>'
+      : '<b>暂时无法同步</b><p>请确认本机已有 Cursor 登录或 Codex 会话，然后点击顶栏刷新重试。</p>';
+    $("planBadge").textContent = snapshot.loading ? "连接中" : "待同步";
+    $("planLine").textContent = snapshot.loading ? "正在读取本机用量" : "等待可用数据";
+  }
   const dot = $("liveDot");
   $("refreshBtn").classList.toggle("spinning", Boolean(snapshot.loading));
+  $("refreshBtn").disabled = Boolean(snapshot.loading);
+  $("priceBtn").disabled = Boolean(snapshot.loading);
+  $("orbRefreshBtn").disabled = Boolean(snapshot.loading);
+  $("orbRefreshBtn").classList.toggle("spinning", Boolean(snapshot.loading));
   if (snapshot.loading) {
     dot.className = "live-dot syncing";
     $("statusText").textContent = d ? "正在同步最新用量…" : "正在连接 Cursor 用量接口…";
@@ -1553,6 +1711,7 @@ function renderStatus() {
   dot.className = "live-dot";
   const cursorState = d?.sourceStatus?.cursor;
   const codexState = d?.sourceStatus?.codex;
+  if (cursorState?.ok === false || codexState?.ok === false) dot.className = "live-dot warning";
   const sourceText = cursorState?.ok && codexState?.ok
     ? "Cursor 云端 + Codex 本机"
     : cursorState?.cached && codexState?.ok
@@ -1564,7 +1723,18 @@ function renderStatus() {
           : "本地缓存";
   $("statusText").textContent = `${sourceText} · ${timeAgo(d?.fetchedAt)}`;
   const seconds = Math.max(0, Math.ceil(((d?.fetchedAt || Date.now()) + Number(settings.intervalMs || 30_000) - Date.now()) / 1000));
-  $("syncCountdown").textContent = `${seconds}s 后刷新`;
+  $("syncCountdown").textContent = seconds > 0 ? `${seconds}s 后刷新` : "等待同步";
+}
+
+function renderSourceHealth() {
+  const status = snapshot.data?.sourceStatus || {};
+  $("sourceHealth").innerHTML = `<b>数据来源</b>${["cursor", "codex"].map((source) => {
+    const state = status[source];
+    const label = source === "cursor" ? "Cursor 云端" : "Codex 本机";
+    const healthy = snapshot.ok && state?.ok;
+    const text = snapshot.loading ? "同步中" : healthy ? "已同步" : state?.cached ? "使用缓存" : "暂不可用";
+    return `<div><span>${label}</span><strong class="${healthy ? "healthy" : "warning"}">${text}</strong></div>`;
+  }).join("")}<small>${snapshot.data?.fetchedAt ? `最近采集 ${escapeHtml(formatDateTime(snapshot.data.fetchedAt))}` : "等待首次采集"} · 历史 ${formatInteger(snapshot.data?.persistence?.count || 0)} 条<br>缓存可能滞后；同步失败不会删除已保存的历史。可点顶栏刷新重试。</small>`;
 }
 
 function render() {
@@ -1575,6 +1745,7 @@ function render() {
   document.body.classList.toggle("orb-pool-layout", orbMode && settings.orbDisplayMode === "pool");
   document.body.classList.toggle("orb-pool-combined", orbMode && poolViewCombined());
   document.body.classList.toggle("privacy", Boolean(settings.privacyMode));
+  document.body.classList.toggle("reduce-motion", reducedMotion());
   document.body.classList.toggle("smart-docked", Boolean(windowState.smartDocked));
   $("compactBtn").classList.toggle("active", Boolean(settings.compact) && !windowState.fullscreen && !orbMode);
   $("compactBtn").disabled = Boolean(windowState.fullscreen);
@@ -1587,6 +1758,8 @@ function render() {
   $("smartPanel").hidden = !smartPanelOpen || orbMode;
   $("smartDockToggle").checked = Boolean(settings.smartDock);
   $("privacyToggle").checked = Boolean(settings.privacyMode);
+  $("startupToggle").checked = Boolean(settings.openAtLogin);
+  $("motionSelect").value = settings.motionPreference || "system";
   $("alertToggle").checked = Boolean(settings.quotaAlerts);
   $("alertThresholdSelect").value = String(settings.alertThreshold || 20);
   $("alertThresholdSelect").disabled = !settings.quotaAlerts;
@@ -1595,6 +1768,7 @@ function render() {
   $("modelRangeSelect").value = settings.modelRange || "month1";
   setActiveTab(settings.activeTab, false);
   renderStatus();
+  if (smartPanelOpen) renderSourceHealth();
   const d = snapshot.data;
   renderOrb(d);
   if (!d) return;
@@ -1633,6 +1807,13 @@ function setSmartPanel(open) {
   smartPanelOpen = Boolean(open);
   $("smartPanel").hidden = !smartPanelOpen || Boolean(settings.orbMode);
   $("smartBtn").classList.toggle("active", smartPanelOpen || settings.privacyMode);
+  $("smartBtn").setAttribute("aria-expanded", String(smartPanelOpen));
+  document.querySelectorAll(".shell > header, .sync-strip, .tabs, main.content, footer").forEach((element) => { element.inert = smartPanelOpen; });
+  if (smartPanelOpen) {
+    previousPanelFocus = document.activeElement;
+    renderSourceHealth();
+    $("smartCloseBtn").focus();
+  } else if (previousPanelFocus?.isConnected) previousPanelFocus.focus();
 }
 
 async function loadQuotaTimeline() {
@@ -1654,6 +1835,8 @@ async function loadQuotaTimeline() {
     selectedCycleKey = next?.cycle?.key || selectedCycleKey;
     if (settings.activeTab === "levels") renderLevels();
   } catch (error) {
+    if (request !== quotaTimelineRequest) return;
+    showToast("额度水位读取失败，可刷新重试", true);
     console.error("读取额度水位失败", error);
   }
 }
@@ -1676,6 +1859,8 @@ async function loadEventPage(offset = 0) {
     eventPage = next;
     if (settings.activeTab === "events") renderEvents();
   } catch (error) {
+    if (request !== eventPageRequest) return;
+    showToast("请求明细读取失败，可刷新重试", true);
     console.error("读取请求明细失败", error);
   }
 }
@@ -1696,64 +1881,44 @@ async function loadPricingCatalog() {
     selectedPricingId = next?.selectedId ?? selectedPricingId;
     if (settings.activeTab === "pricing") renderPricing();
   } catch (error) {
+    if (request !== pricingCatalogRequest) return;
+    showToast("价目表读取失败，可刷新重试", true);
     console.error("读取价目表失败", error);
   }
 }
 
-function csvCell(value) {
-  const text = String(value ?? "");
-  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-}
-
-async function collectExportEvents() {
-  const rows = [];
-  let offset = 0;
-  const limit = 200;
-  while (offset < 8000) {
-    const page = await window.widget.queryUsageEvents({
-      source: settings.eventSource || "all",
-      query: eventQueryDraft,
-      offset,
-      limit,
-    });
-    rows.push(...(page.events || []));
-    if (!page.events?.length || rows.length >= (page.total || 0)) break;
-    offset += limit;
-  }
-  return rows;
+let exportBusy = false;
+let toastTimer;
+function showToast(message, error = false) {
+  const toast = $("actionToast");
+  clearTimeout(toastTimer);
+  toast.textContent = message;
+  toast.classList.toggle("error", error);
+  toast.hidden = false;
+  toastTimer = setTimeout(() => { toast.hidden = true; }, error ? 9000 : 5000);
 }
 
 async function exportEvents(kind) {
-  if (!window.widget.queryUsageEvents) return;
-  const rows = await collectExportEvents();
-  const stamp = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
-  if (kind === "json") {
-    await window.widget.saveTextFile({
-      name: `usage-events-${stamp}.json`,
-      content: JSON.stringify(rows, null, 2),
-    });
-    return;
+  if (exportBusy) return;
+  if (!window.widget.exportUsageEvents) { showToast("请在桌面应用中导出完整历史"); return; }
+  exportBusy = true;
+  const buttons = [$("eventExportCsv"), $("eventExportJson")];
+  buttons.forEach((button) => { button.disabled = true; });
+  $("eventExport" + (kind === "csv" ? "Csv" : "Json")).textContent = "正在导出…";
+  // Capture the filter before opening the native save dialog.
+  const filter = { kind, source: settings.eventSource || "all", query: eventQueryDraft };
+  try {
+    const result = await window.widget.exportUsageEvents(filter);
+    if (result?.canceled) showToast("已取消导出");
+    else if (result?.ok) showToast(`已导出 ${formatInteger(result.count)} 条请求`);
+    else showToast(result?.error || "导出失败，请重试", true);
+  } catch { showToast("导出失败，请重试", true); }
+  finally {
+    exportBusy = false;
+    buttons.forEach((button) => { button.disabled = false; });
+    $("eventExportCsv").textContent = "导出 CSV";
+    $("eventExportJson").textContent = "导出 JSON";
   }
-  const header = ["时间", "来源", "模型", "effort", "速度", "输入", "写缓存", "读缓存", "输出", "美元等效"];
-  const lines = [
-    header.join(","),
-    ...rows.map((event) => [
-      new Date(event.timestamp).toISOString(),
-      event.source,
-      event.model,
-      event.effort || "",
-      event.fastKnown === false ? "unknown" : event.fast ? "fast" : "standard",
-      event.input,
-      event.cacheWrite,
-      event.cacheRead,
-      event.output,
-      event.equivalentCostCents == null ? "" : (Number(event.equivalentCostCents) / 100).toFixed(6),
-    ].map(csvCell).join(",")),
-  ];
-  await window.widget.saveTextFile({
-    name: `usage-events-${stamp}.csv`,
-    content: `\uFEFF${lines.join("\n")}`,
-  });
 }
 
 function handleLevelPointerMove(event) {
@@ -1768,6 +1933,8 @@ function handleLevelPointerMove(event) {
   $("chartTooltipLabel").textContent = formatDateTime(point.at);
   $("chartTooltipTotal").textContent = `剩余 ${formatCursorPct(point.remainingPercent)}`;
   $("chartTooltipRows").innerHTML = `<div>已用 ${formatCursorPct(point.usedPercent)}</div>`;
+  const uniform = window.UsageCharts.uniformRemaining(quotaTimeline?.cycle, point.at);
+  if (uniform != null) $("chartTooltipRows").innerHTML += `<div>匀速参考剩余 ${formatCursorPct(uniform)}</div><div>实际水位${point.remainingPercent >= uniform ? "高于" : "低于"}参考 ${Math.abs(point.remainingPercent - uniform).toFixed(2)} 个百分点</div>`;
   $("chartTooltipMeta").textContent = quotaTimeline?.cycle?.label || "";
   const firstShow = !chartTooltipVisible;
   chartTooltipVisible = true;
@@ -1804,6 +1971,7 @@ $("eventSourceSwitch").addEventListener("click", (event) => {
 });
 $("eventSearch").addEventListener("input", (event) => {
   eventQueryDraft = event.target.value;
+  eventPageRequest += 1;
   clearTimeout(eventSearchTimer);
   eventSearchTimer = setTimeout(() => loadEventPage(0), 220);
 });
@@ -1880,13 +2048,44 @@ $("closeBtn").addEventListener("click", () => window.widget.hide());
 $("dashBtn").addEventListener("click", () => window.widget.openDashboard());
 $("compactBtn").addEventListener("click", () => window.widget.saveSettings({ compact: !settings.compact, orbMode: false }));
 $("smartBtn").addEventListener("click", () => setSmartPanel(!smartPanelOpen));
+$("healthBtn").addEventListener("click", () => setSmartPanel(true));
 $("smartCloseBtn").addEventListener("click", () => setSmartPanel(false));
+$("quotaGlance").addEventListener("click", (event) => {
+  const target = event.target.closest("[data-quota-target]")?.dataset.quotaTarget;
+  if (["cursorPool", "otherPool", "codexPool"].includes(target)) {
+    $(target).scrollIntoView({ behavior: reducedMotion() ? "instant" : "smooth", block: "start" });
+  }
+});
+$("motionSelect").addEventListener("change", (event) => window.widget.saveSettings({ motionPreference: event.target.value }));
+$("startupToggle").addEventListener("change", (event) => window.widget.saveSettings({ openAtLogin: event.target.checked }));
 // WIP: 智能贴边、额度提醒、提醒阈值有严重 bug，入口已关闭。
 $("smartDockToggle").addEventListener("change", (event) => window.widget.saveSettings({ smartDock: event.target.checked }));
 $("privacyToggle").addEventListener("change", (event) => window.widget.saveSettings({ privacyMode: event.target.checked }));
 $("alertToggle").addEventListener("change", (event) => window.widget.saveSettings({ quotaAlerts: event.target.checked }));
 $("alertThresholdSelect").addEventListener("change", (event) => window.widget.saveSettings({ alertThreshold: Number(event.target.value) }));
 $("modelRangeSelect").addEventListener("change", (event) => loadModelRange(event.target.value));
+document.querySelectorAll("[data-model-view]").forEach((button) => {
+  button.addEventListener("click", () => {
+    settings.modelView = button.dataset.modelView;
+    window.widget.saveSettings({ modelView: settings.modelView });
+    if (snapshot.data) renderModels(snapshot.data);
+  });
+});
+$("modelMetricSelect").addEventListener("change", (event) => {
+  settings.modelMetric = event.target.value;
+  window.widget.saveSettings({ modelMetric: settings.modelMetric });
+  if (snapshot.data) renderModels(snapshot.data);
+});
+for (const type of ["pointerover", "focusin", "click"]) {
+  $("modelDonutContent").addEventListener(type, (event) => {
+    const target = event.target.closest("[data-donut-index]");
+    if (target) highlightModelDonut(Number(target.dataset.donutIndex));
+  });
+}
+$("modelDonutContent").addEventListener("pointerleave", () => highlightModelDonut());
+$("modelDonutContent").addEventListener("focusout", (event) => {
+  if (!$("modelDonutContent").contains(event.relatedTarget)) highlightModelDonut();
+});
 $("orbPrevBtn").addEventListener("click", () => changeOrbPool(-1));
 $("orbNextBtn").addEventListener("click", () => changeOrbPool(1));
 document.querySelectorAll("[data-orb-display]").forEach((button) => {
@@ -1928,10 +2127,16 @@ $("opacity").addEventListener("input", (event) => {
   settings.opacity = Number(event.target.value) / 100;
   window.widget.setOpacity(settings.opacity);
 });
+$("opacity").addEventListener("change", () => window.widget.saveSettings({ opacity: settings.opacity }));
 
 window.widget.onSnapshot((next) => {
   recordLiquidSnapshot(next, true);
   snapshot = next;
+  if (next.loading) {
+    renderStatus();
+    if (smartPanelOpen) renderSourceHealth();
+    return;
+  }
   if (next.data?.modelUsage?.key === settings.modelRange) modelUsage = next.data.modelUsage;
   if (next.data?.quotaTimeline && !quotaTimeline) quotaTimeline = next.data.quotaTimeline;
   if (settings.activeTab === "levels") loadQuotaTimeline();
@@ -1941,6 +2146,7 @@ window.widget.onSnapshot((next) => {
 });
 window.widget.onSettings((next) => {
   settings = { ...settings, ...next };
+  if (settings.orbMode && smartPanelOpen) setSmartPanel(false);
   scheduleRender();
 });
 window.widget.onWindowState((next) => {
@@ -1950,6 +2156,14 @@ window.widget.onWindowState((next) => {
 window.widget.onWindowMotion?.(handleWindowMotion);
 
 window.addEventListener("keydown", (event) => {
+  if (event.key === "Tab" && smartPanelOpen) {
+    const items = [...$("smartPanel").querySelectorAll("button, select, input")].filter((item) => !item.disabled && item.getClientRects().length);
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    return;
+  }
   if (event.key === "Escape" && smartPanelOpen) {
     event.preventDefault();
     setSmartPanel(false);
@@ -1968,9 +2182,22 @@ window.addEventListener("keydown", (event) => {
 document.documentElement.addEventListener("mouseenter", () => window.widget.setPointerPresence?.(true));
 document.documentElement.addEventListener("mouseleave", () => window.widget.setPointerPresence?.(false));
 
+systemMotion.addEventListener("change", scheduleRender);
+document.addEventListener("visibilitychange", () => {
+  document.body.classList.toggle("view-hidden", document.hidden);
+  if (document.hidden) { stopLiquidAnimation(); hideChartTooltip(); }
+  else scheduleRender();
+});
+new ResizeObserver(() => {
+  if (!document.hidden && settings.orbMode && settings.orbDisplayMode === "pool" && reducedMotion()) drawLiquid(0);
+}).observe($("orbPoolGallery"));
 setInterval(() => {
+  if (document.hidden) return;
   renderStatus();
-  if (settings.orbMode) renderOrb(snapshot.data);
+  if (settings.orbMode && !windowState.fullscreen) {
+    // Only countdown text depends on the clock. Quota amounts come from snapshots.
+    renderOrbResets(snapshot.data);
+  }
 }, 1000);
 Promise.all([window.widget.getSettings(), window.widget.getSnapshot(), window.widget.getWindowState()]).then(([savedSettings, initialSnapshot, initialWindowState]) => {
   settings = { ...settings, ...savedSettings };

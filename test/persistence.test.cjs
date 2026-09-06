@@ -7,6 +7,49 @@ const { UsageHistory } = require("../src/history.cjs");
 const { CodexUsageScanner, mergeRateLimitSnapshots } = require("../src/codex.cjs");
 const { DatabaseSync } = require("node:sqlite");
 
+test("preserves both sides of a reset inside five minutes and supersedes legacy mixed-pool samples", () => {
+  class FixtureHistory extends UsageHistory { migrateLegacyHistory() {} }
+  const history = new FixtureHistory(":memory:");
+  try {
+    const base = { source: "codex", pool: "primary-10080", windowMinutes: 10080 };
+    history.saveQuotaSample({ ...base, timestamp: 1000, usedPercent: 88, resetsAt: 100000, planType: "plus" });
+    history.saveQuotaSample({ ...base, timestamp: 2000, usedPercent: 0, resetsAt: 200000 }); // legacy Spark
+    history.saveQuotaSample({ ...base, timestamp: 3000, usedPercent: 1, resetsAt: 300000, planType: "prolite" });
+    const samples = history.getQuotaSamples();
+    assert.deepEqual(samples.map((s) => s.usedPercent), [88, 1]);
+    assert.deepEqual(samples.map((s) => s.planType), ["plus", "prolite"]);
+    assert.equal(history.db.prepare("SELECT count(*) AS n FROM quota_samples").get().n, 3);
+  } finally { history.close(); }
+});
+
+test("adds quota cycle starts to an old database without losing samples", () => {
+  class FixtureHistory extends UsageHistory { migrateLegacyHistory() {} }
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quota-start-test-"));
+  const dbPath = path.join(temp, "history.sqlite");
+  let history;
+  try {
+    const old = new DatabaseSync(dbPath);
+    old.exec(`CREATE TABLE quota_samples (source TEXT NOT NULL, pool TEXT NOT NULL, bucket INTEGER NOT NULL,
+      timestamp INTEGER NOT NULL, used_percent REAL, window_minutes INTEGER, resets_at INTEGER,
+      PRIMARY KEY(source,pool,bucket));
+      INSERT INTO quota_samples VALUES ('cursor','cursor-models',0,1000,20,NULL,9000);`);
+    old.close();
+    history = new FixtureHistory(dbPath);
+    assert.equal(history.getQuotaSamples()[0].usedPercent, 20);
+    assert.equal(history.getQuotaSamples()[0].startsAt, null);
+    const sample = { source: "cursor", pool: "cursor-models", timestamp: 1100, resetsAt: 9000, usedPercent: 21 };
+    history.saveQuotaSample({ ...sample, startsAt: 100 });
+    history.saveQuotaSample({ ...sample, usedPercent: 22 });
+    assert.equal(history.getQuotaSamples()[0].startsAt, 100);
+    history.saveQuotaSample({ ...sample, resetsAt: 18000 });
+    assert.equal(history.getQuotaSamples()[0].startsAt, null);
+    assert.equal(history.getQuotaSamples().length, 1);
+  } finally {
+    history?.close();
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("persists normalized events and deduplicates by source/event key", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "usage-history-test-"));
   const dbPath = path.join(temp, "history.sqlite");
@@ -246,6 +289,27 @@ test("extracts official nested Codex cache-write usage without double-counting i
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test("full weekly-only snapshots remove a stale 5h window, while partial responses retain uncertainty", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-no-short-"));
+  fs.mkdirSync(path.join(temp, "sessions"));
+  const file = path.join(temp, "sessions", "rollout-quota.jsonl");
+  const weekly = { window_minutes: 10080, used_percent: 30, resets_at: 1800600000 };
+  const record = (limits) => JSON.stringify({ timestamp: "2026-09-07T00:00:00Z", type: "event_msg", payload: { type: "token_count", rate_limits: limits } });
+  try {
+    fs.writeFileSync(file, record({ plan_type: "pro", primary: null, secondary: weekly }) + "\n");
+    const absent = new CodexUsageScanner(temp).scan().rateLimit;
+    assert.equal(absent.shortLimit, "absent");
+    const stale = { timestamp: absent.timestamp - 1000, windows: [{ windowMinutes: 300, resetsAt: absent.timestamp + 3600000, usedPercent: 50 }] };
+    const merged = mergeRateLimitSnapshots([{ timestamp: absent.timestamp + 1000, windows: absent.windows }, absent, stale]);
+    assert.equal(merged.shortLimit, "absent");
+    assert.deepEqual(merged.windows.map((window) => window.windowMinutes), [10080]);
+    fs.writeFileSync(file, record({ plan_type: "pro", secondary: weekly }) + "\n");
+    assert.equal(new CodexUsageScanner(temp).scan().rateLimit.shortLimit, "unknown");
+    fs.writeFileSync(file, record({ plan_type: "pro", primary: { window_minutes: 300, used_percent: 0 }, secondary: weekly }) + "\n");
+    assert.equal(new CodexUsageScanner(temp).scan().rateLimit.shortLimit, "present");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
 test("locks event pricing on first persistence", () => {
@@ -499,6 +563,14 @@ test("pages request history and lists quota samples", () => {
     assert.equal(page.events[0].model, "unique-query-grok");
     const samples = history.getQuotaSamples().filter((sample) => sample.usedPercent === 41 && sample.resetsAt === 9_000);
     assert.equal(samples.length, 1);
+    history.saveQuotaSample({ source: "codex", pool: "secondary-10080", timestamp: 4_000, usedPercent: 25, windowMinutes: 10080, resetsAt: 12_000 });
+    assert.equal(history.getQuotaSamples({ source: "codex", start: 4_000, end: 4_001 }).length, 1);
+    assert.equal(history.getQuotaSamples({ source: "codex", start: 0, end: 4_000 }).length, 0);
+    assert.equal(history.getQuotaSamples({ source: "cursor", start: 4_000, end: 4_001 }).length, 0);
+    assert.deepEqual(history.getQuotaConsumption({ source: "codex", start: 2_000, end: 2_001 }), [
+      { source: "codex", timestamp: 2_000, quotaEquivalentCostCents: null },
+    ]);
+    assert.equal(history.getQuotaConsumption({ source: "codex", start: 1_000, end: 2_000 }).length, 0);
     const snapshots = history.listPricingSnapshots();
     assert.equal(Array.isArray(snapshots), true);
   } finally {

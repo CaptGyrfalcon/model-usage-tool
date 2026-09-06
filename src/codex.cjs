@@ -22,6 +22,13 @@ function number(value) {
   return Number.isFinite(result) ? result : 0;
 }
 
+function codexPlanName(planType) {
+  const plan = String(planType || "").trim().toLowerCase();
+  if (!plan) return "Codex";
+  if (plan === "prolite") return "Pro 5×";
+  return plan[0].toUpperCase() + plan.slice(1);
+}
+
 const CODEX_EVENT_KEY_PREFIX = "codex:v2:";
 
 function cumulativeEventKey(sessionId, cumulative) {
@@ -70,10 +77,11 @@ function rateWindow(raw) {
   };
 }
 
-function isMainCodexRateLimit(rateLimits) {
+function isMainCodexRateLimit(rateLimits, model = "") {
   const limitId = String(rateLimits?.limit_id || "").toLowerCase();
   const limitName = String(rateLimits?.limit_name || "").toLowerCase();
-  return limitId !== "base_model_inference" && limitName !== "gpt-reserve";
+  return !/spark/i.test(model) && !/spark/i.test(limitId)
+    && limitId !== "base_model_inference" && limitName !== "gpt-reserve";
 }
 
 function responseHeader(body, name) {
@@ -106,6 +114,8 @@ function headerRateWindow(body, slot, timestampSeconds) {
 }
 
 function rateLimitFromResponseHeaders(body, timestampSeconds) {
+  const activeLimit = responseHeader(body, "x-codex-active-limit");
+  if (/spark|base_model_inference|gpt-reserve/i.test(activeLimit || "")) return null;
   const primary = headerRateWindow(body, "primary", timestampSeconds);
   const secondary = headerRateWindow(body, "secondary", timestampSeconds);
   if (!primary && !secondary) return null;
@@ -135,11 +145,14 @@ function mergeRateLimitSnapshots(snapshots, maxAgeMs = 8 * 86_400_000) {
     .sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
   if (!ordered.length) return null;
   const newest = ordered[0];
+  const shortEvidence = ordered.find((snapshot) => newest.timestamp - snapshot.timestamp <= maxAgeMs
+    && ["absent", "present"].includes(snapshot.shortLimit));
   const windowsByMinutes = new Map();
   for (const snapshot of ordered) {
     if (newest.timestamp - snapshot.timestamp > maxAgeMs) continue;
     for (const window of snapshot.windows || []) {
       const minutes = Number(window.windowMinutes);
+      if (minutes === 300 && shortEvidence?.shortLimit === "absent" && snapshot.timestamp <= shortEvidence.timestamp) continue;
       if (!Number.isFinite(minutes) || windowsByMinutes.has(minutes)) continue;
       if (Number.isFinite(Number(window.resetsAt)) && Number(window.resetsAt) < newest.timestamp) continue;
       windowsByMinutes.set(minutes, { ...window });
@@ -150,6 +163,7 @@ function mergeRateLimitSnapshots(snapshots, maxAgeMs = 8 * 86_400_000) {
     .map((window, index) => ({ ...window, slot: index === 0 ? "primary" : index === 1 ? "secondary" : `window-${index}` }));
   return {
     ...newest,
+    shortLimit: windows.some((window) => window.windowMinutes === 300) ? "present" : shortEvidence?.shortLimit || "unknown",
     primary: windows[0] || null,
     secondary: windows[1] || null,
     windows,
@@ -197,8 +211,17 @@ class CodexUsageScanner {
     this.fileStates = new Map();
     this.latestRateLimit = null;
     this.planType = null;
+    this.planTimestamp = -Infinity;
     this.origins = new Set();
     this.tierTimelines = new Map();
+    this.quotaSamples = [];
+  }
+
+  updatePlanType(planType, timestamp) {
+    // Session files and HTTP logs are scanned independently, not in time order.
+    if (!planType || !Number.isFinite(timestamp) || timestamp <= this.planTimestamp) return;
+    this.planType = String(planType);
+    this.planTimestamp = timestamp;
   }
 
   loadTierTimelines() {
@@ -254,9 +277,10 @@ class CodexUsageScanner {
       const snapshots = rows
         .map((row) => rateLimitFromResponseHeaders(row.feedback_log_body, Number(row.ts)))
         .filter(Boolean);
-      const rateLimit = mergeRateLimitSnapshots(snapshots);
+      for (const snapshot of snapshots) this.collectQuotaSamples(snapshot);
+      const rateLimit = mergeRateLimitSnapshots([...snapshots, this.latestRateLimit]);
       if (rateLimit && (!this.latestRateLimit || rateLimit.timestamp >= this.latestRateLimit.timestamp)) this.latestRateLimit = rateLimit;
-      if (rateLimit?.planType) this.planType = String(rateLimit.planType);
+      for (const snapshot of snapshots) this.updatePlanType(snapshot.planType, snapshot.timestamp);
     } catch {
       // Response headers are optional and the database can be briefly locked while Codex writes to it.
     } finally {
@@ -283,6 +307,7 @@ class CodexUsageScanner {
   }
 
   scan() {
+    this.quotaSamples = [];
     if (!fs.existsSync(this.home)) {
       return { available: false, home: this.home, events: [], rateLimit: null, planType: null, files: 0 };
     }
@@ -306,10 +331,19 @@ class CodexUsageScanner {
       home: this.home,
       events: collapseCumulativeEvents(events),
       rateLimit: this.latestRateLimit,
+      quotaSamples: this.quotaSamples,
       planType: this.planType,
       origins: [...this.origins],
       files: files.length,
     };
+  }
+
+  collectQuotaSamples(snapshot) {
+    for (const window of snapshot.windows || []) {
+      if (!window.resetsAt || window.usedPercent == null) continue;
+      this.quotaSamples.push({ source: "codex", pool: `${window.slot || "window"}-${window.windowMinutes}`,
+        timestamp: snapshot.timestamp, planType: snapshot.planType || null, ...window });
+    }
   }
 
   scanFile(file, events) {
@@ -380,7 +414,10 @@ class CodexUsageScanner {
 
     const timestamp = Date.parse(record.timestamp);
     const rateLimits = payload.rate_limits;
-    if (Number.isFinite(timestamp) && (rateLimits?.primary || rateLimits?.secondary) && isMainCodexRateLimit(rateLimits)) {
+    if (Number.isFinite(timestamp) && (rateLimits?.primary || rateLimits?.secondary) && isMainCodexRateLimit(rateLimits, state.model)) {
+      this.collectQuotaSamples({ timestamp, planType: rateLimits.plan_type,
+        windows: [rateWindow(rateLimits.primary), rateWindow(rateLimits.secondary)]
+          .map((window, index) => window && { ...window, slot: index === 0 ? "primary" : "secondary" }).filter(Boolean) });
       if (!this.latestRateLimit || timestamp >= this.latestRateLimit.timestamp) {
         const primary = rateWindow(rateLimits.primary);
         const secondary = rateWindow(rateLimits.secondary);
@@ -390,6 +427,11 @@ class CodexUsageScanner {
           limitName: rateLimits.limit_name || null,
           primary,
           secondary,
+          // Explicit null slots in a full rate_limits object differ from a
+          // partial header response which merely omitted a window.
+          shortLimit: [primary, secondary].some((window) => window?.windowMinutes === 300) ? "present"
+            : Object.hasOwn(rateLimits, "primary") && Object.hasOwn(rateLimits, "secondary")
+              && [primary, secondary].some((window) => window?.windowMinutes === 10080) ? "absent" : "unknown",
           windows: [
             primary ? { slot: "primary", ...primary } : null,
             secondary ? { slot: "secondary", ...secondary } : null,
@@ -398,7 +440,7 @@ class CodexUsageScanner {
           planType: rateLimits.plan_type || null,
         };
       }
-      if (rateLimits.plan_type) this.planType = String(rateLimits.plan_type);
+      this.updatePlanType(rateLimits.plan_type, timestamp);
     }
 
     const usage = payload.info?.last_token_usage;
@@ -457,6 +499,7 @@ function scanCodexUsage() {
 module.exports = {
   CODEX_EVENT_KEY_PREFIX,
   codexHomePath,
+  codexPlanName,
   CodexUsageScanner,
   collapseCumulativeEvents,
   cumulativeEventKey,

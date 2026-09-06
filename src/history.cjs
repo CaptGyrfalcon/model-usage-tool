@@ -21,6 +21,47 @@ function upsertCost(column) {
   END`;
 }
 
+function eventFilter({ sources, query = "" } = {}) {
+  const sourceList = Array.isArray(sources) ? sources.filter(Boolean) : sources ? [sources] : [];
+  const clauses = ["1 = 1"];
+  const params = [];
+  if (sourceList.length) {
+    clauses.push(`source IN (${sourceList.map(() => "?").join(",")})`);
+    params.push(...sourceList);
+  }
+  const needle = String(query || "").trim();
+  if (needle) {
+    const like = `%${needle.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
+    clauses.push("(model LIKE ? ESCAPE '\\' OR IFNULL(effort, '') LIKE ? ESCAPE '\\')");
+    params.push(like, like);
+  }
+  const where = clauses.join(" AND ");
+  return { where, params };
+}
+
+function eventFromRow(row) {
+  return {
+    source: row.source,
+    eventKey: row.event_key,
+    timestamp: Number(row.timestamp),
+    model: row.model,
+    effort: row.effort,
+    fast: row.fast === 1,
+    fastKnown: row.fast != null,
+    pool: row.pool,
+    input: Number(row.input_tokens) || 0,
+    output: Number(row.output_tokens) || 0,
+    cacheRead: Number(row.cache_read_tokens) || 0,
+    cacheWrite: Number(row.cache_write_tokens) || 0,
+    reasoning: Number(row.reasoning_tokens) || 0,
+    equivalentCostCents: row.equivalent_cost_cents,
+    inputCostCents: row.input_cost_cents,
+    cacheReadCostCents: row.cache_read_cost_cents,
+    cacheWriteCostCents: row.cache_write_cost_cents,
+    outputCostCents: row.output_cost_cents,
+  };
+}
+
 class UsageHistory {
   constructor(dbPath = HISTORY_DB_PATH) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -71,6 +112,7 @@ class UsageHistory {
         used_percent REAL,
         window_minutes INTEGER,
         resets_at INTEGER,
+        starts_at INTEGER,
         PRIMARY KEY (source, pool, bucket)
       );
       CREATE INDEX IF NOT EXISTS idx_quota_samples_time ON quota_samples(source, timestamp);
@@ -88,6 +130,12 @@ class UsageHistory {
       );
     `);
     this.ensureUsageColumns();
+    if (!this.db.prepare("PRAGMA table_info(quota_samples)").all().some((column) => column.name === "starts_at")) {
+      this.db.exec("ALTER TABLE quota_samples ADD COLUMN starts_at INTEGER");
+    }
+    if (!this.db.prepare("PRAGMA table_info(quota_samples)").all().some((column) => column.name === "plan_type")) {
+      this.db.exec("ALTER TABLE quota_samples ADD COLUMN plan_type TEXT");
+    }
     this.migrateCursorSnapshotEvents();
     this.insertEvent = this.db.prepare(`
       INSERT INTO usage_events (
@@ -153,12 +201,15 @@ class UsageHistory {
         request_count = excluded.request_count
     `);
     this.insertQuota = this.db.prepare(`
-      INSERT INTO quota_samples (source, pool, bucket, timestamp, used_percent, window_minutes, resets_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO quota_samples (source, pool, bucket, timestamp, used_percent, window_minutes, resets_at, starts_at, plan_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(source, pool, bucket) DO UPDATE SET
         timestamp = excluded.timestamp,
         used_percent = excluded.used_percent,
         window_minutes = excluded.window_minutes,
+        plan_type = COALESCE(excluded.plan_type, quota_samples.plan_type),
+        starts_at = CASE WHEN quota_samples.resets_at IS excluded.resets_at
+          THEN COALESCE(excluded.starts_at, quota_samples.starts_at) ELSE excluded.starts_at END,
         resets_at = excluded.resets_at
     `);
     this.cursorEventProgress = this.db.prepare(`
@@ -592,12 +643,24 @@ class UsageHistory {
     return row?.timestamp == null ? null : Number(row.timestamp);
   }
 
-  getQuotaSamples() {
-    return this.db.prepare(`
-      SELECT source, pool, bucket, timestamp, used_percent, window_minutes, resets_at
+  getQuotaConsumption({ source = "codex", start = 0, end = Date.now() + 1 } = {}) {
+    // The month planner needs timestamps and quota costs, not full token/model rows.
+    return this.db.prepare(`SELECT timestamp, quota_equivalent_cost_cents
+      FROM usage_events WHERE source = ? AND timestamp >= ? AND timestamp < ?
+        AND (source != 'codex' OR lower(model) NOT LIKE '%spark%') ORDER BY timestamp ASC
+    `).all(source, start, end).map((row) => ({
+      source, timestamp: Number(row.timestamp),
+      quotaEquivalentCostCents: row.quota_equivalent_cost_cents == null ? null : Number(row.quota_equivalent_cost_cents),
+    }));
+  }
+
+  getQuotaSamples({ source, start = 0, end = Number.MAX_SAFE_INTEGER } = {}) {
+    const samples = this.db.prepare(`
+      SELECT source, pool, bucket, timestamp, used_percent, window_minutes, resets_at, starts_at, plan_type
       FROM quota_samples
+      WHERE timestamp >= ? AND timestamp < ? ${source ? "AND source = ?" : ""}
       ORDER BY timestamp ASC
-    `).all().map((row) => ({
+    `).all(start, end, ...(source ? [source] : [])).map((row) => ({
       source: row.source,
       pool: row.pool,
       bucket: Number(row.bucket),
@@ -605,58 +668,41 @@ class UsageHistory {
       usedPercent: row.used_percent == null ? null : Number(row.used_percent),
       windowMinutes: row.window_minutes == null ? null : Number(row.window_minutes),
       resetsAt: row.resets_at == null ? null : Number(row.resets_at),
+      startsAt: row.starts_at == null ? null : Number(row.starts_at),
+      planType: row.plan_type || null,
     }));
+    // Recovered main-pool session observations supersede legacy snapshots in
+    // their covered interval; those old rows could have come from Spark.
+    const recovered = samples.filter((s) => s.source === "codex" && s.planType);
+    const first = recovered[0]?.timestamp ?? Infinity;
+    const last = recovered.at(-1)?.timestamp ?? -Infinity;
+    return samples.filter((s) => s.source !== "codex" || s.planType || s.timestamp < first || s.timestamp > last);
   }
 
   queryEvents({ sources, query = "", offset = 0, limit = 40 } = {}) {
-    const sourceList = Array.isArray(sources) ? sources.filter(Boolean) : sources ? [sources] : [];
-    const clauses = ["1 = 1"];
-    const params = [];
-    if (sourceList.length) {
-      clauses.push(`source IN (${sourceList.map(() => "?").join(",")})`);
-      params.push(...sourceList);
-    }
-    const needle = String(query || "").trim();
-    if (needle) {
-      const like = `%${needle.replaceAll("%", "").replaceAll("_", "")}%`;
-      clauses.push("(model LIKE ? OR IFNULL(effort, '') LIKE ?)");
-      params.push(like, like);
-    }
-    const where = clauses.join(" AND ");
+    const { where, params } = eventFilter({ sources, query });
     const total = Number(this.db.prepare(`SELECT COUNT(*) AS count FROM usage_events WHERE ${where}`).get(...params)?.count || 0);
     const safeLimit = Math.max(1, Math.min(200, Math.trunc(Number(limit) || 40)));
     const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
     const rows = this.db.prepare(`
       SELECT * FROM usage_events
       WHERE ${where}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, source ASC, event_key ASC
       LIMIT ? OFFSET ?
     `).all(...params, safeLimit, safeOffset);
     return {
       total,
       offset: safeOffset,
       limit: safeLimit,
-      events: rows.map((row) => ({
-        source: row.source,
-        eventKey: row.event_key,
-        timestamp: Number(row.timestamp),
-        model: row.model,
-        effort: row.effort,
-        fast: row.fast === 1,
-        fastKnown: row.fast != null,
-        pool: row.pool,
-        input: Number(row.input_tokens) || 0,
-        output: Number(row.output_tokens) || 0,
-        cacheRead: Number(row.cache_read_tokens) || 0,
-        cacheWrite: Number(row.cache_write_tokens) || 0,
-        reasoning: Number(row.reasoning_tokens) || 0,
-        equivalentCostCents: row.equivalent_cost_cents,
-        inputCostCents: row.input_cost_cents,
-        cacheReadCostCents: row.cache_read_cost_cents,
-        cacheWriteCostCents: row.cache_write_cost_cents,
-        outputCostCents: row.output_cost_cents,
-      })),
+      events: rows.map(eventFromRow),
     };
+  }
+
+  *iterateEvents(options = {}) {
+    const { where, params } = eventFilter(options);
+    const statement = this.db.prepare(`SELECT * FROM usage_events WHERE ${where}
+      ORDER BY timestamp DESC, source ASC, event_key ASC`);
+    for (const row of statement.iterate(...params)) yield eventFromRow(row);
   }
 
   listPricingSnapshots(limit = 24) {
@@ -675,7 +721,8 @@ class UsageHistory {
   saveQuotaSample(sample) {
     if (!sample?.source || !sample?.pool || !Number.isFinite(Number(sample.timestamp))) return;
     const timestamp = Math.trunc(Number(sample.timestamp));
-    const bucket = Math.floor(timestamp / 300_000) * 300_000;
+    // Keep reset boundaries even when both observations fall in one five-minute bucket.
+    const bucket = sample.source === "codex" ? timestamp : Math.floor(timestamp / 300_000) * 300_000;
     this.insertQuota.run(
       String(sample.source),
       String(sample.pool),
@@ -684,6 +731,8 @@ class UsageHistory {
       sample.usedPercent == null ? null : finite(sample.usedPercent),
       sample.windowMinutes == null ? null : Math.trunc(finite(sample.windowMinutes)),
       sample.resetsAt == null ? null : Math.trunc(finite(sample.resetsAt)),
+      sample.startsAt == null ? null : Math.trunc(finite(sample.startsAt)),
+      sample.planType || null,
     );
   }
 

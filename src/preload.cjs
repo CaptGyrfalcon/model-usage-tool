@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld("widget", {
   getQuotaTimeline: (payload) => ipcRenderer.invoke("get-quota-timeline", payload),
   queryUsageEvents: (payload) => ipcRenderer.invoke("query-usage-events", payload),
   getPricingCatalog: (payload) => ipcRenderer.invoke("get-pricing-catalog", payload),
-  saveTextFile: (payload) => ipcRenderer.invoke("save-text-file", payload),
+  exportUsageEvents: (payload) => ipcRenderer.invoke("export-usage-events", payload),
   toggleFullscreen: (force) => ipcRenderer.invoke("toggle-fullscreen", force),
   saveSettings: (partial) => ipcRenderer.invoke("save-settings", partial),
   setPointerPresence: (present) => ipcRenderer.invoke("pointer-presence", present),

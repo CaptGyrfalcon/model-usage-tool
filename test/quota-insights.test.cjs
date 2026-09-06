@@ -55,3 +55,10 @@ test("keeps a pending weekly row when Codex temporarily omits that window", () =
   assert.deepEqual(insights.map((item) => item.id), ["codex-300", "codex-10080"]);
   assert.equal(insights[1].pending, true);
 });
+
+test("does not invent a 5h reset row when the complete response has no 5h window", () => {
+  const insights = buildQuotaInsights({ codex: { quota: { shortLimit: "absent", windows: [
+    { windowMinutes: 10080, usedPercent: 25, percentRemaining: 75, resetsAt: Date.now() + 86400000 },
+  ] } } });
+  assert.deepEqual(insights.map((item) => item.id), ["codex-10080"]);
+});

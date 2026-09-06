@@ -79,6 +79,7 @@ function normalizeSample(raw) {
     remainingPercent: remainingOf(usedPercent),
     windowMinutes: windowMinutesOf(raw),
     resetsAt: finite(raw.resetsAt ?? raw.resets_at),
+    startsAt: finite(raw.startsAt),
   };
 }
 
@@ -93,6 +94,7 @@ function livePointsFromSnapshot(data, now = Date.now()) {
       timestamp: at,
       usedPercent: data.cursorModels.percentUsed,
       resetsAt: data.billingCycleEnd,
+      startsAt: data.billingCycleStart,
     });
   }
   if (data.otherModels) {
@@ -102,6 +104,7 @@ function livePointsFromSnapshot(data, now = Date.now()) {
       timestamp: at,
       usedPercent: data.otherModels.percentUsed,
       resetsAt: data.billingCycleEnd,
+      startsAt: data.billingCycleStart,
     });
   }
   const windows = Array.isArray(data.codex?.quota?.windows) && data.codex.quota.windows.length
@@ -231,6 +234,26 @@ function extendCompletedCycle(cycle, points) {
   }];
 }
 
+function cycleReference(cycle, samples, poolId) {
+  if (!cycle?.key.startsWith("reset:")) return null;
+  const endAt = Number(cycle.key.slice(6));
+  if (!Number.isFinite(endAt)) return null;
+  const points = samples.map(normalizeSample).filter((point) => point && poolIdOf(point) === poolId);
+  const matching = points.filter((point) => point.resetsAt === endAt);
+  const explicit = matching.findLast((point) => point.startsAt != null && point.startsAt < endAt);
+  if (explicit) return { startAt: explicit.startsAt, endAt, estimated: false };
+  if (poolId.startsWith("codex")) {
+    const minutes = matching.findLast((point) => point.windowMinutes > 0)?.windowMinutes;
+    if (minutes) return { startAt: endAt - minutes * 60_000, endAt, estimated: false };
+  }
+  const previousEnd = points.reduce((latest, point) => point.resetsAt < endAt && point.resetsAt <= cycle.points[0]?.at ? Math.max(latest, point.resetsAt || 0) : latest, 0);
+  const duration = endAt - previousEnd;
+  if (poolId.startsWith("cursor") || poolId === "other-models") {
+    if (previousEnd && duration >= 27 * DAY_MS && duration <= 32 * DAY_MS) return { startAt: previousEnd, endAt, estimated: false };
+  }
+  return { startAt: endAt - poolMeta(poolId).typicalMs, endAt, estimated: true };
+}
+
 function buildQuotaTimeline(samples, {
   pool = "cursor-models",
   cycleKey = null,
@@ -260,6 +283,12 @@ function buildQuotaTimeline(samples, {
 
   const selected = cycles.find((cycle) => cycle.key === cycleKey) || cycles.find((cycle) => cycle.current) || cycles[0] || null;
   const merged = selected ? mergeLivePoint(selected, live, poolId) : null;
+  const reference = merged ? cycleReference(merged, [...samples, ...live], poolId) : null;
+  const cycleLabel = (cycle) => {
+    const label = reference && cycle.key === merged.key
+      ? formatCycleRange(reference.startAt, reference.endAt, poolMeta(poolId).typicalMs) : cycle.label;
+    return cycle.current ? `当前 · ${label}` : label;
+  };
   const sampled = downsample((merged?.points || []).filter((point) => point.remainingPercent != null));
   const series = extendCompletedCycle(merged, sampled);
   return {
@@ -270,20 +299,21 @@ function buildQuotaTimeline(samples, {
     pool: poolId,
     cycles: cycles.map((cycle) => ({
       key: cycle.key,
-      label: cycle.current ? `当前 · ${cycle.label}` : cycle.label,
-      startAt: cycle.startAt,
+      label: cycleLabel(cycle),
+      startAt: reference && cycle.key === merged.key ? reference.startAt : cycle.startAt,
       endAt: cycle.endAt,
       current: cycle.current,
       sampleCount: cycle.sampleCount,
     })),
     cycle: merged ? {
       key: merged.key,
-      label: merged.current ? `当前 · ${merged.label}` : merged.label,
-      startAt: merged.startAt,
+      label: cycleLabel(merged),
+      startAt: reference?.startAt ?? merged.startAt,
       endAt: merged.endAt,
       current: merged.current,
       startRemaining: merged.startRemaining,
       endRemaining: merged.endRemaining,
+      reference,
     } : null,
     series,
   };

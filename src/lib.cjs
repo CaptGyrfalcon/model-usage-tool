@@ -3,11 +3,12 @@ const os = require("node:os");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { getHistory } = require("./history.cjs");
-const { scanCodexUsage } = require("./codex.cjs");
+const { scanCodexUsage, codexPlanName } = require("./codex.cjs");
 const { refreshPricing, priceEvent, mergeFallbackCatalog } = require("./pricing.cjs");
 const { cursorEventKey } = require("./identity.cjs");
 const { buildQuotaInsights } = require("./quota-insights.cjs");
 const { buildQuotaTimeline, livePointsFromSnapshot } = require("./quota-timeline.cjs");
+const { buildCodexMonthly, monthBounds, WEEK_MS } = require("./renderer/codex-monthly.js");
 const { flattenPricingSnapshot, summarizePricingSnapshot } = require("./pricing-table.cjs");
 
 const APP_DIR = path.join(os.homedir(), "AppData", "Roaming", "cursor-usage-widget");
@@ -47,6 +48,8 @@ const DEFAULT_SETTINGS = {
   activeTab: "overview",
   modelRange: "month1",
   modelPrecision: "coarse",
+  modelView: "list",
+  modelMetric: "total",
   trendRange: "day",
   trendMetric: "total",
   trendBreakdown: false,
@@ -58,6 +61,7 @@ const DEFAULT_SETTINGS = {
   tokenDisplayVersion: 2,
   smartDock: false, // WIP: 智能贴边有严重 bug，入口已关闭。
   privacyMode: false,
+  motionPreference: "system",
   quotaAlerts: false, // WIP: 额度提醒有严重 bug，入口已关闭。
   alertThreshold: 20, // WIP: 提醒阈值有严重 bug，入口已关闭。
 };
@@ -352,6 +356,7 @@ function costSummary(events) {
 }
 
 function quotaCostSummary(events) {
+  events = events.filter((event) => event.source !== "codex" || !/spark/i.test(event.model || ""));
   const summary = {
     equivalentCostCents: 0,
     equivalentCostLowCents: 0,
@@ -757,8 +762,8 @@ async function fetchCursorSnapshot(pricingSnapshot) {
   const includedUsed = num(individual.used ?? planUsage.includedSpend);
   const includedRemaining = individual.remaining != null ? num(individual.remaining) : Math.max(0, includedLimit - includedUsed);
   const bonusUsed = num(individual.breakdown?.bonus ?? planUsage.bonusSpend);
-  history.saveQuotaSample({ source: "cursor", pool: "cursor-models", timestamp: now, usedPercent: autoPct, resetsAt: cycleEnd });
-  history.saveQuotaSample({ source: "cursor", pool: "other-models", timestamp: now, usedPercent: apiPct, resetsAt: cycleEnd });
+  history.saveQuotaSample({ source: "cursor", pool: "cursor-models", timestamp: now, usedPercent: autoPct, resetsAt: cycleEnd, startsAt: cycleStart });
+  history.saveQuotaSample({ source: "cursor", pool: "other-models", timestamp: now, usedPercent: apiPct, resetsAt: cycleEnd, startsAt: cycleStart });
 
   let cursorTokens = emptyTokens();
   let otherTokens = emptyTokens();
@@ -909,6 +914,11 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
   const scan = scanCodexUsage();
   const history = getHistory();
   const codexDedupe = history.migrateCodexCumulativeEvents(scan.events);
+  history.db.exec("BEGIN");
+  try {
+    for (const sample of scan.quotaSamples || []) history.saveQuotaSample(sample);
+    history.db.exec("COMMIT");
+  } catch (error) { history.db.exec("ROLLBACK"); throw error; }
   history.upsertEvents(scan.events.map((event) => {
     const existing = history.getEvent(event.source, event.eventKey);
     const originalPricing = history.pricingSnapshot(existing?.pricingSnapshotId) || pricingSnapshot;
@@ -934,6 +944,7 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
       usedPercent: window.usedPercent,
       windowMinutes: window.windowMinutes,
       resetsAt: window.resetsAt,
+      planType: rate.planType || scan.planType,
     });
   }
   const periodStart = usageWindow?.expired
@@ -942,11 +953,12 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
   const periodEvents = history.getEvents({ sources: "codex", start: periodStart, end: now + 60_000 });
   const quotaWindows = rateWindows.map((window) => {
     const start = window.expired ? window.expiredAt : codexPeriodStart({ primary: window }, now);
-    const events = history.getEvents({ sources: "codex", start, end: now + 60_000 });
+    const events = history.getEvents({ sources: "codex", start, end: Math.min(now + 1, (rate.timestamp || now) + 1) });
     const quotaEquivalent = quotaCostSummary(events);
     const ratio = Number(window.usedPercent) > 0 ? Number(window.usedPercent) / 100 : null;
     return {
       ...window,
+      planType: rate.planType || scan.planType,
       name: quotaWindowLabel(window.windowMinutes),
       speedUsage: speedUsageSummary(events, { quota: true }),
       quotaEstimate: {
@@ -984,7 +996,7 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
   return {
     available: scan.available,
     fetchedAt: now,
-    planName: scan.planType ? scan.planType[0].toUpperCase() + scan.planType.slice(1) : "Codex",
+    planName: codexPlanName(scan.planType),
     origins: scan.origins || [],
     files: scan.files || 0,
     periodStart,
@@ -995,6 +1007,7 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
       primary: primaryQuota,
       secondary: secondaryQuota,
       windows: quotaWindows,
+      shortLimit: rate?.shortLimit || (quotaWindows.some((window) => window.windowMinutes === 300) ? "present" : "unknown"),
       credits: rate?.credits || null,
       sampledAt: rate?.timestamp || null,
     },
@@ -1144,6 +1157,17 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
   else codexError = codexResult.reason?.message || String(codexResult.reason);
 
   if (!cursor && !codex) throw new Error(cursorError || codexError || "未找到可用的用量数据");
+
+  if (codex) {
+    const start = monthBounds(now).startAt - WEEK_MS;
+    codex.monthlyQuota = buildCodexMonthly({
+      windows: codex.quota?.windows,
+      shortLimit: codex.quota?.shortLimit,
+      samples: history.getQuotaSamples({ source: "codex", start, end: now + 1 }),
+      events: history.getQuotaConsumption({ source: "codex", start, end: now + 1 }),
+      now,
+    });
+  }
 
   const trendStart = startOfLocalDay(now - 29 * DAY_MS);
   const cursorTrendEvents = history.getEvents({ sources: "cursor", start: trendStart, end: now + 60_000 });

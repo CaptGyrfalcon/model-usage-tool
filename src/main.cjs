@@ -702,19 +702,26 @@ ipcMain.handle("get-model-usage", (_event, range) => runDataTask("get-model-usag
 ipcMain.handle("get-quota-timeline", (_event, payload) => runDataTask("get-quota-timeline", payload || {}));
 ipcMain.handle("query-usage-events", (_event, payload) => runDataTask("query-usage-events", payload || {}));
 ipcMain.handle("get-pricing-catalog", (_event, payload) => runDataTask("get-pricing-catalog", payload || {}));
-ipcMain.handle("save-text-file", async (_event, payload) => {
+let exporting = false;
+ipcMain.handle("export-usage-events", async (_event, payload) => {
   if (!win) return { ok: false, error: "窗口未就绪" };
-  const result = await dialog.showSaveDialog(win, {
-    defaultPath: payload?.name || "export.txt",
-    filters: [
-      { name: "CSV", extensions: ["csv"] },
-      { name: "JSON", extensions: ["json"] },
-      { name: "文本", extensions: ["txt"] },
-    ],
-  });
-  if (result.canceled || !result.filePath) return { ok: false, canceled: true };
-  fs.writeFileSync(result.filePath, String(payload?.content ?? ""), "utf8");
-  return { ok: true, path: result.filePath };
+  if (exporting) return { ok: false, error: "已有导出正在进行" };
+  if (!["csv", "json"].includes(payload?.kind)) return { ok: false, error: "不支持的导出格式" };
+  exporting = true;
+  try {
+    const kind = payload.kind;
+    const source = ["cursor", "codex"].includes(payload.source) ? payload.source : "all";
+    const query = String(payload.query || "");
+    const stamp = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+    const result = await dialog.showSaveDialog(win, {
+      defaultPath: `usage-events-${stamp}.${kind}`,
+      filters: [{ name: kind.toUpperCase(), extensions: [kind] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    return await runDataTask("export-usage-events", { filePath: result.filePath, kind, source, query });
+  } catch (error) {
+    return { ok: false, error: error.message || "导出失败" };
+  } finally { exporting = false; }
 });
 ipcMain.handle("toggle-fullscreen", (_event, force) => toggleFullscreen(force));
 ipcMain.handle("save-settings", (_event, partial) => applySettings(partial));
@@ -722,7 +729,7 @@ ipcMain.handle("pointer-presence", (_event, present) => handlePointerPresence(Bo
 ipcMain.handle("set-opacity", (_event, value) => {
   const opacity = Math.min(1, Math.max(0.65, Number(value) || 0.96));
   if (win) win.setOpacity(opacity);
-  return saveSettings({ opacity });
+  return opacity;
 });
 ipcMain.handle("hide-window", () => {
   if (win) {
