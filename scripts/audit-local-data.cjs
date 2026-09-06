@@ -1,3 +1,5 @@
+// Developer diagnostic: scans local Codex logs and the widget SQLite history.
+// Do not commit its output; it may include account-specific usage metadata.
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");

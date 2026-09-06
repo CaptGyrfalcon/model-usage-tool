@@ -1,5 +1,36 @@
 node_modules/
 dist/
+out/
+release/
+coverage/
 _probe*.py
 *.log
 .DS_Store
+Thumbs.db
+.idea/
+*.local
+
+# Secrets and local env
+.env
+.env.*
+credentials.json
+*.pem
+*.key
+
+# Widget runtime data (normally in %APPDATA%\cursor-usage-widget)
+session.json
+settings.json
+history.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Cursor login database if copied into this folder
+*.vscdb
+*.vscdb-wal
+*.vscdb-shm
+cursor-usage-state-*.vscdb
+
+# Codex local sessions if copied into this folder
+.codex/
+*.jsonl

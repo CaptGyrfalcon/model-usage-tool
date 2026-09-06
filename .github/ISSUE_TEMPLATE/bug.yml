@@ -1,0 +1,37 @@
+name: 缺陷报告
+description: 用量显示错误、崩溃或采集失败
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这是非官方项目。请不要粘贴 access token、Cookie、`session.json` 或带邮箱/金额的账单截图。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 实际结果和你期望的结果
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows 版本
+      placeholder: Windows 11 23H2
+  - type: input
+    id: node
+    attributes:
+      label: Node.js 版本
+      placeholder: 22.x
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其他信息
+      description: Cursor / Codex 是否受影响、控制台报错（请打码账户信息）

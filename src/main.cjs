@@ -665,7 +665,7 @@ function startCodexWatch() {
 }
 
 app.whenReady().then(() => {
-  app.setAppUserModelId("com.cursor.usage-widget");
+  app.setAppUserModelId("com.captgyrfalcon.cursor-usage-widget");
   createTray();
   createWindow();
   registerGlobalShortcuts();
