@@ -38,7 +38,7 @@ test("starts a new cycle when used percent drops and reset time is missing", () 
   assert.equal(cycles[0].points[0].usedPercent, 8);
 });
 
-test("lets the user inspect a past cycle series and overlays the live point", () => {
+test("keeps live points in the current cycle and extends a past cycle to its end", () => {
   const now = Date.UTC(2026, 7, 31, 8);
   const currentEnd = now + 10 * 86_400_000;
   const previousEnd = now - 20 * 86_400_000;
@@ -47,18 +47,29 @@ test("lets the user inspect a past cycle series and overlays the live point", ()
     { source: "cursor", pool: "cursor-models", timestamp: previousEnd - 86_400_000, usedPercent: 92, resetsAt: previousEnd },
     { source: "cursor", pool: "cursor-models", timestamp: now - 2 * 86_400_000, usedPercent: 18, resetsAt: currentEnd },
   ];
-  const past = buildQuotaTimeline(samples, { pool: "cursor-models", cycleKey: `reset:${previousEnd}`, now });
+  const livePoint = { source: "cursor", pool: "cursor-models", timestamp: now, usedPercent: 27, resetsAt: currentEnd };
+  const past = buildQuotaTimeline(samples, {
+    pool: "cursor-models",
+    cycleKey: `reset:${previousEnd}`,
+    now,
+    live: [livePoint],
+  });
   assert.equal(past.cycle.key, `reset:${previousEnd}`);
   assert.equal(past.series.at(-1).remainingPercent, 8);
+  assert.equal(past.series.at(-1).at, previousEnd);
+  assert.equal(past.series.at(-1).projected, true);
+  assert.equal(past.series.some((point) => point.at === now), false);
   assert.equal(past.cycle.current, false);
 
   const live = buildQuotaTimeline(samples, {
     pool: "cursor-models",
     now,
-    live: [{ source: "cursor", pool: "cursor-models", timestamp: now, usedPercent: 27, resetsAt: currentEnd }],
+    live: [livePoint],
   });
   assert.equal(live.cycle.current, true);
   assert.equal(live.series.at(-1).remainingPercent, 73);
+  assert.equal(live.series.at(-1).at, now);
+  assert.equal(live.series.at(-1).projected, undefined);
 });
 
 test("reads live Codex windows from the current snapshot", () => {

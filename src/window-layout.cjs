@@ -58,6 +58,7 @@ function windowMetrics(settings = {}, display = {}) {
   };
 }
 
+// WIP: 智能贴边有严重 bug，入口已关闭，暂不启用。
 function smartDockBounds(bounds, workArea, reveal = 12) {
   const center = bounds.x + bounds.width / 2;
   const edge = center < workArea.x + workArea.width / 2 ? "left" : "right";

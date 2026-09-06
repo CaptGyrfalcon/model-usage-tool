@@ -4,7 +4,7 @@ const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { getHistory } = require("./history.cjs");
 const { scanCodexUsage } = require("./codex.cjs");
-const { refreshPricing, priceEvent } = require("./pricing.cjs");
+const { refreshPricing, priceEvent, mergeFallbackCatalog } = require("./pricing.cjs");
 const { cursorEventKey } = require("./identity.cjs");
 const { buildQuotaInsights } = require("./quota-insights.cjs");
 const { buildQuotaTimeline, livePointsFromSnapshot } = require("./quota-timeline.cjs");
@@ -56,10 +56,10 @@ const DEFAULT_SETTINGS = {
   eventSource: "all",
   pricingSource: "all",
   tokenDisplayVersion: 2,
-  smartDock: false,
+  smartDock: false, // WIP: 智能贴边有严重 bug，入口已关闭。
   privacyMode: false,
-  quotaAlerts: true,
-  alertThreshold: 20,
+  quotaAlerts: false, // WIP: 额度提醒有严重 bug，入口已关闭。
+  alertThreshold: 20, // WIP: 提醒阈值有严重 bug，入口已关闭。
 };
 
 let usageEventCache = [];
@@ -91,6 +91,9 @@ function loadSettings() {
     // First launch uses defaults.
   }
   const next = { ...DEFAULT_SETTINGS, ...raw };
+  // WIP: 智能贴边、额度提醒有严重 bug，入口已关闭，忽略本地已保存的开启状态。
+  next.smartDock = false;
+  next.quotaAlerts = false;
   if (raw.tokenDisplayVersion !== 2) {
     if (!raw.trendMetric || raw.trendMetric === "effective") next.trendMetric = "total";
     next.tokenDisplayVersion = 2;
@@ -1246,9 +1249,9 @@ function getPricingCatalog({ snapshotId = null, source = "all" } = {}) {
   const history = getHistory();
   const snapshots = history.listPricingSnapshots(36);
   const selected = snapshotId == null
-    ? history.latestPricingSnapshot()
+    ? mergeFallbackCatalog(history.latestPricingSnapshot())
     : history.pricingSnapshot(snapshotId);
-  const current = selected || history.latestPricingSnapshot();
+  const current = selected || mergeFallbackCatalog(history.latestPricingSnapshot());
   return {
     snapshots,
     selectedId: current?.id ?? null,

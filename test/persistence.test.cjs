@@ -274,6 +274,31 @@ test("locks event pricing on first persistence", () => {
   }
 });
 
+test("reprices events that were stored before a model entered the catalog", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "usage-unavailable-reprice-test-"));
+  const { priceEvent, builtInSnapshot } = require("../src/pricing.cjs");
+  try {
+    const history = new UsageHistory(path.join(temp, "history.sqlite"));
+    history.upsertEvents([{
+      source: "codex", eventKey: "astra-miss", timestamp: 1_000, model: "gpt-6-astra",
+      input: 100_000, output: 10_000, cacheRead: 0, cacheWrite: 0,
+      fast: false, fastKnown: true, pricingSnapshotId: 1, pricingStatus: "unavailable",
+    }]);
+    const unpriced = history.getUnpricedEvents();
+    assert.equal(unpriced.length, 1);
+    const priced = priceEvent(unpriced[0], builtInSnapshot(1));
+    history.upsertEvents([{ ...unpriced[0], ...priced, pricingSnapshotId: 2 }]);
+    const row = history.getEvents({ start: 0, end: 2_000 })[0];
+    assert.equal(row.equivalentCostCents, 150);
+    assert.equal(row.quotaEquivalentCostCents, 150);
+    assert.equal(row.pricingSnapshotId, 2);
+    assert.notEqual(row.pricingStatus, "unavailable");
+    history.close();
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("maps Codex priority service tier from local request logs", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-tier-test-"));
   const sessions = path.join(temp, "sessions", "2026", "08", "24");

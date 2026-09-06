@@ -55,6 +55,8 @@ function resetDescription(timestamp) {
 }
 
 function checkQuotaAlerts(data) {
+  // WIP: 额度提醒 / 提醒阈值有严重 bug，入口已关闭，暂不启用。
+  return;
   const settings = loadSettings();
   if (!settings.quotaAlerts || !Notification.isSupported()) return;
   const threshold = Number(settings.alertThreshold) || 20;
@@ -238,23 +240,12 @@ function trayMenu() {
       checked: Boolean(settings.orbMode),
       click: (item) => applySettings({ orbMode: item.checked }),
     },
-    {
-      label: "智能贴边",
-      type: "checkbox",
-      checked: Boolean(settings.smartDock),
-      click: (item) => applySettings({ smartDock: item.checked }),
-    },
+    // WIP: 智能贴边、额度提醒有严重 bug，托盘入口已关闭。
     {
       label: "隐私模式",
       type: "checkbox",
       checked: Boolean(settings.privacyMode),
       click: (item) => applySettings({ privacyMode: item.checked }),
-    },
-    {
-      label: `额度提醒（${Number(settings.alertThreshold) || 20}%）`,
-      type: "checkbox",
-      checked: Boolean(settings.quotaAlerts),
-      click: (item) => applySettings({ quotaAlerts: item.checked }),
     },
     {
       label: "开机启动",
@@ -449,6 +440,8 @@ function restoreSmartDock(animate = true) {
 }
 
 function dockSmartWindow() {
+  // WIP: 智能贴边有严重 bug，入口已关闭，暂不启用。
+  return;
   smartDockTimer = null;
   const settings = loadSettings();
   if (!win || !win.isVisible() || smartDockState || dashboardFullscreen || win.isFullScreen() || settings.orbMode || !settings.smartDock) return;
@@ -463,13 +456,13 @@ function dockSmartWindow() {
 }
 
 function handlePointerPresence(present) {
+  // WIP: 智能贴边有严重 bug，入口已关闭，暂不启用。
   if (present) {
     cancelSmartDockTimer();
     restoreSmartDock(true);
     return;
   }
   cancelSmartDockTimer();
-  if (loadSettings().smartDock) smartDockTimer = setTimeout(dockSmartWindow, SMART_DOCK_DELAY);
 }
 
 function showWindow() {
@@ -611,6 +604,9 @@ function applySettings(partial) {
   if ("intervalMs" in clean) clean.intervalMs = clampInterval(clean.intervalMs);
   if (clean.orbMode === true) clean.compact = false;
   if (clean.compact === true) clean.orbMode = false;
+  // WIP: 智能贴边、额度提醒有严重 bug，入口已关闭，忽略外部开启。
+  clean.smartDock = false;
+  clean.quotaAlerts = false;
   if (clean.smartDock === false || "compact" in clean || "orbMode" in clean || "orbDisplayMode" in clean || "orbPoolCombined" in clean) restoreSmartDock(false);
   const next = saveSettings(clean);
   if ("compact" in clean || "orbMode" in clean || "orbDisplayMode" in clean || "orbPoolCombined" in clean) applyWindowMode(next);

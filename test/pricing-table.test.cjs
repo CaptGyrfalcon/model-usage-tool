@@ -17,6 +17,9 @@ test("keeps Codex long-context rates as a separate tier", () => {
   assert.ok(sol.some((row) => row.speed === "standard" && row.context === "default" && row.input === 4));
   assert.ok(sol.some((row) => row.speed === "standard" && row.context === "long" && row.input === 8));
   assert.ok(sol.some((row) => row.speed === "fast" && row.context === "default"));
+  const astra = rows.filter((row) => row.model === "gpt-6-astra");
+  assert.ok(astra.some((row) => row.speed === "standard" && row.context === "default" && row.input === 10));
+  assert.ok(astra.some((row) => row.speed === "fast" && row.context === "long" && row.output === 150));
 });
 
 test("models without Fast only expose the non-Fast tier", () => {

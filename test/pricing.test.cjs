@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { FALLBACK_MODELS, builtInSnapshot, parseOpenAiPricing, parseCursorPricing, priceEvent } = require("../src/pricing.cjs");
+const { FALLBACK_MODELS, builtInSnapshot, parseOpenAiPricing, parseCursorPricing, priceEvent, modelKey, mergeFallbackCatalog } = require("../src/pricing.cjs");
 
 test("parses Standard and Fast OpenAI pricing tables", () => {
   const markdown = `
@@ -69,4 +69,63 @@ test("uses one 2.5x dollar-equivalent and credit basis for GPT-5.6 Fast", () => 
   }, snapshot);
   assert.equal(priced.equivalentCostCents, 610);
   assert.equal(priced.quotaEquivalentCostCents, 610);
+});
+
+test("parses GPT-6 Astra Standard and Fast OpenAI pricing tables", () => {
+  const markdown = `
+gpt-6-astra | $10.00 | $1.00 | $12.50 | $50.00 | $20.00 | $2.00 | $25.00 | $75.00
+gpt-6-astra | $5.00 | $0.50 | $6.25 | $25.00 | $10.00 | $1.00 | $12.50 | $37.50
+gpt-6-astra | $20.00 | $2.00 | $25.00 | $100.00 | $40.00 | $4.00 | $50.00 | $150.00
+`;
+  const models = parseOpenAiPricing(markdown);
+  assert.equal(models["gpt-6-astra"].standard.short.input, 10);
+  assert.equal(models["gpt-6-astra"].standard.short.cacheWrite, 12.5);
+  assert.equal(models["gpt-6-astra"].standard.long.output, 75);
+  assert.equal(models["gpt-6-astra"].fast.short.output, 100);
+  assert.equal(models["gpt-6-astra"].fast.long.input, 40);
+});
+
+test("aliases gpt-6 to gpt-6-astra and prices it from the built-in catalog", () => {
+  assert.equal(modelKey("gpt-6"), "gpt-6-astra");
+  assert.equal(modelKey("gpt-6-astra-xhigh-fast"), "gpt-6-astra");
+  const priced = priceEvent({
+    source: "codex", model: "gpt-6", input: 100_000, output: 10_000,
+    cacheRead: 0, cacheWrite: 0, fast: false, fastKnown: true,
+  }, { id: 9, models: {}, modelsBySource: { codex: {}, cursor: {} } });
+  assert.equal(priced.inputCostCents, 100);
+  assert.equal(priced.outputCostCents, 50);
+  assert.equal(priced.equivalentCostCents, 150);
+  assert.notEqual(priced.pricingStatus, "unavailable");
+});
+
+test("uses 2.5x Codex credit for GPT-6 Astra Fast and skips long-context surcharge", () => {
+  const snapshot = builtInSnapshot(1);
+  const fast = priceEvent({
+    source: "codex", model: "gpt-6-astra", input: 100_000, output: 10_000,
+    cacheRead: 0, cacheWrite: 0, fast: true, fastKnown: true,
+  }, snapshot);
+  assert.equal(fast.equivalentCostCents, 375);
+  assert.equal(fast.quotaEquivalentCostCents, 375);
+
+  const longAstra = priceEvent({
+    source: "codex", model: "gpt-6-astra", input: 300_000, output: 0,
+    cacheRead: 0, cacheWrite: 0, fast: false, fastKnown: true,
+  }, snapshot);
+  assert.equal(longAstra.inputCostCents, 300);
+
+  const longSol = priceEvent({
+    source: "codex", model: "gpt-5.6-sol", input: 300_000, output: 0,
+    cacheRead: 0, cacheWrite: 0, fast: false, fastKnown: true,
+  }, snapshot);
+  assert.equal(longSol.inputCostCents, 240);
+});
+
+test("fills GPT-6 Astra into a cached catalog that predates the model", () => {
+  const merged = mergeFallbackCatalog({
+    id: 4,
+    models: { "gpt-5.6-sol": FALLBACK_MODELS["gpt-5.6-sol"] },
+    modelsBySource: { codex: {}, cursor: {} },
+  });
+  assert.equal(merged.modelsBySource.codex["gpt-6-astra"].standard.short.input, 10);
+  assert.equal(merged.modelsBySource.cursor["gpt-6-astra"].standard.short.output, 50);
 });

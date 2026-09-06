@@ -1457,8 +1457,6 @@ input[type="range"] {
   font: inherit;
 }
 
-.privacy .price-btn { opacity: 0.4; }
-
 .smart-docked .shell::after {
   content: "";
   position: absolute;

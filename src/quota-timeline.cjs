@@ -189,6 +189,12 @@ function downsample(points, maxPoints = 200) {
 function mergeLivePoint(cycle, live, poolId) {
   const point = live.map(normalizeSample).find((sample) => sample && poolIdOf(sample) === poolId);
   if (!point || point.remainingPercent == null) return cycle;
+  // A live snapshot only describes the active billing cycle.  In particular,
+  // never append it to a historical cycle selected by the user.
+  if (!cycle.current) return cycle;
+  if (cycle.key.startsWith("reset:") && point.resetsAt != null && cycle.key !== `reset:${point.resetsAt}`) {
+    return cycle;
+  }
   const last = cycle.points[cycle.points.length - 1];
   if (last && point.timestamp <= last.at) {
     return {
@@ -211,6 +217,18 @@ function mergeLivePoint(cycle, live, poolId) {
       remainingPercent: point.remainingPercent,
     }],
   };
+}
+
+function extendCompletedCycle(cycle, points) {
+  if (!cycle || cycle.current || !points.length) return points;
+  const last = points[points.length - 1];
+  if (!Number.isFinite(cycle.endAt) || cycle.endAt <= last.at) return points;
+  return [...points, {
+    at: cycle.endAt,
+    usedPercent: last.usedPercent,
+    remainingPercent: last.remainingPercent,
+    projected: true,
+  }];
 }
 
 function buildQuotaTimeline(samples, {
@@ -242,7 +260,8 @@ function buildQuotaTimeline(samples, {
 
   const selected = cycles.find((cycle) => cycle.key === cycleKey) || cycles.find((cycle) => cycle.current) || cycles[0] || null;
   const merged = selected ? mergeLivePoint(selected, live, poolId) : null;
-  const series = downsample(merged?.points || []).filter((point) => point.remainingPercent != null);
+  const sampled = downsample((merged?.points || []).filter((point) => point.remainingPercent != null));
+  const series = extendCompletedCycle(merged, sampled);
   return {
     pools: QUOTA_POOLS.map((item) => ({
       ...item,

@@ -55,10 +55,10 @@ let settings = {
   quotaLevelPool: "cursor-models",
   eventSource: "all",
   pricingSource: "all",
-  smartDock: false,
+  smartDock: false, // WIP: 智能贴边有严重 bug，入口已关闭。
   privacyMode: false,
-  quotaAlerts: true,
-  alertThreshold: 20,
+  quotaAlerts: false, // WIP: 额度提醒有严重 bug，入口已关闭。
+  alertThreshold: 20, // WIP: 提醒阈值有严重 bug，入口已关闭。
 };
 
 function escapeHtml(value) {
@@ -70,8 +70,12 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function displayEmail(email) {
+  if (!email) return "";
+  return settings.privacyMode ? "****" : String(email);
+}
+
 function formatTokens(n, digits = 1) {
-  if (settings.privacyMode) return "••••";
   const v = Number(n) || 0;
   const abs = Math.abs(v);
   if (abs >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}B`;
@@ -81,7 +85,6 @@ function formatTokens(n, digits = 1) {
 }
 
 function formatUsd(cents) {
-  if (settings.privacyMode) return "••••";
   if (cents == null || Number.isNaN(Number(cents))) return "—";
   const dollars = Number(cents) / 100;
   const absolute = Math.abs(dollars);
@@ -506,11 +509,9 @@ function triggerLiquidRefresh(effect) {
   const damage = card?.querySelector(".orb-damage");
   const drain = card?.querySelector(".orb-drain");
   if (!damage || !drain || !effect) return;
-  const parts = settings.privacyMode
-    ? { major: "-$••.••", minor: "••" }
-    : window.LiquidPool.damageParts(effect.amountCents);
+  const parts = window.LiquidPool.damageParts(effect.amountCents);
   damage.innerHTML = `<span>${parts.major}</span><small>${parts.minor}</small>`;
-  damage.setAttribute("aria-label", settings.privacyMode ? "本次用量已隐藏" : `本次用量${parts.major}${parts.minor}`);
+  damage.setAttribute("aria-label", `本次用量${parts.major}${parts.minor}`);
   const strength = Math.min(2, 0.65 + effect.levelDelta * 0.12 + Math.sqrt(effect.amountCents || 0) * 0.035);
   const durationMs = window.LiquidPool.refreshEffectDuration(effect.amountCents, settings.intervalMs);
   drain.style.setProperty("--drain-strength", strength.toFixed(2));
@@ -614,7 +615,6 @@ function renderUsagePoolGallery(pools) {
   const signature = JSON.stringify({
     combined,
     shape,
-    privacy: settings.privacyMode,
     pools: (combined ? [tank] : pools).map((pool) => [
       pool.id, pool.remaining, pool.shortRemaining, pool.weeklyRemaining, pool.weeklyOnlyRemaining,
       pool.capacityCents, pool.shortCapacityCents, pool.sizeScale,
@@ -664,7 +664,7 @@ function renderUsagePoolCard(pool, shape) {
 function renderCombinedPoolCard(tank, shape) {
   const pct = formatCursorPct(tank.remaining);
   const legend = `<div class="usage-pool-legend combined-legend">${tank.layers.map((layer) => {
-    const amount = settings.privacyMode ? "••••" : formatUsd(layer.remainingCents);
+    const amount = formatUsd(layer.remainingCents);
     return `<span><i data-tone="${escapeHtml(layer.tone)}"></i>${escapeHtml(layer.name)} ${escapeHtml(formatPct(layer.share))} · ${escapeHtml(amount)}</span>`;
   }).join("")}</div>`;
   return `<article class="usage-pool-card combined" data-usage-pool="${escapeHtml(tank.id)}">
@@ -921,7 +921,7 @@ function renderOverview(d) {
   const lastTotal = lastEffective + (last?.tokens?.cacheRead || 0) + (last?.tokens?.cacheWrite || 0);
   const lastCost = last?.equivalentCostCents == null ? "价格不可用" : `${formatUsd(last.equivalentCostCents)} 美元等效`;
   $("recentPanel").innerHTML = last
-    ? `<div class="recent-icon">↗</div><div class="recent-copy"><span>最近一次调用 · ${last.source === "codex" ? "Codex" : "Cursor"}</span><b>${settings.privacyMode ? "模型信息已隐藏" : `${escapeHtml(last.model)}${last.effort ? ` · ${escapeHtml(last.effort)}` : ""}`}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>${recentDonutHtml(last)}`
+    ? `<div class="recent-icon">↗</div><div class="recent-copy"><span>最近一次调用 · ${last.source === "codex" ? "Codex" : "Cursor"}</span><b>${escapeHtml(last.model)}${last.effort ? ` · ${escapeHtml(last.effort)}` : ""}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>${recentDonutHtml(last)}`
     : `<div class="empty-state">本周期还没有可显示的用量事件</div>`;
 }
 
@@ -983,7 +983,7 @@ function renderModels(d) {
   const max = Math.max(1, ...rows.map((row) => Number(row.total) || 0));
   $("modelList").innerHTML = rows
     .map((row, index) => {
-      const modelLabel = settings.privacyMode ? `模型 ${String(index + 1).padStart(2, "0")}` : row.label;
+      const modelLabel = row.label;
       return `
       <article class="model-row">
         <div class="model-rank">${String(index + 1).padStart(2, "0")}</div>
@@ -1371,8 +1371,9 @@ function levelChartSvg(series) {
     .filter((item, index, list) => list.findIndex((entry) => entry.at === item.at) === index)
     .map((item) => `<text class="axis-x" x="${xOf(item.at).toFixed(1)}" y="${baseY + 22}" text-anchor="middle">${escapeHtml(formatDateTime(item.at))}</text>`)
     .join("");
-  const dots = series.map((item, index) => `<circle class="level-dot" data-level-index="${index}" cx="${xOf(item.at).toFixed(1)}" cy="${yOf(Number(item.remainingPercent) || 0).toFixed(1)}" r="2.4"></circle>`).join("");
+  const dots = series.map((item, index) => item.projected ? "" : `<circle class="level-dot" data-level-index="${index}" cx="${xOf(item.at).toFixed(1)}" cy="${yOf(Number(item.remainingPercent) || 0).toFixed(1)}" r="2.4"></circle>`).join("");
   const hits = series.map((item, index) => {
+    if (item.projected) return "";
     const x = xOf(item.at);
     const widthHit = Math.max(8, plotWidth / Math.max(series.length, 1));
     return `<rect class="chart-hitbox" data-level-index="${index}" x="${(x - widthHit / 2).toFixed(1)}" y="${top}" width="${widthHit.toFixed(1)}" height="${plotHeight}"></rect>`;
@@ -1396,8 +1397,9 @@ function renderLevels() {
   const start = timeline?.cycle?.startRemaining;
   const end = timeline?.cycle?.endRemaining;
   $("levelTotal").textContent = start == null && end == null ? "—" : `${formatCursorPct(start)} → ${formatCursorPct(end)}`;
-  $("levelPeak").textContent = timeline?.series?.length
-    ? `${timeline.series.length} 个采样点`
+  const sampleCount = timeline?.series?.filter((point) => !point.projected).length || 0;
+  $("levelPeak").textContent = sampleCount
+    ? `${sampleCount} 个采样点`
     : "尚无采样";
   $("levelChart").innerHTML = levelChartSvg(timeline?.series || []);
 }
@@ -1423,7 +1425,7 @@ function renderEvents() {
   $("eventList").innerHTML = page.events.length
     ? page.events.map((event) => {
       const speed = speedLabel(event);
-      const model = settings.privacyMode ? "模型信息已隐藏" : `${event.model}${event.effort ? ` · ${event.effort}` : ""}`;
+      const model = `${event.model}${event.effort ? ` · ${event.effort}` : ""}`;
       return `<article class="event-row">
         <div class="event-row-top"><b>${escapeHtml(model)}</b><em>${escapeHtml(formatUsd(eventCostCents(event)))}</em></div>
         <div class="event-meta">
@@ -1447,7 +1449,6 @@ function renderEvents() {
 }
 
 function formatRate(value) {
-  if (settings.privacyMode) return "••••";
   const number = Number(value);
   if (!Number.isFinite(number)) return "—";
   return `$${number}`;
@@ -1494,7 +1495,7 @@ function renderPricing() {
         ${catalog.rows.map((row) => `
           <tr>
             <td>${row.source === "codex" ? "Codex" : "Cursor"}</td>
-            <td>${settings.privacyMode ? "模型已隐藏" : escapeHtml(row.model)}</td>
+            <td>${escapeHtml(row.model)}</td>
             <td><span class="speed-pill ${row.speed === "fast" ? "fast" : "normal"}">${escapeHtml(row.speedLabel)}</span></td>
             <td>${escapeHtml(row.contextLabel)}</td>
             <td>${escapeHtml(formatRate(row.input))}</td>
@@ -1582,7 +1583,7 @@ function render() {
   $("fullscreenBtn").classList.toggle("active", Boolean(windowState.fullscreen));
   $("fullscreenBtn").textContent = windowState.fullscreen ? "↙" : "⛶";
   $("fullscreenBtn").title = windowState.fullscreen ? "退出全屏（Esc / F11）" : "全屏仪表盘（F11）";
-  $("smartBtn").classList.toggle("active", smartPanelOpen || settings.smartDock || settings.privacyMode || settings.quotaAlerts);
+  $("smartBtn").classList.toggle("active", smartPanelOpen || settings.privacyMode);
   $("smartPanel").hidden = !smartPanelOpen || orbMode;
   $("smartDockToggle").checked = Boolean(settings.smartDock);
   $("privacyToggle").checked = Boolean(settings.privacyMode);
@@ -1600,10 +1601,10 @@ function render() {
   if (d.modelUsage?.key === settings.modelRange && modelUsage?.key !== settings.modelRange) modelUsage = d.modelUsage;
   $("planBadge").textContent = d.codex && d.cursorModels ? "双源" : d.codex ? "Codex" : d.planName || "Cursor";
   const accountParts = [];
-  if (d.email) accountParts.push(d.email);
+  if (d.email) accountParts.push(displayEmail(d.email));
   if (d.cursorModels) accountParts.push(`Cursor ${d.planName || ""}`.trim());
   if (d.codex) accountParts.push(`Codex ${d.codex.planName || ""}`.trim());
-  $("planLine").textContent = settings.privacyMode ? "账户信息已隐藏 · 隐私模式" : accountParts.join(" · ") || "本机用量历史";
+  $("planLine").textContent = accountParts.join(" · ") || "本机用量历史";
   $("priceBtn").title = d.pricing?.fetchedAt
     ? `手动更新官方价目表 · 当前 ${new Date(d.pricing.fetchedAt).toLocaleString("zh-CN")}`
     : "手动更新官方价目表";
@@ -1631,7 +1632,7 @@ async function setFullscreen(force) {
 function setSmartPanel(open) {
   smartPanelOpen = Boolean(open);
   $("smartPanel").hidden = !smartPanelOpen || Boolean(settings.orbMode);
-  $("smartBtn").classList.toggle("active", smartPanelOpen || settings.smartDock || settings.privacyMode || settings.quotaAlerts);
+  $("smartBtn").classList.toggle("active", smartPanelOpen || settings.privacyMode);
 }
 
 async function loadQuotaTimeline() {
@@ -1880,6 +1881,7 @@ $("dashBtn").addEventListener("click", () => window.widget.openDashboard());
 $("compactBtn").addEventListener("click", () => window.widget.saveSettings({ compact: !settings.compact, orbMode: false }));
 $("smartBtn").addEventListener("click", () => setSmartPanel(!smartPanelOpen));
 $("smartCloseBtn").addEventListener("click", () => setSmartPanel(false));
+// WIP: 智能贴边、额度提醒、提醒阈值有严重 bug，入口已关闭。
 $("smartDockToggle").addEventListener("change", (event) => window.widget.saveSettings({ smartDock: event.target.checked }));
 $("privacyToggle").addEventListener("change", (event) => window.widget.saveSettings({ privacyMode: event.target.checked }));
 $("alertToggle").addEventListener("change", (event) => window.widget.saveSettings({ quotaAlerts: event.target.checked }));

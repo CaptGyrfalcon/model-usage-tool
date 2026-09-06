@@ -13,6 +13,14 @@ function finite(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function upsertCost(column) {
+  return `CASE
+    WHEN usage_events.pricing_status = 'unavailable' THEN excluded.${column}
+    WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.${column}, usage_events.${column})
+    ELSE COALESCE(usage_events.${column}, excluded.${column})
+  END`;
+}
+
 class UsageHistory {
   constructor(dbPath = HISTORY_DB_PATH) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -121,19 +129,27 @@ class UsageHistory {
         cache_write_tokens = excluded.cache_write_tokens,
         reasoning_tokens = excluded.reasoning_tokens,
         cost_cents = COALESCE(usage_events.cost_cents, excluded.cost_cents),
-        input_cost_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.input_cost_cents, usage_events.input_cost_cents) ELSE COALESCE(usage_events.input_cost_cents, excluded.input_cost_cents) END,
-        cache_read_cost_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.cache_read_cost_cents, usage_events.cache_read_cost_cents) ELSE COALESCE(usage_events.cache_read_cost_cents, excluded.cache_read_cost_cents) END,
-        cache_write_cost_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.cache_write_cost_cents, usage_events.cache_write_cost_cents) ELSE COALESCE(usage_events.cache_write_cost_cents, excluded.cache_write_cost_cents) END,
-        cache_cost_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.cache_cost_cents, usage_events.cache_cost_cents) ELSE COALESCE(usage_events.cache_cost_cents, excluded.cache_cost_cents) END,
-        output_cost_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.output_cost_cents, usage_events.output_cost_cents) ELSE COALESCE(usage_events.output_cost_cents, excluded.output_cost_cents) END,
-        equivalent_cost_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.equivalent_cost_cents, usage_events.equivalent_cost_cents) ELSE COALESCE(usage_events.equivalent_cost_cents, excluded.equivalent_cost_cents) END,
-        equivalent_cost_low_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.equivalent_cost_low_cents, usage_events.equivalent_cost_low_cents) ELSE COALESCE(usage_events.equivalent_cost_low_cents, excluded.equivalent_cost_low_cents) END,
-        equivalent_cost_high_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.equivalent_cost_high_cents, usage_events.equivalent_cost_high_cents) ELSE COALESCE(usage_events.equivalent_cost_high_cents, excluded.equivalent_cost_high_cents) END,
-        quota_equivalent_cost_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.quota_equivalent_cost_cents, usage_events.quota_equivalent_cost_cents) ELSE COALESCE(usage_events.quota_equivalent_cost_cents, excluded.quota_equivalent_cost_cents) END,
-        quota_equivalent_cost_low_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.quota_equivalent_cost_low_cents, usage_events.quota_equivalent_cost_low_cents) ELSE COALESCE(usage_events.quota_equivalent_cost_low_cents, excluded.quota_equivalent_cost_low_cents) END,
-        quota_equivalent_cost_high_cents = CASE WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.quota_equivalent_cost_high_cents, usage_events.quota_equivalent_cost_high_cents) ELSE COALESCE(usage_events.quota_equivalent_cost_high_cents, excluded.quota_equivalent_cost_high_cents) END,
-        pricing_snapshot_id = COALESCE(usage_events.pricing_snapshot_id, excluded.pricing_snapshot_id),
-        pricing_status = COALESCE(usage_events.pricing_status, excluded.pricing_status),
+        input_cost_cents = ${upsertCost("input_cost_cents")},
+        cache_read_cost_cents = ${upsertCost("cache_read_cost_cents")},
+        cache_write_cost_cents = ${upsertCost("cache_write_cost_cents")},
+        cache_cost_cents = ${upsertCost("cache_cost_cents")},
+        output_cost_cents = ${upsertCost("output_cost_cents")},
+        equivalent_cost_cents = ${upsertCost("equivalent_cost_cents")},
+        equivalent_cost_low_cents = ${upsertCost("equivalent_cost_low_cents")},
+        equivalent_cost_high_cents = ${upsertCost("equivalent_cost_high_cents")},
+        quota_equivalent_cost_cents = ${upsertCost("quota_equivalent_cost_cents")},
+        quota_equivalent_cost_low_cents = ${upsertCost("quota_equivalent_cost_low_cents")},
+        quota_equivalent_cost_high_cents = ${upsertCost("quota_equivalent_cost_high_cents")},
+        pricing_snapshot_id = CASE
+          WHEN usage_events.pricing_status IS NULL OR usage_events.pricing_status = 'unavailable'
+            THEN COALESCE(excluded.pricing_snapshot_id, usage_events.pricing_snapshot_id)
+          ELSE COALESCE(usage_events.pricing_snapshot_id, excluded.pricing_snapshot_id)
+        END,
+        pricing_status = CASE
+          WHEN usage_events.pricing_status IS NULL OR usage_events.pricing_status = 'unavailable'
+            THEN excluded.pricing_status
+          ELSE COALESCE(usage_events.pricing_status, excluded.pricing_status)
+        END,
         request_count = excluded.request_count
     `);
     this.insertQuota = this.db.prepare(`
@@ -427,7 +443,8 @@ class UsageHistory {
   getUnpricedEvents(limit = 20_000) {
     const rows = this.db.prepare(`
       SELECT * FROM usage_events
-      WHERE (equivalent_cost_cents IS NULL AND pricing_status IS NULL)
+      WHERE pricing_status = 'unavailable'
+         OR (equivalent_cost_cents IS NULL AND pricing_status IS NULL)
          OR (source = 'codex' AND quota_equivalent_cost_cents IS NULL)
       ORDER BY timestamp ASC LIMIT ?
     `).all(Math.max(1, Math.trunc(finite(limit, 20_000))));

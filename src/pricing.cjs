@@ -7,6 +7,17 @@ function tier(short, long = short) {
 }
 
 const FALLBACK_MODELS = {
+  "gpt-6-astra": {
+    provider: "openai",
+    standard: tier(
+      { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
+      { input: 20, cacheRead: 2, cacheWrite: 25, output: 75 },
+    ),
+    fast: tier(
+      { input: 20, cacheRead: 2, cacheWrite: 25, output: 100 },
+      { input: 40, cacheRead: 4, cacheWrite: 50, output: 150 },
+    ),
+  },
   "gpt-5.6-sol": {
     provider: "openai",
     standard: tier(
@@ -86,6 +97,7 @@ const FALLBACK_CODEX_MODELS = Object.fromEntries(
 );
 const FALLBACK_CURSOR_MODELS = {
   ...Object.fromEntries(Object.entries(FALLBACK_MODELS).filter(([name]) => !name.startsWith("gpt-"))),
+  "gpt-6-astra": { provider: "cursor", standard: tier({ input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 }) },
   "gpt-5.6-sol": { provider: "cursor", standard: tier({ input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 }) },
   "gpt-5.6-terra": { provider: "cursor", standard: tier({ input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 12 }) },
   "gpt-5.6-luna": { provider: "cursor", standard: tier({ input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1.2 }) },
@@ -93,6 +105,25 @@ const FALLBACK_CURSOR_MODELS = {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function mergeFallbackCatalog(snapshot, now = Date.now()) {
+  const base = snapshot ? clone(snapshot) : builtInSnapshot(now);
+  base.models = { ...clone(FALLBACK_MODELS), ...base.models };
+  base.modelsBySource = {
+    codex: { ...clone(FALLBACK_CODEX_MODELS), ...(base.modelsBySource?.codex || {}) },
+    cursor: { ...clone(FALLBACK_CURSOR_MODELS), ...(base.modelsBySource?.cursor || {}) },
+  };
+  return base;
+}
+
+function catalogModel(snapshot, source, key) {
+  return snapshot?.modelsBySource?.[source]?.[key] || snapshot?.models?.[key] || null;
+}
+
+function fallbackModel(source, key) {
+  if (source === "codex") return FALLBACK_CODEX_MODELS[key] || FALLBACK_MODELS[key] || null;
+  return FALLBACK_CURSOR_MODELS[key] || FALLBACK_MODELS[key] || null;
 }
 
 function builtInSnapshot(now = Date.now()) {
@@ -121,7 +152,8 @@ function tableCells(line) {
 
 function parseOpenAiPricing(text, baseModels = FALLBACK_MODELS) {
   const models = clone(baseModels);
-  for (const model of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+  const tracked = Object.keys(models).filter((name) => name.startsWith("gpt-"));
+  for (const model of tracked) {
     const rows = [];
     for (const line of String(text).split(/\r?\n/)) {
       if (!line.toLowerCase().includes(model)) continue;
@@ -159,6 +191,8 @@ const CURSOR_NAMES = new Map([
   ["claude fable 5", ["claude-fable-5", "standard"]],
   ["claude opus 5", ["claude-opus-5", "standard"]],
   ["claude sonnet 5", ["claude-sonnet-5", "standard"]],
+  ["gpt-6 astra (fast)", ["gpt-6-astra", "fast"]],
+  ["gpt-6 astra", ["gpt-6-astra", "standard"]],
   ["gpt-5.6 luna", ["gpt-5.6-luna", "standard"]],
   ["gpt-5.6 sol", ["gpt-5.6-sol", "standard"]],
   ["gpt-5.6 terra", ["gpt-5.6-terra", "standard"]],
@@ -213,7 +247,7 @@ async function refreshPricing(history, { force = false, now = Date.now() } = {})
   const latest = history.latestPricingSnapshot?.() || null;
   const attempt = history.loadCache("pricing-last-attempt");
   if (!force && attempt && now - attempt.updatedAt < DAY_MS) {
-    return { snapshot: latest || builtInSnapshot(now), updated: false, nextCheckAt: attempt.updatedAt + DAY_MS };
+    return { snapshot: mergeFallbackCatalog(latest || builtInSnapshot(now)), updated: false, nextCheckAt: attempt.updatedAt + DAY_MS };
   }
   history.saveCache("pricing-last-attempt", { at: now, force: Boolean(force) });
   const results = await Promise.allSettled([fetchText(OPENAI_PRICING_URL), fetchText(CURSOR_PRICING_URL)]);
@@ -234,12 +268,14 @@ async function refreshPricing(history, { force = false, now = Date.now() } = {})
   };
   if (snapshot.status !== "built-in" || !latest) snapshot.id = history.savePricingSnapshot(snapshot);
   else snapshot.id = latest?.id || history.savePricingSnapshot(snapshot);
-  return { snapshot: snapshot.status === "built-in" && latest ? latest : snapshot, updated: snapshot.status !== "built-in", nextCheckAt: now + DAY_MS };
+  const selected = snapshot.status === "built-in" && latest ? latest : snapshot;
+  return { snapshot: mergeFallbackCatalog(selected), updated: snapshot.status !== "built-in", nextCheckAt: now + DAY_MS };
 }
 
 function modelKey(raw) {
   let value = String(raw || "unknown").toLowerCase().replace(/^cursor-/, "");
   value = value.replace(/-(?:minimal|low|medium|high|xhigh|max|ultra)(?=-fast$|$)/, "").replace(/-fast$/, "");
+  if (value === "gpt-6" || value === "gpt-6-astra") return "gpt-6-astra";
   if (value === "gpt-5.6") return "gpt-5.6-sol";
   if (value.startsWith("claude-fable-5")) return "claude-fable-5";
   if (value.startsWith("claude-opus-5")) return "claude-opus-5";
@@ -278,7 +314,7 @@ function codexFastCreditMultiplier(event) {
   if (String(event?.source || "").toLowerCase() !== "codex") return 1;
   const key = modelKey(event?.model);
   if (/^gpt-5\.4(?:-|$)/.test(key)) return 2;
-  if (/^gpt-5\.(?:5|6)(?:-|$)/.test(key)) return 2.5;
+  if (/^gpt-6(?:-|$)/.test(key) || /^gpt-5\.(?:5|6)(?:-|$)/.test(key)) return 2.5;
   return 1;
 }
 
@@ -295,10 +331,12 @@ function scaleComponents(parts, total) {
   };
 }
 
-function priceEvent(event, snapshot, { authoritativeTotalCents = null } = {}) {
+function priceEvent(event, snapshot, { authoritativeTotalCents = null, fallbackSnapshot = null } = {}) {
   const key = modelKey(event.model);
   const source = String(event.source || "").toLowerCase();
-  const model = snapshot?.modelsBySource?.[source]?.[key] || snapshot?.models?.[key];
+  const model = catalogModel(snapshot, source, key)
+    || catalogModel(fallbackSnapshot, source, key)
+    || fallbackModel(source, key);
   if (!model?.standard) {
     return {
       equivalentCostCents: null,
@@ -317,10 +355,11 @@ function priceEvent(event, snapshot, { authoritativeTotalCents = null } = {}) {
     };
   }
   const rawInput = (Number(event.input) || 0) + (Number(event.cacheRead) || 0) + (Number(event.cacheWrite) || 0);
-  const context = rawInput > 272_000 ? "long" : "short";
+  const isCodex = String(event.source || "").toLowerCase() === "codex";
+  const skipLongContext = isCodex && /^gpt-6(?:-|$)/.test(key);
+  const context = !skipLongContext && rawInput > 272_000 ? "long" : "short";
   const knownFast = event.fastKnown !== false;
   const standard = components(event, model.standard[context] || model.standard.short);
-  const isCodex = String(event.source || "").toLowerCase() === "codex";
   const creditMultiplier = codexFastCreditMultiplier(event);
   const creditFast = multiplyComponents(standard, creditMultiplier);
   const apiFast = model.fast ? components(event, model.fast[context] || model.fast.short) : standard;
@@ -366,7 +405,9 @@ module.exports = {
   parseOpenAiPricing,
   parseCursorPricing,
   refreshPricing,
+  mergeFallbackCatalog,
   modelKey,
+  catalogModel,
   codexFastCreditMultiplier,
   priceEvent,
 };

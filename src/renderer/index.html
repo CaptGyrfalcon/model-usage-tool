@@ -234,19 +234,22 @@
           <div><b>智能功能</b><span>按你的工作状态自动调整挂件</span></div>
           <button type="button" id="smartCloseBtn" class="icon-btn close" aria-label="关闭智能功能设置">×</button>
         </div>
-        <label class="smart-setting-row">
+        <!-- WIP: 智能贴边有严重 bug，入口已关闭。 -->
+        <label class="smart-setting-row" hidden>
           <span><b>智能贴边</b><small>鼠标离开后收进最近的屏幕边缘</small></span>
           <input id="smartDockToggle" type="checkbox" role="switch" />
         </label>
         <label class="smart-setting-row">
-          <span><b>隐私模式</b><small>隐藏账户、模型、Token 和金额</small></span>
+          <span><b>隐私模式</b><small>只把邮箱显示成 ****，套餐名称正常显示</small></span>
           <input id="privacyToggle" type="checkbox" role="switch" />
         </label>
-        <label class="smart-setting-row">
+        <!-- WIP: 额度提醒有严重 bug，入口已关闭。 -->
+        <label class="smart-setting-row" hidden>
           <span><b>额度提醒</b><small>低于阈值时发送一次 Windows 通知</small></span>
           <input id="alertToggle" type="checkbox" role="switch" />
         </label>
-        <label class="smart-setting-row threshold-row">
+        <!-- WIP: 提醒阈值有严重 bug，入口已关闭。 -->
+        <label class="smart-setting-row threshold-row" hidden>
           <span><b>提醒阈值</b><small>恢复到阈值以上后才会再次提醒</small></span>
           <select id="alertThresholdSelect" aria-label="额度提醒阈值">
             <option value="10">10%</option>
