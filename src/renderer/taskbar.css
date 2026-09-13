@@ -1,0 +1,15 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; color-scheme: dark; }
+body { font-family: 'Segoe UI', 'Microsoft YaHei UI', sans-serif; }
+#panel { display: block; width: 100%; height: 100%; padding: 3px 7px; border: 1px solid #ffffff20; border-radius: 5px; background: #171c25f5; color: #e9edf8; cursor: pointer; }
+#panel:hover { background: #252c39; border-color: #ffffff50; }
+#rows { display: grid; grid-template-rows: repeat(3, 1fr); height: 100%; gap: 2px; }
+.row { display: flex; align-items: center; gap: 5px; min-height: 0; }
+.name { flex: 0 0 37px; text-align: left; font-size: 9px; line-height: 1; color: #c4ccdc; }
+.meters { display: flex; flex: 1; gap: 5px; height: 100%; min-width: 0; }
+.meter { position: relative; flex: 1; overflow: hidden; border-radius: 2px; background: #ffffff13; min-width: 0; }
+.fill { position: absolute; inset: 0 auto 0 0; width: var(--value); background: linear-gradient(90deg, var(--dark), var(--color)); transition: width 400ms ease, background 400ms ease; }
+.value { position: absolute; inset: 0; display: grid; place-items: center; font-size: 9px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; color: white; text-shadow: 0 1px 2px #000, 0 0 3px #000; }
+.unknown { background: repeating-linear-gradient(120deg, #ffffff08 0 4px, #ffffff16 4px 8px); }
+.stale .name { color: #e6b968; }
+@media (prefers-reduced-motion: reduce) { .fill { transition: none; } }

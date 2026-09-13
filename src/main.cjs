@@ -6,6 +6,7 @@ const { loadSettings, saveSettings } = require("./lib.cjs");
 const { codexHomePath } = require("./codex.cjs");
 const { smartDockBounds, windowMetrics, windowModeOptions } = require("./window-layout.cjs");
 const { alertLevel } = require("./quota-insights.cjs");
+const { createTaskbarMeters } = require("./taskbar-meters.cjs");
 
 const MIN_INTERVAL = 15_000;
 const MAX_INTERVAL = 300_000;
@@ -15,6 +16,7 @@ const SMART_DOCK_DURATION = 210;
 
 let win;
 let tray;
+let taskbarMeters;
 let pollTimer;
 let codexWatcher;
 let codexRefreshTimer;
@@ -215,6 +217,8 @@ function trayMenu() {
   return Menu.buildFromTemplate([
     { label: win?.isVisible() ? "隐藏额度挂件" : "显示额度挂件", click: () => toggleWindow() },
     { label: "立即刷新", click: () => pull(true) },
+    { label: "任务栏额度条", type: "checkbox", checked: settings.taskbarMeters !== false,
+      click: (item) => applySettings({ taskbarMeters: item.checked }) },
     {
       label: "全屏仪表盘",
       type: "checkbox",
@@ -267,6 +271,7 @@ function createTray() {
 }
 
 function updateTray() {
+  taskbarMeters?.update();
   if (!tray) return;
   if (latest.data) {
     const d = latest.data;
@@ -668,6 +673,8 @@ app.whenReady().then(() => {
   app.setAppUserModelId("com.captgyrfalcon.cursor-usage-widget");
   createTray();
   createWindow();
+  taskbarMeters = createTaskbarMeters({ BrowserWindow, screen, ipcMain,
+    getSnapshot: () => latest, getSettings: loadSettings, showWindow });
   registerGlobalShortcuts();
   createDataWorker();
   app.setLoginItemSettings({ openAtLogin: Boolean(loadSettings().openAtLogin) });
@@ -683,6 +690,7 @@ app.on("window-all-closed", () => {
 });
 app.on("before-quit", () => {
   isQuitting = true;
+  taskbarMeters?.dispose();
   clearInterval(pollTimer);
   clearTimeout(codexRefreshTimer);
   try { codexWatcher?.close(); } catch {}
