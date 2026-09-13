@@ -75,21 +75,25 @@ function meterRows(snapshot, now = Date.now()) {
 }
 
 
-// Send only quota rows, never credentials, account identity or session content.
-function createMeterPublisher(getSnapshot) {
+function secondaryTaskbars(settings) {
+  return settings?.taskbarMetersSecondary !== false;
+}
+
+// Send only quota rows and the secondary-bar flag, never credentials or identity.
+function createMeterPublisher(getSnapshot, getSettings) {
   let previous = null;
   return (send, connected) => {
     if (!connected) { previous = null; return; }
-    const value = JSON.stringify(meterRows(getSnapshot()));
+    const value = JSON.stringify({ ...meterRows(getSnapshot()), secondary: secondaryTaskbars(getSettings?.()) });
     if (value !== previous) { send(value + '\n'); previous = value; }
   };
 }
 
-function createRunningTaskbarMeters({ getSnapshot, showWindow, showMenu = () => {}, nativeDirectory, onStatus = () => {} }, dependencies = {}) {
+function createRunningTaskbarMeters({ getSnapshot, getSettings, showWindow, showMenu = () => {}, nativeDirectory, onStatus = () => {} }, dependencies = {}) {
   const compile = dependencies.buildTaskbar || buildTaskbar;
   const launch = dependencies.spawn || spawn;
   let child, retry, expiry, stopped = false, failures = 0;
-  const publish = createMeterPublisher(getSnapshot);
+  const publish = createMeterPublisher(getSnapshot, getSettings);
   const update = () => publish(line => child.stdin.write(line), Boolean(child && !child.killed && child.stdin.writable));
   const start = async () => {
     try {
@@ -169,4 +173,4 @@ function menuPopupAnchor(screenPoint, windowBounds) {
   return { x: Math.round(x - originX), y: Math.round(y - originY) };
 }
 
-module.exports = { meterRows, menuPopupAnchor, createMeterPublisher, createRunningTaskbarMeters, createTaskbarMeters };
+module.exports = { meterRows, secondaryTaskbars, menuPopupAnchor, createMeterPublisher, createRunningTaskbarMeters, createTaskbarMeters };

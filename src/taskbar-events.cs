@@ -64,7 +64,8 @@ public sealed class QuotaTaskbarEvents : IDisposable {
             if (pid != owner) {
                 var name = new StringBuilder(64);
                 GetClassName(hwnd, name, name.Capacity);
-                bool shell = name.ToString() == "Shell_TrayWnd" || name.ToString() == "TrayNotifyWnd";
+                string cls = name.ToString();
+                bool shell = cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd" || cls == "TrayNotifyWnd";
                 // Games may reorder their windows repeatedly without changing
                 // fullscreen state. Only shell reorders require raising meters.
                 relevant = shell || (kind != 0x8004 && (hwnd == current || hwnd == foreground));

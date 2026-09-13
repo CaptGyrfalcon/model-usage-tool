@@ -60,6 +60,12 @@ internal static class TaskbarNativeChecks {
         Check(TaskbarHost.FindSlot(new Rectangle(0,0,300,48),new Rectangle(100,0,200,48),buttons,MeterLayout.Width,MeterLayout.Height,6).IsEmpty,"Hide when there is no space");
         Check(TaskbarHost.FindSlot(new Rectangle(0,0,48,1080),new Rectangle(0,900,48,180),buttons,MeterLayout.Width,MeterLayout.Height,6).IsEmpty,"Reject vertical taskbar");
         Check(TaskbarHost.FindSlot(new Rectangle(0,0,1920,2),new Rectangle(1600,0,320,2),buttons,MeterLayout.Width,MeterLayout.Height,6).IsEmpty,"Reject too-small taskbar");
+        var noTray=TaskbarHost.FindSlot(new Rectangle(1920,1032,1920,48),new Rectangle(3840,1032,0,48),new List<Rectangle>(),MeterLayout.Width,MeterLayout.Height,6);
+        Check(noTray==new Rectangle(3840-6-MeterLayout.Width,1034,MeterLayout.Width,MeterLayout.Height),"Secondary bar without a tray uses the right edge");
+        var primary=new IntPtr(1); var extra=new List<IntPtr>{ new IntPtr(2), new IntPtr(3) };
+        Check(TaskbarHost.CollectBars(primary,extra,true).Count==3,"Secondary bars are included when enabled");
+        Check(TaskbarHost.CollectBars(primary,extra,false).Count==1 && TaskbarHost.CollectBars(primary,extra,false)[0]==primary,"Secondary bars are omitted when disabled");
+        Check(TaskbarHost.CollectBars(IntPtr.Zero,extra,true).Count==2,"Primary absence still allows secondary bars");
         using (var parent=new Form()) using (var meter=new MeterControl(parent.Handle,1.5f)) {
             parent.Location=new Point(120,180);
             var handle=meter.Handle;

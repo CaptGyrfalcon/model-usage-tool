@@ -49,7 +49,7 @@ internal static class NativeTaskbar {
 
 public sealed class QuotaMeter { public string label; public double? value; public double? remainingCents; public double? pace; }
 public sealed class QuotaRow { public string label; public QuotaMeter[] meters; }
-public sealed class QuotaData { public bool stale; public double? sampledAt; public QuotaRow[] rows; }
+public sealed class QuotaData { public bool stale; public double? sampledAt; public QuotaRow[] rows; public bool? secondary; }
 
 internal static class MeterLayout {
     internal const int Width = 376;
@@ -262,20 +262,28 @@ internal sealed class MeterControl : Control {
     protected override void Dispose(bool disposing) { if (disposing) { hoverTimer.Dispose(); tip.Dispose(); } base.Dispose(disposing); }
 }
 
+internal sealed class TaskbarPane {
+    internal IntPtr shell;
+    internal MeterControl meter;
+    internal Task<List<Rectangle>> scan;
+    internal IntPtr scanShell;
+    internal List<Rectangle> occupied;
+    internal DateTime scannedAt = DateTime.MinValue, nextScan = DateTime.MinValue;
+    internal uint currentDpi;
+    internal string lastStatus;
+    internal void InvalidateScan() { nextScan = DateTime.MinValue; }
+    internal void DisposeMeter() { if (meter != null) { meter.Dispose(); meter = null; } }
+}
+
 internal sealed class TaskbarHost : ApplicationContext {
     private readonly Process owner;
     private readonly Control dispatcher = new Control();
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
-    private MeterControl meter;
-    private IntPtr shell;
+    private readonly Dictionary<long, TaskbarPane> panes = new Dictionary<long, TaskbarPane>();
     private QuotaData data;
-    private string pending, lastStatus;
+    private string pending;
     private volatile bool eof, stopped;
-    private Task<List<Rectangle>> scan;
-    private IntPtr scanShell;
-    private List<Rectangle> occupied;
-    private DateTime scannedAt = DateTime.MinValue, nextScan = DateTime.MinValue;
-    private uint currentDpi;
+    private bool secondary = true;
     internal TaskbarHost(int ownerPid) {
         owner = Process.GetProcessById(ownerPid);
         var unused = dispatcher.Handle;
@@ -286,7 +294,7 @@ internal sealed class TaskbarHost : ApplicationContext {
         Task.Run(() => {
             try {
                 using (var events = new QuotaTaskbarEvents((uint)Process.GetCurrentProcess().Id)) {
-                    while (!stopped) { events.Wait(); if (!stopped) dispatcher.BeginInvoke((Action)(() => { nextScan=DateTime.MinValue; Tick(); })); }
+                    while (!stopped) { events.Wait(); if (!stopped) dispatcher.BeginInvoke((Action)(() => { foreach (var pane in panes.Values) pane.InvalidateScan(); Tick(); })); }
                 }
             } catch (Exception) { /* The timer still handles Explorer recovery. */ }
         });
@@ -314,8 +322,9 @@ internal sealed class TaskbarHost : ApplicationContext {
         return result;
     }
     internal static Rectangle FindSlot(Rectangle bar, Rectangle tray, IList<Rectangle> buttons, int width, int height, int gap) {
-        if (bar.Height < height || bar.Height > bar.Width || tray.Width <= 0) return Rectangle.Empty;
-        int right = tray.Left-gap, left=bar.Left+gap;
+        if (bar.Height < height || bar.Height > bar.Width) return Rectangle.Empty;
+        Rectangle edge = tray.Width > 0 ? tray : new Rectangle(bar.Right, bar.Top, 0, bar.Height);
+        int right = edge.Left-gap, left=bar.Left+gap;
         var sorted = new List<Rectangle>(buttons); sorted.Sort((a,b) => b.Right.CompareTo(a.Right));
         foreach (var r in sorted) {
             if (r.Bottom <= bar.Top || r.Top >= bar.Bottom || r.Left >= right || r.Right <= left) continue;
@@ -324,74 +333,121 @@ internal sealed class TaskbarHost : ApplicationContext {
         }
         return right-left >= width ? new Rectangle(right-width,bar.Top+(bar.Height-height)/2,width,height) : Rectangle.Empty;
     }
-    private void Status(string state) {
-        long hwnd=meter == null || !meter.IsHandleCreated ? 0 : meter.Handle.ToInt64();
-        string key=state+":"+hwnd;
-        if (lastStatus == key) return;
-        lastStatus=key;
+    internal static List<IntPtr> CollectBars(IntPtr primary, IList<IntPtr> secondaries, bool includeSecondary) {
+        var result = new List<IntPtr>();
+        if (primary != IntPtr.Zero) result.Add(primary);
+        if (includeSecondary && secondaries != null)
+            foreach (var hwnd in secondaries) if (hwnd != IntPtr.Zero && hwnd != primary) result.Add(hwnd);
+        return result;
+    }
+    internal static List<IntPtr> EnumerateBars(bool includeSecondary) {
+        var secondaries = new List<IntPtr>();
+        for (IntPtr hwnd = IntPtr.Zero; (hwnd = NativeTaskbar.FindWindowEx(IntPtr.Zero, hwnd, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero; )
+            secondaries.Add(hwnd);
+        return CollectBars(NativeTaskbar.FindWindow("Shell_TrayWnd", null), secondaries, includeSecondary);
+    }
+    internal static Rectangle ResolveTray(IntPtr bar, Rectangle barBounds) {
+        foreach (var name in new[] { "TrayNotifyWnd", "ClockButton", "TrayClockWClass" }) {
+            IntPtr hwnd = NativeTaskbar.FindWindowEx(bar, IntPtr.Zero, name, null);
+            NativeTaskbar.Rect tray;
+            if (hwnd != IntPtr.Zero && NativeTaskbar.GetWindowRect(hwnd, out tray) && tray.Right > tray.Left) return tray.Bounds;
+        }
+        return new Rectangle(barBounds.Right, barBounds.Top, 0, barBounds.Height);
+    }
+    private void Status(TaskbarPane pane, string state) {
+        long hwnd=pane.meter == null || !pane.meter.IsHandleCreated ? 0 : pane.meter.Handle.ToInt64();
+        string key=state+":"+hwnd+":"+pane.shell.ToInt64();
+        if (pane.lastStatus == key) return;
+        pane.lastStatus=key;
         NativeTaskbar.Rect bounds = new NativeTaskbar.Rect();
-        if (hwnd != 0) NativeTaskbar.GetWindowRect(meter.Handle,out bounds);
-        NativeTaskbar.Send(new { type="status", state=state, hwnd=hwnd, parent=hwnd == 0 ? 0 : NativeTaskbar.GetParent(meter.Handle).ToInt64(),
-            child=hwnd != 0 && (NativeTaskbar.GetWindowLong(meter.Handle,-16)&0x40000000)!=0,
-            topmost=hwnd != 0 && (NativeTaskbar.GetWindowLong(meter.Handle,-20)&8)!=0,
-            frames=meter == null ? 0 : meter.PresentedFrames,
+        if (hwnd != 0) NativeTaskbar.GetWindowRect(pane.meter.Handle,out bounds);
+        NativeTaskbar.Send(new { type="status", state=state, hwnd=hwnd, parent=hwnd == 0 ? 0 : NativeTaskbar.GetParent(pane.meter.Handle).ToInt64(),
+            bar=pane.shell.ToInt64(),
+            child=hwnd != 0 && (NativeTaskbar.GetWindowLong(pane.meter.Handle,-16)&0x40000000)!=0,
+            topmost=hwnd != 0 && (NativeTaskbar.GetWindowLong(pane.meter.Handle,-20)&8)!=0,
+            frames=pane.meter == null ? 0 : pane.meter.PresentedFrames,
             bounds=new { x=bounds.Left,y=bounds.Top,width=bounds.Right-bounds.Left,height=bounds.Bottom-bounds.Top } });
     }
-    private void Hide(string reason) { if (meter != null && meter.IsHandleCreated) NativeTaskbar.ShowWindow(meter.Handle,0); Status(reason); }
+    private void Hide(TaskbarPane pane, string reason) { if (pane.meter != null && pane.meter.IsHandleCreated) NativeTaskbar.ShowWindow(pane.meter.Handle,0); Status(pane, reason); }
+    private void Drop(long key) {
+        TaskbarPane pane;
+        if (!panes.TryGetValue(key, out pane)) return;
+        pane.DisposeMeter(); panes.Remove(key);
+    }
     private void Tick() {
         if (stopped) return;
         if (eof || owner.HasExited) { ExitThread(); return; }
         string input=Interlocked.Exchange(ref pending,null);
         if (input != null) {
             if (input == "quit") { ExitThread(); return; }
-            try { data=new JavaScriptSerializer().Deserialize<QuotaData>(input); if (meter!=null) meter.SetData(data); }
+            try {
+                data=new JavaScriptSerializer().Deserialize<QuotaData>(input);
+                if (data.secondary.HasValue) secondary = data.secondary.Value;
+                foreach (var pane in panes.Values) if (pane.meter != null) pane.meter.SetData(data);
+            }
             catch (ArgumentException) { NativeTaskbar.Send(new { type="error", message="Invalid meter data" }); }
         }
-        IntPtr bar=NativeTaskbar.FindWindow("Shell_TrayWnd",null);
-        if (bar == IntPtr.Zero) { Hide("waiting-for-explorer"); return; }
+        var bars = EnumerateBars(secondary);
+        var keep = new Dictionary<long, IntPtr>();
+        foreach (var bar in bars) keep[bar.ToInt64()] = bar;
+        var stale = new List<long>();
+        foreach (var key in panes.Keys) if (!keep.ContainsKey(key)) stale.Add(key);
+        foreach (var key in stale) Drop(key);
+        if (keep.Count == 0) return;
+        foreach (var pair in keep) Layout(GetPane(pair.Key), pair.Value);
+    }
+    private TaskbarPane GetPane(long key) {
+        TaskbarPane pane;
+        if (panes.TryGetValue(key, out pane)) return pane;
+        pane = new TaskbarPane();
+        panes[key] = pane;
+        return pane;
+    }
+    private void Layout(TaskbarPane pane, IntPtr bar) {
         NativeTaskbar.SetThreadDpiAwarenessContext(NativeTaskbar.GetWindowDpiAwarenessContext(bar));
-        if (bar != shell || currentDpi != NativeTaskbar.GetDpiForWindow(bar) || meter == null || !meter.IsHandleCreated || !NativeTaskbar.IsWindow(meter.Handle)) {
-            if (meter != null) meter.Dispose();
-            shell=bar; occupied=null; scannedAt=DateTime.MinValue; nextScan=DateTime.MinValue;
-            currentDpi=NativeTaskbar.GetDpiForWindow(bar);
-            float scale=currentDpi/96f;
-            meter=new MeterControl(bar,scale);
-            var handle=meter.Handle;
+        if (bar != pane.shell || pane.currentDpi != NativeTaskbar.GetDpiForWindow(bar) || pane.meter == null || !pane.meter.IsHandleCreated || !NativeTaskbar.IsWindow(pane.meter.Handle)) {
+            pane.DisposeMeter();
+            pane.shell=bar; pane.occupied=null; pane.scannedAt=DateTime.MinValue; pane.nextScan=DateTime.MinValue;
+            pane.currentDpi=NativeTaskbar.GetDpiForWindow(bar);
+            float scale=pane.currentDpi/96f;
+            pane.meter=new MeterControl(bar,scale);
+            var handle=pane.meter.Handle;
             if (NativeTaskbar.GetParent(handle)!=bar || (NativeTaskbar.GetWindowLong(handle,-16)&0x40000000)==0) {
-                meter.Dispose(); meter=null; Status("attach-failed"); return;
+                pane.DisposeMeter(); Status(pane, "attach-failed"); return;
             }
-            meter.SetData(data);
+            pane.meter.SetData(data);
         }
-        meter.RefreshTheme();
-        if (scan != null && scan.IsCompleted) {
-            if (scan.Status == TaskStatus.RanToCompletion && scanShell == shell) { occupied=scan.Result; scannedAt=DateTime.UtcNow; }
-            else { var ignored=scan.Exception; occupied=null; }
-            scan=null;
+        pane.meter.RefreshTheme();
+        if (pane.scan != null && pane.scan.IsCompleted) {
+            if (pane.scan.Status == TaskStatus.RanToCompletion && pane.scanShell == pane.shell) { pane.occupied=pane.scan.Result; pane.scannedAt=DateTime.UtcNow; }
+            else { var ignored=pane.scan.Exception; pane.occupied=null; }
+            pane.scan=null;
         }
-        if (scan == null && DateTime.UtcNow >= nextScan) {
-            scanShell=shell; var target=shell;
-            scan=Task.Run(() => ScanButtons(target)); nextScan=DateTime.UtcNow.AddSeconds(2);
+        if (pane.scan == null && DateTime.UtcNow >= pane.nextScan) {
+            pane.scanShell=pane.shell; var target=pane.shell;
+            pane.scan=Task.Run(() => ScanButtons(target)); pane.nextScan=DateTime.UtcNow.AddSeconds(2);
         }
-        NativeTaskbar.Rect b,t,client;
-        IntPtr tray=NativeTaskbar.FindWindowEx(bar,IntPtr.Zero,"TrayNotifyWnd",null);
-        if (!NativeTaskbar.IsWindowVisible(bar) || !NativeTaskbar.GetWindowRect(bar,out b) || !NativeTaskbar.GetWindowRect(tray,out t) || !NativeTaskbar.GetClientRect(bar,out client)) { Hide("taskbar-hidden"); return; }
-        if (occupied == null || DateTime.UtcNow-scannedAt > TimeSpan.FromSeconds(8)) { Hide("waiting-for-layout"); return; }
+        NativeTaskbar.Rect b,client;
+        if (!NativeTaskbar.IsWindowVisible(bar) || !NativeTaskbar.GetWindowRect(bar,out b) || !NativeTaskbar.GetClientRect(bar,out client)) { Hide(pane, "taskbar-hidden"); return; }
+        var tray = ResolveTray(bar, b.Bounds);
+        if (pane.occupied == null || DateTime.UtcNow-pane.scannedAt > TimeSpan.FromSeconds(8)) { Hide(pane, "waiting-for-layout"); return; }
         // Never extend the desktop work area or resize Explorer's own controls.
         float dpi=NativeTaskbar.GetDpiForWindow(bar)/96f;
         int width=(int)Math.Round(MeterLayout.Width*dpi), height=Math.Min((int)Math.Round(MeterLayout.Height*dpi),client.Bottom-4);
-        var slot=FindSlot(b.Bounds,t.Bounds,occupied,width,height,(int)Math.Ceiling(6*dpi));
-        if (slot.IsEmpty) { Hide("no-free-space"); return; }
-        // HWND_TOP is sibling order within Shell_TrayWnd, NOT HWND_TOPMOST.
+        var slot=FindSlot(b.Bounds,tray,pane.occupied,width,height,(int)Math.Ceiling(6*dpi));
+        if (slot.IsEmpty) { Hide(pane, "no-free-space"); return; }
+        // HWND_TOP is sibling order within the tray window, NOT HWND_TOPMOST.
         NativeTaskbar.Rect previous;
-        if (!NativeTaskbar.GetWindowRect(meter.Handle,out previous) || previous.Bounds != slot || !NativeTaskbar.IsWindowVisible(meter.Handle)) {
-            if (!NativeTaskbar.SetWindowPos(meter.Handle,IntPtr.Zero,slot.X-b.Left,slot.Y-b.Top,slot.Width,slot.Height,0x0010|0x0040)) { Hide("position-failed"); return; }
+        if (!NativeTaskbar.GetWindowRect(pane.meter.Handle,out previous) || previous.Bounds != slot || !NativeTaskbar.IsWindowVisible(pane.meter.Handle)) {
+            if (!NativeTaskbar.SetWindowPos(pane.meter.Handle,IntPtr.Zero,slot.X-b.Left,slot.Y-b.Top,slot.Width,slot.Height,0x0010|0x0040)) { Hide(pane, "position-failed"); return; }
         }
-        meter.Present();
-        Status(meter.PresentedFrames > 0 ? "embedded" : "waiting-for-surface");
+        pane.meter.Present();
+        Status(pane, pane.meter.PresentedFrames > 0 ? "embedded" : "waiting-for-surface");
     }
     protected override void ExitThreadCore() {
         stopped=true; timer.Stop(); timer.Dispose();
-        if (meter != null) meter.Dispose(); dispatcher.Dispose(); owner.Dispose();
+        foreach (var pane in panes.Values) pane.DisposeMeter();
+        panes.Clear(); dispatcher.Dispose(); owner.Dispose();
         base.ExitThreadCore();
     }
 }

@@ -230,6 +230,9 @@ function trayMenu() {
     { label: "立即刷新", click: () => pull(true) },
     { label: "任务栏额度条", type: "checkbox", checked: settings.taskbarMeters !== false,
       click: (item) => applySettings({ taskbarMeters: item.checked }) },
+    { label: "副屏任务栏也显示", type: "checkbox", checked: settings.taskbarMetersSecondary !== false,
+      enabled: settings.taskbarMeters !== false,
+      click: (item) => applySettings({ taskbarMetersSecondary: item.checked }) },
     {
       label: "全屏仪表盘",
       type: "checkbox",

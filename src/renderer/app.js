@@ -85,6 +85,8 @@ let settings = {
   openAtLogin: false,
   quotaAlerts: false, // WIP: 额度提醒有严重 bug，入口已关闭。
   alertThreshold: 20, // WIP: 提醒阈值有严重 bug，入口已关闭。
+  taskbarMeters: true,
+  taskbarMetersSecondary: true,
 };
 
 function escapeHtml(value) {
@@ -1845,6 +1847,9 @@ function render() {
   $("smartDockToggle").checked = Boolean(settings.smartDock);
   $("privacyToggle").checked = Boolean(settings.privacyMode);
   $("startupToggle").checked = Boolean(settings.openAtLogin);
+  $("taskbarMetersToggle").checked = settings.taskbarMeters !== false;
+  $("taskbarSecondaryToggle").checked = settings.taskbarMetersSecondary !== false;
+  $("taskbarSecondaryToggle").disabled = settings.taskbarMeters === false;
   $("motionSelect").value = settings.motionPreference || "system";
   $("alertToggle").checked = Boolean(settings.quotaAlerts);
   $("alertThresholdSelect").value = String(settings.alertThreshold || 20);
@@ -2246,6 +2251,8 @@ $("quotaGlance").addEventListener("click", (event) => {
 });
 $("motionSelect").addEventListener("change", (event) => window.widget.saveSettings({ motionPreference: event.target.value }));
 $("startupToggle").addEventListener("change", (event) => window.widget.saveSettings({ openAtLogin: event.target.checked }));
+$("taskbarMetersToggle").addEventListener("change", (event) => window.widget.saveSettings({ taskbarMeters: event.target.checked }));
+$("taskbarSecondaryToggle").addEventListener("change", (event) => window.widget.saveSettings({ taskbarMetersSecondary: event.target.checked }));
 // WIP: 智能贴边、额度提醒、提醒阈值有严重 bug，入口已关闭。
 $("smartDockToggle").addEventListener("change", (event) => window.widget.saveSettings({ smartDock: event.target.checked }));
 $("privacyToggle").addEventListener("change", (event) => window.widget.saveSettings({ privacyMode: event.target.checked }));

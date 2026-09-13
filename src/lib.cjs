@@ -69,6 +69,8 @@ const DEFAULT_SETTINGS = {
   motionPreference: "system",
   quotaAlerts: false, // WIP: 额度提醒有严重 bug，入口已关闭。
   alertThreshold: 20, // WIP: 提醒阈值有严重 bug，入口已关闭。
+  taskbarMeters: true,
+  taskbarMetersSecondary: true,
 };
 
 let usageEventCache = [];

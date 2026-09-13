@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { meterRows, menuPopupAnchor, createMeterPublisher, createRunningTaskbarMeters, createTaskbarMeters } = require('../src/taskbar-meters.cjs');
+const { meterRows, secondaryTaskbars, menuPopupAnchor, createMeterPublisher, createRunningTaskbarMeters, createTaskbarMeters } = require('../src/taskbar-meters.cjs');
 test('three rows keep measured weekly and five-hour windows separate regardless of slot', () => {
   const result = meterRows({ data: { cursorModels: { percentRemaining: 82.5 }, otherModels: { percentRemaining: 12 }, codex: { quota: {
     windows: [{ windowMinutes: 10080, percentRemaining: 61 }, { windowMinutes: 300, percentRemaining: 8 }],
@@ -54,6 +54,23 @@ test('missing, expired and invalid values are unknown, not invented full quota',
 test('plan name does not manufacture a five-hour window, explicit absence hides old short window', () => {
   assert.equal(meterRows({ data: { codex: { planName: 'Pro' } } }).rows[2].meters.length, 1);
   assert.equal(meterRows({ data: { codex: { quota: { shortLimit: 'absent', primary: { windowMinutes: 300, percentRemaining: 40 } } } } }).rows[2].meters.length, 1);
+});
+test('secondary taskbars stay on unless explicitly disabled', () => {
+  assert.equal(secondaryTaskbars(undefined), true);
+  assert.equal(secondaryTaskbars({}), true);
+  assert.equal(secondaryTaskbars({ taskbarMetersSecondary: true }), true);
+  assert.equal(secondaryTaskbars({ taskbarMetersSecondary: false }), false);
+  let settings = {}, sends = 0, last = null;
+  const publish = createMeterPublisher(() => ({ data: { cursorModels: { percentRemaining: 40 } } }), () => settings);
+  const send = (line) => { sends++; last = JSON.parse(line); };
+  publish(send, true);
+  assert.equal(last.secondary, true);
+  settings = { taskbarMetersSecondary: false };
+  publish(send, true);
+  assert.equal(last.secondary, false);
+  assert.equal(sends, 2);
+  publish(send, true);
+  assert.equal(sends, 2);
 });
 test('disconnected native meters send nothing and identical data is deduplicated', () => {
   let sends = 0, reads = 0, percentRemaining = 60;
@@ -110,6 +127,7 @@ test('native protocol delivers only quota data, opens details and closes stdin o
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(JSON.parse(written).rows[0].meters[0].value, 23);
+  assert.equal(JSON.parse(written).secondary, true);
   assert.ok(!written.includes('must-not-send'));
   session.update(); assert.equal(written.trim().split('\n').length, 1);
   helper.stdout.write('{"type":"open"}\n'); assert.equal(opened, 1);
