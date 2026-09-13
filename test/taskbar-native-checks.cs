@@ -66,6 +66,16 @@ internal static class TaskbarNativeChecks {
         Check(TaskbarHost.CollectBars(primary,extra,true).Count==3,"Secondary bars are included when enabled");
         Check(TaskbarHost.CollectBars(primary,extra,false).Count==1 && TaskbarHost.CollectBars(primary,extra,false)[0]==primary,"Secondary bars are omitted when disabled");
         Check(TaskbarHost.CollectBars(IntPtr.Zero,extra,true).Count==2,"Primary absence still allows secondary bars");
+        float reserved = MeterLayout.SharedReserve(new List<float> { 18f, 32f, 24f }, 40f);
+        RectangleF shortPercent, shortMoney, longPercent, longMoney;
+        MeterLayout.ValueColumns(new RectangleF(200,0,112,12), reserved, MeterLayout.ValueGap, out shortPercent, out shortMoney);
+        MeterLayout.ValueColumns(new RectangleF(200,12,112,12), reserved, MeterLayout.ValueGap, out longPercent, out longMoney);
+        Check(shortMoney.X == longMoney.X && shortMoney.X > shortPercent.Right,"Leftover dollars share a left edge");
+        Check(shortPercent.Right <= shortMoney.X && longPercent.Right <= longMoney.X,"Percent and leftover dollars do not overlap");
+        float tight = MeterLayout.SharedReserve(new List<float> { 200f }, 112f - MeterLayout.ValueGap - MeterLayout.MinMoneyWidth);
+        RectangleF clippedPercent, clippedMoney;
+        MeterLayout.ValueColumns(new RectangleF(0,0,112,12), tight, MeterLayout.ValueGap, out clippedPercent, out clippedMoney);
+        Check(clippedMoney.Width + 0.01f >= MeterLayout.MinMoneyWidth && clippedPercent.Right <= clippedMoney.X,"Wide percents yield space instead of covering leftover dollars");
         using (var parent=new Form()) using (var meter=new MeterControl(parent.Handle,1.5f)) {
             parent.Location=new Point(120,180);
             var handle=meter.Handle;

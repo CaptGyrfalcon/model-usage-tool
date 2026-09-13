@@ -60,6 +60,8 @@ internal static class MeterLayout {
     internal const float RightPad = 7f;
     internal const float ValueWidth = 112f;
     internal const float MeterGap = 5f;
+    internal const float ValueGap = 6f;
+    internal const float MinMoneyWidth = 52f;
     internal const float BarHeight = 3f;
     internal static float Segment(float width, int meters, float scale) {
         return (width - MeterLeft * scale - RightPad * scale) / Math.Max(1, meters);
@@ -67,6 +69,20 @@ internal static class MeterLayout {
     internal static RectangleF Bar(float x, float y, float segment, float rowHeight, float scale) {
         return new RectangleF(x, y + rowHeight * 0.36f,
             Math.Max(3 * scale, segment - ValueWidth * scale - MeterGap * scale), BarHeight * scale);
+    }
+    // Percent keeps its own width; leftover dollars share one left edge so
+    // "8%" cannot pull "余$" left or "99.9%" shove it right into a neighbor.
+    internal static float SharedReserve(IList<float> widths, float maxReserved) {
+        float reserved = 0;
+        if (widths != null) foreach (var width in widths) reserved = Math.Max(reserved, width);
+        return Math.Max(0, Math.Min(reserved, maxReserved));
+    }
+    internal static void ValueColumns(RectangleF valueRect, float reserved, float gap, out RectangleF percent, out RectangleF money) {
+        float room = Math.Max(0, valueRect.Width - Math.Max(0, gap));
+        float fit = Math.Min(Math.Max(0, reserved), room);
+        percent = new RectangleF(valueRect.X, valueRect.Y, fit, valueRect.Height);
+        float moneyX = valueRect.X + fit + Math.Max(0, gap);
+        money = new RectangleF(moneyX, valueRect.Y, Math.Max(0, valueRect.Right - moneyX), valueRect.Height);
     }
 }
 
@@ -145,12 +161,27 @@ internal sealed class MeterControl : Control {
         AccessibleDescription = description.ToString();
         dirty = true; Invalidate();
     }
+    private static string Prefix(string rowLabel, QuotaMeter meter) {
+        return rowLabel == "Codex" ? meter.label + " " : "";
+    }
+    private static string Percent(QuotaMeter meter) {
+        return meter.value.HasValue ? Math.Max(0, Math.Min(100, meter.value.Value)).ToString("0.#") + "%" : "—";
+    }
     private static string Money(QuotaMeter meter) {
         if (!meter.remainingCents.HasValue) return "";
-        return " 余$" + (Math.Max(0, meter.remainingCents.Value) / 100.0).ToString("0.00", CultureInfo.InvariantCulture);
+        return "余$" + (Math.Max(0, meter.remainingCents.Value) / 100.0).ToString("0.00", CultureInfo.InvariantCulture);
     }
     private static string Value(QuotaMeter meter) {
-        return (meter.value.HasValue ? Math.Max(0, Math.Min(100, meter.value.Value)).ToString("0.#") + "%" : "—") + Money(meter);
+        string money = Money(meter);
+        return Percent(meter) + (money.Length == 0 ? "" : "  " + money);
+    }
+    private struct MeterCell { internal RectangleF ValueRect; internal string Percent; internal string Money; }
+    private static void DrawValue(Graphics g, string value, Font font, Brush brush, StringFormat format, RectangleF bounds) {
+        if (bounds.Width < 1 || string.IsNullOrEmpty(value)) return;
+        var state = g.Save();
+        g.SetClip(bounds);
+        g.DrawString(value, font, brush, bounds, format);
+        g.Restore(state);
     }
     private static void DrawPace(Graphics g, RectangleF bar, double pace, float scale) {
         float x = bar.X + bar.Width * (float)Math.Max(0, Math.Min(100, pace)) / 100f;
@@ -204,6 +235,9 @@ internal sealed class MeterControl : Control {
         using (var valueFont = new Font("Microsoft YaHei UI", 8.5f * scale, FontStyle.Regular, GraphicsUnit.Pixel))
         using (var text = new SolidBrush(fg))
         using (var format = new StringFormat { LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter }) {
+            var cells = new List<MeterCell>();
+            var widths = new Dictionary<int, List<float>>();
+            float gap = MeterLayout.ValueGap * scale, moneyMin = MeterLayout.MinMoneyWidth * scale;
             for (int i = 0; i < Math.Min(3, data.rows.Length); i++) {
                 var row = data.rows[i]; float y = 2*scale + i*rowHeight;
                 g.DrawString(row.label, nameFont, text, new RectangleF(MeterLayout.NameLeft*scale,y,MeterLayout.NameWidth*scale,rowHeight),format);
@@ -221,11 +255,22 @@ internal sealed class MeterControl : Control {
                     }
                     if (meter.pace.HasValue) DrawPace(g, bar, meter.pace.Value, scale);
                     var valueRect = new RectangleF(bar.Right+MeterLayout.MeterGap*scale,y,MeterLayout.ValueWidth*scale,rowHeight);
-                    var state = g.Save();
-                    g.SetClip(valueRect);
-                    g.DrawString((row.label == "Codex" ? meter.label + " " : "") + Value(meter), valueFont, text, valueRect, format);
-                    g.Restore(state);
+                    var cell = new MeterCell { ValueRect = valueRect, Percent = Prefix(row.label, meter) + Percent(meter), Money = Money(meter) };
+                    cells.Add(cell);
+                    int key = (int)Math.Round(valueRect.X);
+                    List<float> column;
+                    if (!widths.TryGetValue(key, out column)) { column = new List<float>(); widths[key] = column; }
+                    column.Add(g.MeasureString(cell.Percent, valueFont, int.MaxValue, format).Width);
                 }
+            }
+            foreach (var cell in cells) {
+                int key = (int)Math.Round(cell.ValueRect.X);
+                float maxReserved = Math.Max(0, cell.ValueRect.Width - gap - moneyMin);
+                float reserved = MeterLayout.SharedReserve(widths[key], maxReserved);
+                RectangleF percentRect, moneyRect;
+                MeterLayout.ValueColumns(cell.ValueRect, reserved, gap, out percentRect, out moneyRect);
+                DrawValue(g, cell.Percent, valueFont, text, format, percentRect);
+                if (cell.Money.Length > 0) DrawValue(g, cell.Money, valueFont, text, format, moneyRect);
             }
         }
         if (data.stale) using (var brush = new SolidBrush(Color.FromArgb(218,149,40))) g.FillEllipse(brush,1*scale,Height/2f-1.5f*scale,3*scale,3*scale);

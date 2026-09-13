@@ -213,14 +213,18 @@ function safeWindowPosition(settings) {
   return { x: area.x + area.width - size.width - 20, y: area.y + 20 };
 }
 
-function appImage(size = 20) {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-    <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#9DF5D0"/><stop offset="1" stop-color="#7C8CFF"/></linearGradient></defs>
-    <rect x="2" y="2" width="28" height="28" rx="8" fill="#171A23"/>
-    <path d="M9 22V15h4v7H9zm5.5 0V9h4v13h-4zM20 22v-9h4v9h-4z" fill="url(#g)"/>
-  </svg>`;
-  const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
-  return image.resize({ width: size, height: size });
+const APP_ICON_ICO = path.join(__dirname, "assets", "app-icon.ico");
+const APP_ICON_PNG = path.join(__dirname, "assets", "app-icon.png");
+
+function appIconImage() {
+  const ico = nativeImage.createFromPath(APP_ICON_ICO);
+  return ico.isEmpty() ? nativeImage.createFromPath(APP_ICON_PNG) : ico;
+}
+
+function appImage(size) {
+  const icon = appIconImage();
+  if (!Number.isFinite(size) || size <= 0 || icon.isEmpty()) return icon;
+  return icon.resize({ width: size, height: size });
 }
 
 function trayMenu() {
@@ -289,7 +293,7 @@ function popupTrayMenu(screenPoint) {
 }
 
 function createTray() {
-  tray = new Tray(appImage());
+  tray = new Tray(appIconImage());
   tray.setToolTip("AI 用量 · 正在同步");
   tray.setContextMenu(trayMenu());
   tray.on("click", () => toggleWindow());
