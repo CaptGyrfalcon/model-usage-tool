@@ -1,11 +1,59 @@
-const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { createInterface } = require('node:readline');
+const { buildTaskbar } = require('../scripts/build-taskbar.cjs');
+
+function finite(value) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
 
 function percent(pool, now) {
   if (!pool || pool.expired || (pool.resetsAt && pool.resetsAt <= now)) return null;
-  const value = pool.percentRemaining;
-  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : null;
+  const value = finite(pool.percentRemaining);
+  return value == null ? null : Math.max(0, Math.min(100, value));
+}
+
+function remainingCents(pool) {
+  if (!pool) return null;
+  const estimate = pool.quotaEstimate || {};
+  const leftover = finite(estimate.inferredRemainingCents);
+  if (leftover != null) return Math.max(0, leftover);
+  const remaining = finite(pool.percentRemaining);
+  const total = finite(estimate.inferredTotalCents);
+  if (total != null && remaining != null) return Math.max(0, total * Math.max(0, Math.min(100, remaining)) / 100);
+  const used = finite(estimate.usedCents);
+  const usedPct = finite(pool.percentUsed);
+  if (used != null && usedPct > 0 && remaining != null) return Math.max(0, used / usedPct * remaining);
+  const included = finite(pool.includedCents?.remaining);
+  return included == null ? null : Math.max(0, included);
+}
+
+function cycleStart(pool, explicitStart, typicalMs, explicitEnd) {
+  const start = finite(explicitStart);
+  if (start != null) return start;
+  const end = finite(explicitEnd ?? pool?.resetsAt);
+  const duration = finite(pool?.windowMinutes) != null ? pool.windowMinutes * 60_000 : finite(typicalMs);
+  return end != null && duration != null ? end - duration : null;
+}
+
+function paceRemaining(startAt, resetsAt, now) {
+  const start = finite(startAt);
+  const end = finite(resetsAt);
+  if (start == null || end == null || end <= start) return null;
+  if (now >= end) return null;
+  if (now <= start) return 100;
+  return Math.max(0, Math.min(100, 100 * (end - now) / (end - start)));
+}
+
+function meter(label, pool, now, cycle = {}) {
+  const value = percent(pool, now);
+  return {
+    label,
+    value,
+    remainingCents: value == null ? null : remainingCents(pool),
+    pace: value == null ? null : paceRemaining(cycleStart(pool, cycle.startAt, cycle.typicalMs, cycle.resetsAt), cycle.resetsAt ?? pool?.resetsAt, now),
+  };
 }
 
 function meterRows(snapshot, now = Date.now()) {
@@ -14,92 +62,111 @@ function meterRows(snapshot, now = Date.now()) {
   const windows = quota?.windows?.length ? quota.windows : [quota?.primary, quota?.secondary].filter(Boolean);
   const week = windows.find(w => w.windowMinutes === 10080);
   const short = quota?.shortLimit === 'absent' ? null : windows.find(w => w.windowMinutes === 300);
-  const meter = (label, pool) => ({ label, value: percent(pool, now) });
+  const cursorCycle = { startAt: data?.billingCycleStart, resetsAt: data?.billingCycleEnd, typicalMs: 30 * 86_400_000 };
   return {
     stale: Boolean(snapshot?.error || data?.sourceStatus?.cursor?.error || data?.sourceStatus?.codex?.error),
     sampledAt: quota?.sampledAt,
     rows: [
-      { label: 'Cursor', meters: [meter('模型', data?.cursorModels)] },
-      { label: '三方', meters: [meter('三方', data?.otherModels)] },
-      { label: 'Codex', meters: [meter('周', week), ...(short ? [meter('5h', short)] : [])] },
+      { label: 'Cursor', meters: [meter('模型', data?.cursorModels, now, cursorCycle)] },
+      { label: '三方', meters: [meter('三方', data?.otherModels, now, cursorCycle)] },
+      { label: 'Codex', meters: [meter('周', week, now), ...(short ? [meter('5h', short, now)] : [])] },
     ],
   };
 }
 
-function taskbarBounds(taskbar, tray, width = 252) {
-  if (!taskbar || !tray || taskbar.height > taskbar.width || taskbar.height < 24 || tray.x - taskbar.x < width + 8) return null;
-  const height = Math.min(44, taskbar.height - 4);
-  return { x: Math.round(tray.x - width - 6), y: Math.round(taskbar.y + (taskbar.height - height) / 2), width, height: Math.round(height) };
+
+// Send only quota rows, never credentials, account identity or session content.
+function createMeterPublisher(getSnapshot) {
+  let previous = null;
+  return (send, connected) => {
+    if (!connected) { previous = null; return; }
+    const value = JSON.stringify(meterRows(getSnapshot()));
+    if (value !== previous) { send(value + '\n'); previous = value; }
+  };
 }
 
-// WS_VISIBLE remains set when Explorer or a game changes the topmost ordering.
-// Restore that ordering on every visible probe without activating the window.
-function presentTaskbarWindow(window, geometry, enabled) {
-  if (!geometry || !enabled) {
-    if (window.isVisible()) window.hide();
-    return;
-  }
-  const current = window.getBounds();
-  if (['x', 'y', 'width', 'height'].some(key => current[key] !== geometry[key])) window.setBounds(geometry);
-  window.setAlwaysOnTop(true, 'screen-saver');
-  if (!window.isVisible()) {
-    window.showInactive();
-    window.webContents.invalidate();
-  }
-  window.moveTop();
-}
-
-function createTaskbarMeters({ BrowserWindow, screen, ipcMain, getSnapshot, getSettings, showWindow }) {
-  let window, probe, retry, watchdog, geometry, stopped = false, ready = false, reportedError = false;
-  const update = () => {
-    if (!window || window.isDestroyed()) return;
-    if (ready) window.webContents.send('taskbar-meters', meterRows(getSnapshot()));
-    presentTaskbarWindow(window, geometry, ready && getSettings().taskbarMeters !== false);
+function createRunningTaskbarMeters({ getSnapshot, showWindow, showMenu = () => {}, nativeDirectory, onStatus = () => {} }, dependencies = {}) {
+  const compile = dependencies.buildTaskbar || buildTaskbar;
+  const launch = dependencies.spawn || spawn;
+  let child, retry, expiry, stopped = false, failures = 0;
+  const publish = createMeterPublisher(getSnapshot);
+  const update = () => publish(line => child.stdin.write(line), Boolean(child && !child.killed && child.stdin.writable));
+  const start = async () => {
+    try {
+      const executable = await compile(nativeDirectory);
+      if (stopped) return;
+      const helper = launch(executable, [String(process.pid)], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = helper;
+      let ended = false;
+      const finish = () => {
+        if (ended) return;
+        ended = true;
+        if (child === helper) child = null;
+        publish(null, false);
+        if (!stopped) retry = setTimeout(start, Math.min(30000, 1000 * 2 ** Math.min(failures++, 5)));
+      };
+      helper.stdin.on('error', () => helper.kill());
+      helper.stderr.on('data', chunk => console.warn('Native taskbar:', String(chunk).slice(0, 1000)));
+      const lines = createInterface({ input: helper.stdout });
+      lines.on('line', line => {
+        try {
+          const message = JSON.parse(line);
+          if (message.type === 'open' && !stopped) showWindow();
+          else if (message.type === 'menu' && !stopped) showMenu(message);
+          else if (message.type === 'status') { failures = 0; onStatus(message); }
+          else if (message.type === 'error') console.warn('Native taskbar:', message.message);
+        } catch { /* Ignore unrelated compiler/runtime output. */ }
+      });
+      helper.once('error', error => { console.warn('Native taskbar:', error.message); finish(); });
+      helper.once('exit', () => { lines.close(); finish(); });
+      update();
+    } catch (error) {
+      console.warn(error.message);
+      if (!stopped) retry = setTimeout(start, 30000);
+    }
   };
-  window = new BrowserWindow({ width: 252, height: 44, frame: false, transparent: false, backgroundColor: '#171c25',
-    resizable: false, movable: false, minimizable: false, maximizable: false, fullscreenable: false,
-    skipTaskbar: true, focusable: false, alwaysOnTop: true, hasShadow: false, show: false,
-    webPreferences: { preload: path.join(__dirname, 'taskbar-preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false },
-  });
-  window.setAlwaysOnTop(true, 'screen-saver');
-  window.loadFile(path.join(__dirname, 'renderer', 'taskbar.html'));
-  window.once('ready-to-show', () => { ready = true; update(); });
-  window.webContents.once('did-finish-load', () => { ready = true; update(); });
-  const open = (event) => { if (event.sender === window?.webContents) showWindow(); };
-  ipcMain.on('taskbar-open', open);
-  const startProbe = () => {
-    if (stopped) return;
-    probe = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-      path.join(__dirname, 'taskbar-probe.ps1'), '-OwnerPid', String(process.pid)], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    probe.stderr.resume();
-    const lines = createInterface({ input: probe.stdout });
-    lines.on('line', line => {
-      try {
-        const state = JSON.parse(line);
-        clearTimeout(watchdog);
-        // The native listener sends a 5-second heartbeat when the desktop is idle.
-        // Restart a stalled helper instead of leaving the meters hidden forever.
-        watchdog = setTimeout(() => { geometry = null; update(); probe?.kill(); }, 15000);
-        geometry = state.visible ? taskbarBounds(screen.screenToDipRect(null, state.taskbar), screen.screenToDipRect(null, state.tray)) : null;
-        update();
-      } catch (error) {
-        if (!reportedError) console.warn('Taskbar position unavailable:', error.message);
-        reportedError = true; geometry = null; update();
-      }
-    });
-    probe.on('error', () => { geometry = null; update(); });
-    probe.on('exit', () => {
-      clearTimeout(watchdog);
-      lines.close(); geometry = null; update();
-      if (!stopped) retry = setTimeout(startProbe, 5000);
-    });
-  };
-  if (process.platform === 'win32') startProbe();
+  if (process.platform === 'win32' || dependencies.spawn) {
+    start();
+    // Re-evaluate expiration even if no new network snapshot arrives.
+    expiry = setInterval(update, 5000);
+    expiry.unref?.();
+  }
   return { update, dispose() {
-    stopped = true; clearTimeout(retry); clearTimeout(watchdog); probe?.kill();
-    ipcMain.removeListener('taskbar-open', open);
-    if (!window.isDestroyed()) window.destroy();
-    window = null;
+    if (stopped) return;
+    stopped = true; clearTimeout(retry); clearInterval(expiry);
+    const helper = child; child = null;
+    if (helper && !helper.killed) {
+      // EOF closes the native message loop and destroys the child control.
+      helper.stdin.end();
+      const kill = setTimeout(() => helper.kill(), 2000);
+      kill.unref?.();
+      helper.once('exit', () => clearTimeout(kill));
+    }
   } };
 }
-module.exports = { meterRows, taskbarBounds, presentTaskbarWindow, createTaskbarMeters };
+
+// Disabling releases the native process, hooks and drawing surface.
+function createTaskbarMeters(options, startSession = createRunningTaskbarMeters) {
+  let session = null, disposed = false;
+  const update = () => {
+    if (disposed) return;
+    if (options.getSettings().taskbarMeters === false) {
+      session?.dispose(); session = null;
+    } else if (!session) session = startSession(options);
+    else session.update();
+  };
+  update();
+  return { update, dispose() {
+    disposed = true; session?.dispose(); session = null;
+  } };
+}
+// Electron Menu.popup x/y are relative to the owner window, not the screen.
+function menuPopupAnchor(screenPoint, windowBounds) {
+  const x = Number(screenPoint?.x), y = Number(screenPoint?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const originX = Number(windowBounds?.x), originY = Number(windowBounds?.y);
+  if (!Number.isFinite(originX) || !Number.isFinite(originY)) return { x: Math.round(x), y: Math.round(y) };
+  return { x: Math.round(x - originX), y: Math.round(y - originY) };
+}
+
+module.exports = { meterRows, menuPopupAnchor, createMeterPublisher, createRunningTaskbarMeters, createTaskbarMeters };

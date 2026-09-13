@@ -53,6 +53,9 @@ public sealed class QuotaTaskbarEvents : IDisposable {
     }
     private void OnEvent(IntPtr hook, uint kind, IntPtr hwnd, int objectId, int childId, uint thread, uint time) {
         if (disposed) return;
+        // Most global object events describe controls, text and caret changes.
+        // Reject them before making any further cross-process window queries.
+        if (kind >= 0x8000 && (objectId != 0 || childId != 0)) return;
         var current = GetForegroundWindow();
         bool relevant = kind == 3;
         if (!relevant && hwnd != IntPtr.Zero && objectId == 0 && childId == 0) {
@@ -61,8 +64,10 @@ public sealed class QuotaTaskbarEvents : IDisposable {
             if (pid != owner) {
                 var name = new StringBuilder(64);
                 GetClassName(hwnd, name, name.Capacity);
-                relevant = hwnd == current || hwnd == foreground || name.ToString() == "Shell_TrayWnd"
-                    || name.ToString() == "TrayNotifyWnd";
+                bool shell = name.ToString() == "Shell_TrayWnd" || name.ToString() == "TrayNotifyWnd";
+                // Games may reorder their windows repeatedly without changing
+                // fullscreen state. Only shell reorders require raising meters.
+                relevant = shell || (kind != 0x8004 && (hwnd == current || hwnd == foreground));
             }
         }
         foreground = current;

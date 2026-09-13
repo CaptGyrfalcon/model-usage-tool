@@ -7,7 +7,7 @@ const { codexHomePath } = require("./codex.cjs");
 const { smartDockBounds, windowMetrics, windowModeOptions } = require("./window-layout.cjs");
 const { alertLevel } = require("./quota-insights.cjs");
 const { createWindowDrag } = require("./window-drag.cjs");
-const { createTaskbarMeters } = require("./taskbar-meters.cjs");
+const { createTaskbarMeters, menuPopupAnchor } = require("./taskbar-meters.cjs");
 
 const MIN_INTERVAL = 15_000;
 const MAX_INTERVAL = 300_000;
@@ -272,6 +272,17 @@ function trayMenu() {
     { label: "打开 Cursor 账单", click: () => shell.openExternal("https://cursor.com/dashboard/spending") },
     { label: "完全退出", click: () => quitApp() },
   ]);
+}
+
+function popupTrayMenu(screenPoint) {
+  const physical = Number.isFinite(Number(screenPoint?.x)) && Number.isFinite(Number(screenPoint?.y));
+  const dip = physical
+    ? screen.screenToDipPoint({ x: Number(screenPoint.x), y: Number(screenPoint.y) })
+    : screen.getCursorScreenPoint();
+  const bounds = win && !win.isDestroyed() ? win.getBounds() : null;
+  const anchor = menuPopupAnchor(dip, bounds);
+  if (!anchor) return;
+  trayMenu().popup({ window: bounds ? win : undefined, ...anchor });
 }
 
 function createTray() {
@@ -756,8 +767,10 @@ app.whenReady().then(() => {
   app.setAppUserModelId("com.captgyrfalcon.cursor-usage-widget");
   createTray();
   createWindow();
-  taskbarMeters = createTaskbarMeters({ BrowserWindow, screen, ipcMain,
-    getSnapshot: () => latest, getSettings: loadSettings, showWindow });
+  taskbarMeters = createTaskbarMeters({ nativeDirectory: path.join(app.getPath('userData'), 'native'),
+    getSnapshot: () => latest, getSettings: loadSettings, showWindow,
+    showMenu: (point) => popupTrayMenu(point),
+    onStatus: state => console.info('Taskbar host:', JSON.stringify(state)) });
   registerGlobalShortcuts();
   createDataWorker();
   app.setLoginItemSettings({ openAtLogin: Boolean(loadSettings().openAtLogin) });

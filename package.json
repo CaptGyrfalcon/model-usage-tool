@@ -33,6 +33,7 @@
     "widget": "electron .",
     "preview": "node scripts/preview.cjs",
     "test": "node --test test/*.test.cjs",
+    "test:taskbar-native": "node scripts/check-taskbar-native.cjs",
     "postinstall": "node scripts/ensure-electron.cjs"
   },
   "dependencies": {
