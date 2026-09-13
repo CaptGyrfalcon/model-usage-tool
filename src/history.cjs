@@ -718,6 +718,35 @@ class UsageHistory {
     }));
   }
 
+  quarantineCodexQuotaSamples(samples = []) {
+    if (!samples.length) return 0;
+    // Older scanners persisted separate pools without their limit ID. Only
+    // quarantine observations matched to excluded source records, retaining
+    // the original rows for recovery. Never infer a bad row from a low percent.
+    const match = `source = 'codex' AND timestamp = ? AND window_minutes = ?
+      AND used_percent = ? AND resets_at = ?`;
+    this.db.exec("SAVEPOINT quarantine_codex_quota");
+    try {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS excluded_codex_quota_samples AS
+        SELECT * FROM quota_samples WHERE 0`);
+      const archive = this.db.prepare(`INSERT INTO excluded_codex_quota_samples
+        SELECT * FROM quota_samples WHERE ${match}`);
+      const remove = this.db.prepare(`DELETE FROM quota_samples WHERE ${match}`);
+      let removed = 0;
+      for (const sample of samples) {
+        const values = [sample.timestamp, sample.windowMinutes, sample.usedPercent, sample.resetsAt];
+        if (!values.every((value) => value != null && Number.isFinite(Number(value)))) continue;
+        archive.run(...values);
+        removed += Number(remove.run(...values).changes);
+      }
+      this.db.exec("RELEASE quarantine_codex_quota");
+      return removed;
+    } catch (error) {
+      this.db.exec("ROLLBACK TO quarantine_codex_quota; RELEASE quarantine_codex_quota");
+      throw error;
+    }
+  }
+
   saveQuotaSample(sample) {
     if (!sample?.source || !sample?.pool || !Number.isFinite(Number(sample.timestamp))) return;
     const timestamp = Math.trunc(Number(sample.timestamp));

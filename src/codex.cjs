@@ -78,10 +78,12 @@ function rateWindow(raw) {
 }
 
 function isMainCodexRateLimit(rateLimits, model = "") {
-  const limitId = String(rateLimits?.limit_id || "").toLowerCase();
-  const limitName = String(rateLimits?.limit_name || "").toLowerCase();
-  return !/spark/i.test(model) && !/spark/i.test(limitId)
-    && limitId !== "base_model_inference" && limitName !== "gpt-reserve";
+  const limitId = String(rateLimits?.limit_id || "").trim().toLowerCase();
+  const limitName = String(rateLimits?.limit_name || "").trim().toLowerCase();
+  // Account-wide Spark updates can appear in a non-Spark model's session.
+  // Its internal pool ID does not contain the public model name.
+  return !/spark|bengalfox/i.test(`${model} ${limitId} ${limitName}`)
+    && !/base_model_inference|gpt-reserve/i.test(`${limitId} ${limitName}`);
 }
 
 function responseHeader(body, name) {
@@ -115,7 +117,7 @@ function headerRateWindow(body, slot, timestampSeconds) {
 
 function rateLimitFromResponseHeaders(body, timestampSeconds) {
   const activeLimit = responseHeader(body, "x-codex-active-limit");
-  if (/spark|base_model_inference|gpt-reserve/i.test(activeLimit || "")) return null;
+  if (!isMainCodexRateLimit({ limit_id: activeLimit })) return null;
   const primary = headerRateWindow(body, "primary", timestampSeconds);
   const secondary = headerRateWindow(body, "secondary", timestampSeconds);
   if (!primary && !secondary) return null;
@@ -215,6 +217,7 @@ class CodexUsageScanner {
     this.origins = new Set();
     this.tierTimelines = new Map();
     this.quotaSamples = [];
+    this.excludedQuotaSamples = [];
   }
 
   updatePlanType(planType, timestamp) {
@@ -308,6 +311,7 @@ class CodexUsageScanner {
 
   scan() {
     this.quotaSamples = [];
+    this.excludedQuotaSamples = [];
     if (!fs.existsSync(this.home)) {
       return { available: false, home: this.home, events: [], rateLimit: null, planType: null, files: 0 };
     }
@@ -332,6 +336,7 @@ class CodexUsageScanner {
       events: collapseCumulativeEvents(events),
       rateLimit: this.latestRateLimit,
       quotaSamples: this.quotaSamples,
+      excludedQuotaSamples: this.excludedQuotaSamples,
       planType: this.planType,
       origins: [...this.origins],
       files: files.length,
@@ -414,6 +419,12 @@ class CodexUsageScanner {
 
     const timestamp = Date.parse(record.timestamp);
     const rateLimits = payload.rate_limits;
+    if (Number.isFinite(timestamp) && rateLimits && !isMainCodexRateLimit(rateLimits, state.model)) {
+      for (const raw of [rateLimits.primary, rateLimits.secondary]) {
+        const window = rateWindow(raw);
+        if (window?.resetsAt) this.excludedQuotaSamples.push({ timestamp, ...window });
+      }
+    }
     if (Number.isFinite(timestamp) && (rateLimits?.primary || rateLimits?.secondary) && isMainCodexRateLimit(rateLimits, state.model)) {
       this.collectQuotaSamples({ timestamp, planType: rateLimits.plan_type,
         windows: [rateWindow(rateLimits.primary), rateWindow(rateLimits.secondary)]

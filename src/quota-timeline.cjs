@@ -1,5 +1,7 @@
 const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
+// Session records and reset-after response headers can disagree by seconds.
+const CODEX_RESET_TOLERANCE_MS = 60_000;
 
 const QUOTA_POOLS = [
   { id: "cursor-models", source: "cursor", label: "Cursor 模型池", typicalMs: 30 * DAY_MS },
@@ -51,11 +53,12 @@ function poolMeta(poolId) {
   };
 }
 
-function formatCycleRange(startAt, endAt, typicalMs) {
+function formatCycleRange(startAt, endAt, typicalMs, includeTime = false) {
   const start = finite(startAt);
   const end = finite(endAt);
   if (start == null && end == null) return "未知周期";
-  const short = typicalMs <= 12 * HOUR_MS;
+  const short = includeTime || typicalMs <= 12 * HOUR_MS
+    || (start != null && end != null && new Date(start).toDateString() === new Date(end).toDateString());
   const stamp = (value) => {
     const date = new Date(value);
     const month = `${date.getMonth() + 1}月${date.getDate()}日`;
@@ -132,36 +135,52 @@ function assignCycleKey(sample, previous, typicalMs) {
   return previous.cycleKey;
 }
 
+function resetMatches(key, resetAt, poolId) {
+  if (resetAt == null || !key.startsWith("reset:")) return false;
+  const tolerance = poolId.startsWith("codex") ? CODEX_RESET_TOLERANCE_MS : 0;
+  return Math.abs(Number(key.slice(6)) - resetAt) <= tolerance;
+}
+
 function groupCycles(samples, poolId, now = Date.now()) {
   const meta = poolMeta(poolId);
   const filtered = samples
     .map(normalizeSample)
-    .filter((sample) => sample && poolIdOf(sample) === poolId)
+    .filter((sample) => sample && poolIdOf(sample) === poolId && sample.timestamp <= now)
     .sort((a, b) => a.timestamp - b.timestamp);
   const groups = new Map();
   let previous = null;
   for (const sample of filtered) {
-    const cycleKey = assignCycleKey(sample, previous, meta.typicalMs);
+    // Compare to a fixed group anchor, not the preceding sample, so small
+    // successive changes cannot chain unrelated reset dates into one cycle.
+    const cycleKey = [...groups.keys()].find((key) => resetMatches(key, sample.resetsAt, poolId))
+      || assignCycleKey(sample, previous, meta.typicalMs);
     const tagged = { ...sample, cycleKey };
     if (!groups.has(cycleKey)) groups.set(cycleKey, []);
     groups.get(cycleKey).push(tagged);
     previous = tagged;
   }
 
-  return [...groups.entries()].map(([key, points]) => {
+  const cycles = [...groups.entries()].map(([key, observations]) => {
+    // Live data supersedes a stored observation at the same timestamp.
+    const points = [...new Map(observations.map((point) => [point.timestamp, point])).values()];
     const first = points[0];
     const last = points[points.length - 1];
     const endAt = last.resetsAt || last.timestamp;
-    const startAt = first.resetsAt != null
-      ? Math.min(first.timestamp, first.resetsAt - meta.typicalMs)
+    const startAt = last.resetsAt != null
+      ? Math.min(first.timestamp, last.resetsAt - meta.typicalMs)
       : first.timestamp;
-    const current = last.resetsAt != null ? last.resetsAt > now : now - last.timestamp < meta.typicalMs;
+    // Early resets can leave several old deadlines in the future. Only the
+    // cycle from the latest observation can still be active.
+    const current = key === previous?.cycleKey
+      && (last.resetsAt != null ? last.resetsAt > now : now - last.timestamp < meta.typicalMs);
     return {
       key,
       pool: poolId,
       label: formatCycleRange(startAt, endAt, meta.typicalMs),
       startAt,
       endAt,
+      firstObservedAt: first.timestamp,
+      windowMinutes: last.windowMinutes,
       current,
       sampleCount: points.length,
       startRemaining: first.remainingPercent,
@@ -172,7 +191,46 @@ function groupCycles(samples, poolId, now = Date.now()) {
         remainingPercent: point.remainingPercent,
       })),
     };
-  }).sort((a, b) => (b.endAt || 0) - (a.endAt || 0));
+  });
+  if (meta.source === "codex") closeCodexCycles(cycles, now);
+  return cycles.sort((a, b) => (b.endAt || 0) - (a.endAt || 0));
+}
+
+function closeCodexCycles(cycles, now) {
+  // First appearances establish the sequence of allowances. Later cached
+  // observations of an old reset date must not reopen a superseded cycle.
+  cycles.sort((a, b) => a.firstObservedAt - b.firstObservedAt);
+  for (let i = 0; i < cycles.length; i += 1) {
+    const cycle = cycles[i];
+    cycle.scheduledEndAt = cycle.endAt;
+    if (cycle.key.startsWith("reset:")) {
+      const duration = cycle.windowMinutes > 0 ? cycle.windowMinutes * 60_000 : poolMeta(cycle.pool).typicalMs;
+      cycle.startAt = Math.min(cycle.firstObservedAt, cycle.scheduledEndAt - duration);
+    }
+    if (i && cycle.startAt <= cycles[i - 1].startAt) {
+      // A corrected deadline can move backwards. In that case it cannot
+      // establish an earlier new allowance; use its first observation.
+      cycle.startAt = cycle.firstObservedAt;
+    }
+  }
+  for (let i = 0; i < cycles.length; i += 1) {
+    const cycle = cycles[i];
+    const next = cycles[i + 1];
+    cycle.endAt = Math.min(cycle.scheduledEndAt, next?.startAt ?? Infinity);
+    cycle.interrupted = cycle.endAt < cycle.scheduledEndAt - CODEX_RESET_TOLERANCE_MS;
+    cycle.current = !next && cycle.current;
+    // Keep only observations inside the actual allowance. In particular,
+    // cached old-window snapshots after an early reset are not old usage.
+    cycle.points = cycle.points.filter((point) => point.at >= cycle.startAt && point.at <= cycle.endAt
+      && (!next || point.at < next.startAt));
+    cycle.sampleCount = cycle.points.length;
+    cycle.startRemaining = cycle.points[0]?.remainingPercent ?? null;
+    cycle.endRemaining = cycle.points.at(-1)?.remainingPercent ?? null;
+    // Unlike an old cached record, the last newly observed window owns the
+    // current state even when an earlier window was sampled more recently.
+    if (!next && cycle.key.startsWith("reset:")) cycle.current = cycle.endAt > now;
+    cycle.label = formatCycleRange(cycle.startAt, cycle.endAt, poolMeta(cycle.pool).typicalMs);
+  }
 }
 
 function downsample(points, maxPoints = 200) {
@@ -189,41 +247,10 @@ function downsample(points, maxPoints = 200) {
   return picked;
 }
 
-function mergeLivePoint(cycle, live, poolId) {
-  const point = live.map(normalizeSample).find((sample) => sample && poolIdOf(sample) === poolId);
-  if (!point || point.remainingPercent == null) return cycle;
-  // A live snapshot only describes the active billing cycle.  In particular,
-  // never append it to a historical cycle selected by the user.
-  if (!cycle.current) return cycle;
-  if (cycle.key.startsWith("reset:") && point.resetsAt != null && cycle.key !== `reset:${point.resetsAt}`) {
-    return cycle;
-  }
-  const last = cycle.points[cycle.points.length - 1];
-  if (last && point.timestamp <= last.at) {
-    return {
-      ...cycle,
-      endRemaining: point.remainingPercent,
-      points: cycle.points.map((item, index) => (
-        index === cycle.points.length - 1
-          ? { at: point.timestamp, usedPercent: point.usedPercent, remainingPercent: point.remainingPercent }
-          : item
-      )),
-    };
-  }
-  return {
-    ...cycle,
-    endAt: Math.max(cycle.endAt || 0, point.resetsAt || point.timestamp),
-    endRemaining: point.remainingPercent,
-    points: [...cycle.points, {
-      at: point.timestamp,
-      usedPercent: point.usedPercent,
-      remainingPercent: point.remainingPercent,
-    }],
-  };
-}
-
-function extendCompletedCycle(cycle, points) {
-  if (!cycle || cycle.current || !points.length) return points;
+function extendCompletedCycle(cycle, points, now) {
+  // A superseded cycle may retain a future scheduled deadline. Do not draw
+  // its old water level into the future as though it were still active.
+  if (!cycle || cycle.current || cycle.endAt > now || !points.length) return points;
   const last = points[points.length - 1];
   if (!Number.isFinite(cycle.endAt) || cycle.endAt <= last.at) return points;
   return [...points, {
@@ -236,16 +263,16 @@ function extendCompletedCycle(cycle, points) {
 
 function cycleReference(cycle, samples, poolId) {
   if (!cycle?.key.startsWith("reset:")) return null;
-  const endAt = Number(cycle.key.slice(6));
+  const endAt = cycle.endAt;
   if (!Number.isFinite(endAt)) return null;
   const points = samples.map(normalizeSample).filter((point) => point && poolIdOf(point) === poolId);
-  const matching = points.filter((point) => point.resetsAt === endAt);
-  const explicit = matching.findLast((point) => point.startsAt != null && point.startsAt < endAt);
-  if (explicit) return { startAt: explicit.startsAt, endAt, estimated: false };
+  const matching = points.filter((point) => resetMatches(cycle.key, point.resetsAt, poolId));
   if (poolId.startsWith("codex")) {
     const minutes = matching.findLast((point) => point.windowMinutes > 0)?.windowMinutes;
-    if (minutes) return { startAt: endAt - minutes * 60_000, endAt, estimated: false };
+    return { startAt: cycle.startAt, endAt, estimated: !minutes };
   }
+  const explicit = matching.findLast((point) => point.startsAt != null && point.startsAt < endAt);
+  if (explicit) return { startAt: explicit.startsAt, endAt, estimated: false };
   const previousEnd = points.reduce((latest, point) => point.resetsAt < endAt && point.resetsAt <= cycle.points[0]?.at ? Math.max(latest, point.resetsAt || 0) : latest, 0);
   const duration = endAt - previousEnd;
   if (poolId.startsWith("cursor") || poolId === "other-models") {
@@ -260,37 +287,34 @@ function buildQuotaTimeline(samples, {
   now = Date.now(),
   live = [],
 } = {}) {
-  const available = QUOTA_POOLS.filter((item) => groupCycles(samples, item.id, now).length || live.some((point) => poolIdOf(normalizeSample(point) || {}) === item.id));
+  // Include live data before grouping: an early reset may not be persisted yet.
+  const observations = [...samples, ...live.filter((point) => normalizeSample(point)?.remainingPercent != null)];
+  const grouped = new Map(QUOTA_POOLS.map((item) => [item.id, groupCycles(observations, item.id, now)]));
+  const available = QUOTA_POOLS.filter((item) => grouped.get(item.id).length);
   const poolId = available.some((item) => item.id === pool) ? pool : (available[0]?.id || pool);
-  const cycles = groupCycles(samples, poolId, now);
-  const liveForPool = live.map(normalizeSample).filter((sample) => sample && poolIdOf(sample) === poolId);
-  if (liveForPool.length && (!cycles.length || !cycles.some((cycle) => cycle.current))) {
-    const point = liveForPool[liveForPool.length - 1];
-    const meta = poolMeta(poolId);
-    cycles.unshift({
-      key: point.resetsAt != null ? `reset:${point.resetsAt}` : `open:${point.timestamp}`,
-      pool: poolId,
-      label: formatCycleRange(point.timestamp, point.resetsAt, meta.typicalMs),
-      startAt: point.timestamp,
-      endAt: point.resetsAt || point.timestamp,
-      current: true,
-      sampleCount: 1,
-      startRemaining: point.remainingPercent,
-      endRemaining: point.remainingPercent,
-      points: [{ at: point.timestamp, usedPercent: point.usedPercent, remainingPercent: point.remainingPercent }],
-    });
+  const cycles = (grouped.get(poolId) || []).map((cycle) => {
+    const reference = cycleReference(cycle, observations, poolId);
+    const startAt = reference?.startAt ?? cycle.startAt;
+    return { ...cycle, startAt, reference,
+      label: formatCycleRange(startAt, cycle.endAt, poolMeta(poolId).typicalMs) };
+  });
+  // Real resets on the same date remain separate, with times to tell them apart.
+  const labelCounts = new Map();
+  for (const cycle of cycles) labelCounts.set(cycle.label, (labelCounts.get(cycle.label) || 0) + 1);
+  for (const cycle of cycles) {
+    if (labelCounts.get(cycle.label) > 1) {
+      cycle.label = formatCycleRange(cycle.startAt, cycle.endAt, poolMeta(poolId).typicalMs, true);
+    }
   }
-
-  const selected = cycles.find((cycle) => cycle.key === cycleKey) || cycles.find((cycle) => cycle.current) || cycles[0] || null;
-  const merged = selected ? mergeLivePoint(selected, live, poolId) : null;
-  const reference = merged ? cycleReference(merged, [...samples, ...live], poolId) : null;
-  const cycleLabel = (cycle) => {
-    const label = reference && cycle.key === merged.key
-      ? formatCycleRange(reference.startAt, reference.endAt, poolMeta(poolId).typicalMs) : cycle.label;
-    return cycle.current ? `当前 · ${label}` : label;
-  };
-  const sampled = downsample((merged?.points || []).filter((point) => point.remainingPercent != null));
-  const series = extendCompletedCycle(merged, sampled);
+  const requestedReset = String(cycleKey).startsWith("reset:") ? Number(cycleKey.slice(6)) : null;
+  const selected = cycles.find((cycle) => cycle.key === cycleKey)
+    || cycles.find((cycle) => resetMatches(cycle.key, requestedReset, poolId))
+    || cycles.find((cycle) => cycle.current) || cycles[0] || null;
+  const reference = selected?.reference;
+  const cycleLabel = (cycle) => cycle.current ? `当前 · ${cycle.label}`
+    : `${cycle.label}${cycle.interrupted ? "（提前重置）" : ""}`;
+  const sampled = downsample((selected?.points || []).filter((point) => point.remainingPercent != null));
+  const series = extendCompletedCycle(selected, sampled, now);
   return {
     pools: QUOTA_POOLS.map((item) => ({
       ...item,
@@ -300,19 +324,23 @@ function buildQuotaTimeline(samples, {
     cycles: cycles.map((cycle) => ({
       key: cycle.key,
       label: cycleLabel(cycle),
-      startAt: reference && cycle.key === merged.key ? reference.startAt : cycle.startAt,
+      startAt: cycle.startAt,
       endAt: cycle.endAt,
+      scheduledEndAt: cycle.scheduledEndAt,
+      interrupted: Boolean(cycle.interrupted),
       current: cycle.current,
       sampleCount: cycle.sampleCount,
     })),
-    cycle: merged ? {
-      key: merged.key,
-      label: cycleLabel(merged),
-      startAt: reference?.startAt ?? merged.startAt,
-      endAt: merged.endAt,
-      current: merged.current,
-      startRemaining: merged.startRemaining,
-      endRemaining: merged.endRemaining,
+    cycle: selected ? {
+      key: selected.key,
+      label: cycleLabel(selected),
+      startAt: reference?.startAt ?? selected.startAt,
+      endAt: selected.endAt,
+      scheduledEndAt: selected.scheduledEndAt,
+      interrupted: Boolean(selected.interrupted),
+      current: selected.current,
+      startRemaining: selected.startRemaining,
+      endRemaining: selected.endRemaining,
       reference,
     } : null,
     series,

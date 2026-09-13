@@ -926,6 +926,7 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
   const codexDedupe = history.migrateCodexCumulativeEvents(scan.events);
   history.db.exec("BEGIN");
   try {
+    history.quarantineCodexQuotaSamples(scan.excludedQuotaSamples);
     for (const sample of scan.quotaSamples || []) history.saveQuotaSample(sample);
     history.db.exec("COMMIT");
   } catch (error) { history.db.exec("ROLLBACK"); throw error; }
@@ -1314,6 +1315,9 @@ module.exports = {
   loadSettings,
   saveSettings,
   fetchSnapshot,
+  resolveAuth,
+  cursorFetch,
+  cursorEventToHistory,
   normalizeModelDescriptor,
   buildModelBreakdowns,
   buildTrendSeries,
