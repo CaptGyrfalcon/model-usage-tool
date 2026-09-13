@@ -61,7 +61,7 @@ test("CSV includes every matching row and keeps unknown costs empty", (t) => {
   assert.equal(exportUsageEvents(history, { filePath, kind: "csv" }).count, 2);
   const csv = fs.readFileSync(filePath, "utf8");
   assert.ok(csv.startsWith("\uFEFF时间,"));
-  assert.match(csv, /'=DANGER\(\),,unknown,15,2,20,3,\r\n/);
+  assert.match(csv, /'=danger\(\),,unknown,15,2,20,3,\r\n/);
   assert.equal(csv.split("\r\n").length, 4);
 });
 

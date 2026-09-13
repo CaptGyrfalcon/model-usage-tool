@@ -10,6 +10,8 @@ const { buildQuotaInsights } = require("./quota-insights.cjs");
 const { buildQuotaTimeline, livePointsFromSnapshot } = require("./quota-timeline.cjs");
 const { buildCodexMonthly, monthBounds, WEEK_MS } = require("./renderer/codex-monthly.js");
 const { flattenPricingSnapshot, summarizePricingSnapshot } = require("./pricing-table.cjs");
+const TrendRange = require("./renderer/trend-range.js");
+const ModelDisplay = require("./renderer/model-display.js");
 
 const APP_DIR = path.join(os.homedir(), "AppData", "Roaming", "cursor-usage-widget");
 const SETTINGS_PATH = path.join(APP_DIR, "settings.json");
@@ -51,9 +53,12 @@ const DEFAULT_SETTINGS = {
   modelView: "list",
   modelMetric: "total",
   trendRange: "day",
+  trendCustomCount: 1,
+  trendCustomUnit: "day",
   trendMetric: "total",
   trendBreakdown: false,
   trendSpeedBreakdown: false,
+  trendModelBreakdown: false,
   dataSource: "all",
   quotaLevelPool: "cursor-models",
   eventSource: "all",
@@ -436,9 +441,7 @@ function normalizeModelDescriptor(rawName) {
 }
 
 function modelLabel(descriptor, precision) {
-  if (precision === "coarse") return descriptor.base;
-  if (precision === "speed") return `${descriptor.base} · ${descriptor.fast ? "Fast" : "标准"}`;
-  return `${descriptor.base} · ${descriptor.effort || "默认"} · ${descriptor.fast ? "Fast" : "标准"}`;
+  return ModelDisplay.format(descriptor, { precision });
 }
 
 function buildModelBreakdown(events, precision, autoBucketModels = []) {
@@ -457,13 +460,7 @@ function buildModelBreakdown(events, precision, autoBucketModels = []) {
       groups.set(key, {
         key,
         name: descriptor.base,
-        label: descriptor.fastKnown
-          ? modelLabel(descriptor, precision)
-          : precision === "coarse"
-            ? descriptor.base
-            : precision === "speed"
-              ? `${descriptor.base} · 速度未知`
-              : `${descriptor.base} · ${descriptor.effort || "默认"} · 速度未知`,
+        label: modelLabel(descriptor, precision),
         fast: descriptor.fast,
         fastKnown: descriptor.fastKnown,
         effort: descriptor.effort,
@@ -562,7 +559,8 @@ function addTrendSlice(target, tokens, event) {
 }
 
 function buildTrendSeries(events, range, now = Date.now()) {
-  const boundaries = makeTrendBoundaries(range, now);
+  const custom = typeof range === "object" ? TrendRange.spec(range, now) : null;
+  const boundaries = custom ? custom.boundaries : makeTrendBoundaries(range, now);
   const buckets = boundaries.slice(0, -1).map((start, index) => {
     const d = new Date(start);
     const isDay = range === "day";
@@ -573,6 +571,7 @@ function buildTrendSeries(events, range, now = Date.now()) {
         ? `${String(d.getHours()).padStart(2, "0")}:00–${String((d.getHours() + 1) % 24).padStart(2, "0")}:00`
         : `${d.getMonth() + 1}月${d.getDate()}日`,
       shortLabel: isDay ? String(d.getHours()).padStart(2, "0") : `${d.getMonth() + 1}/${d.getDate()}`,
+      ...(custom ? TrendRange.labels(start, boundaries[index + 1], custom.bucket) : {}),
       ...emptyTrendSlice(),
       costCents: 0,
       count: 0,
@@ -580,17 +579,28 @@ function buildTrendSeries(events, range, now = Date.now()) {
         normal: emptyTrendSlice(),
         fast: emptyTrendSlice(),
       },
+      models: Object.create(null),
     };
   });
   for (const event of events) {
     const ts = parseIsoOrMs(event.timestamp);
     if (!ts || ts < boundaries[0] || ts >= boundaries[boundaries.length - 1]) continue;
-    const index = boundaries.findIndex((boundary, i) => i < boundaries.length - 1 && ts >= boundary && ts < boundaries[i + 1]);
+    let low = 0;
+    let high = boundaries.length - 1;
+    while (low + 1 < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (boundaries[middle] <= ts) low = middle;
+      else high = middle;
+    }
+    const index = low;
     if (index < 0) continue;
     const t = decorateTokens(eventTokens(event));
     const bucket = buckets[index];
     addTrendSlice(bucket, t, event);
     addTrendSlice(bucket.speed[eventSpeedKey(event)], t, event);
+    const model = normalizeModelDescriptor(event.model).base;
+    bucket.models[model] ||= emptyTrendSlice();
+    addTrendSlice(bucket.models[model], t, event);
     bucket.count += 1;
   }
   return buckets;
@@ -1097,6 +1107,21 @@ function getModelUsage(rangeKey = "month1", now = Date.now()) {
   return buildModelUsage(events, key, now);
 }
 
+function getTrendUsage(payload, now = Date.now(), history = getHistory()) {
+  const range = TrendRange.spec(payload, now);
+  const events = history.getEvents({ start: range.start, end: range.end });
+  const sourceUsage = (label, rows) => {
+    const costs = costSummary(rows);
+    return { label, costAvailable: costs.pricedEvents > 0, costCoveragePercent: costs.coveragePercent,
+      trends: { custom: buildTrendSeries(rows, payload, now) } };
+  };
+  return { range, sources: {
+    all: sourceUsage("全部", events),
+    cursor: sourceUsage("Cursor", events.filter((event) => event.source === "cursor")),
+    codex: sourceUsage("Codex", events.filter((event) => event.source === "codex")),
+  } };
+}
+
 async function fetchSnapshot({ forcePricing = false } = {}) {
   const now = Date.now();
   const history = getHistory();
@@ -1297,6 +1322,7 @@ module.exports = {
   speedUsageSummary,
   buildModelUsage,
   getModelUsage,
+  getTrendUsage,
   getQuotaTimeline,
   queryUsageEvents,
   getPricingCatalog,

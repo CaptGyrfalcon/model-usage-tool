@@ -16,6 +16,13 @@ let selectedCycleKey = null;
 let selectedPricingId = null;
 let renderFrame = null;
 let chartTooltipContext = { series: [], metric: "total" };
+let customTrendUsage = null;
+let customTrendKey = null;
+let customTrendError = "";
+let customTrendRequest = 0;
+let customTrendLoading = false;
+let customTrendFormKey = null;
+let trendChartScroll = { key: null, left: 0 };
 let chartHoveredIndex = -1;
 let chartTooltipFrame = null;
 let chartTooltipVisible = false;
@@ -25,6 +32,8 @@ const systemMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 let liquidCanvases = [];
 let previousPanelFocus = null;
 function reducedMotion() { return window.WidgetMotion.reduced(settings.motionPreference, systemMotion.matches); }
+const fullscreenMorph = window.FullscreenMorph.create(document);
+let fullscreenRequestInFlight = false;
 function stopLiquidAnimation() {
   if (liquidState.raf !== null) cancelAnimationFrame(liquidState.raf);
   liquidState.raf = null;
@@ -60,9 +69,12 @@ let settings = {
   modelView: "list",
   modelMetric: "total",
   trendRange: "day",
+  trendCustomCount: 1,
+  trendCustomUnit: "day",
   trendMetric: "total",
   trendBreakdown: false,
   trendSpeedBreakdown: false,
+  trendModelBreakdown: false,
   dataSource: "all",
   quotaLevelPool: "cursor-models",
   eventSource: "all",
@@ -802,11 +814,12 @@ function renderOrb(d) {
   const normalPoints = speedTotal ? selected.used * Math.max(0, Number(speed.normal) || 0) / speedTotal : 0;
   const fastPoints = speedTotal ? selected.used * Math.max(0, Number(speed.fast) || 0) / speedTotal : 0;
   const unknownPoints = Math.max(0, selected.used - normalPoints - fastPoints);
-  const normalEnd = normalPoints;
+  const normalEnd = unknownPoints + normalPoints;
   const fastEnd = Math.min(selected.used, normalEnd + fastPoints);
   ring.style.setProperty("--pool-scale", String(selected.sizeScale || 1));
   ring.style.setProperty("--pool-size", `${(126 * (selected.sizeScale || 1)).toFixed(1)}px`);
   ring.style.setProperty("--orb-used", selected.used.toFixed(2));
+  ring.style.setProperty("--orb-unknown-end", `${unknownPoints.toFixed(3)}%`);
   ring.style.setProperty("--orb-normal-end", `${normalEnd.toFixed(3)}%`);
   ring.style.setProperty("--orb-fast-end", `${fastEnd.toFixed(3)}%`);
   ring.style.setProperty("--orb-used-end", `${selected.used.toFixed(3)}%`);
@@ -819,7 +832,7 @@ function renderOrb(d) {
   $("orbCapacity").textContent = displayMode === "pool" ? liquidCapacityText(selected) : "";
   $("orbPoolName").textContent = selected.name;
   $("orbPoolDetail").textContent = displayMode === "speed"
-    ? `普通 ${pct(normalPoints)} · Fast ${pct(fastPoints)}${unknownPoints > 0.01 ? ` · 未知 ${pct(unknownPoints)}` : ""}`
+    ? `${unknownPoints > 0.01 ? `未知 ${pct(unknownPoints)} · ` : ""}普通 ${pct(normalPoints)} · Fast ${pct(fastPoints)}`
     : displayMode === "pool"
       ? selected.source === "codex"
         ? `青色 5 小时可用 ${pct(selected.remaining)} · 蓝色仅周池 ${pct(selected.weeklyOnlyRemaining)}`
@@ -1001,7 +1014,7 @@ function renderOverview(d) {
   const lastTotal = lastEffective + (last?.tokens?.cacheRead || 0) + (last?.tokens?.cacheWrite || 0);
   const lastCost = last?.equivalentCostCents == null ? "价格不可用" : `${formatUsd(last.equivalentCostCents)} 美元等效`;
   $("recentPanel").innerHTML = last
-    ? `<div class="recent-icon">↗</div><div class="recent-copy"><span>最近一次调用 · ${last.source === "codex" ? "Codex" : "Cursor"}</span><b>${escapeHtml(last.model)}${last.effort ? ` · ${escapeHtml(last.effort)}` : ""}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>${recentDonutHtml(last)}`
+    ? `<div class="recent-icon">↗</div><div class="recent-copy"><span>最近一次调用 · ${last.source === "codex" ? "Codex" : "Cursor"}</span><b>${escapeHtml(window.ModelDisplay.format(last))}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>${recentDonutHtml(last)}`
     : `<div class="empty-state">本周期还没有可显示的用量事件</div>`;
 }
 
@@ -1074,7 +1087,7 @@ function renderModels(d) {
   const max = Math.max(1, ...rows.map((row) => Number(row.total) || 0));
   $("modelList").innerHTML = rows
     .map((row, index) => {
-      const modelLabel = row.label;
+      const modelLabel = window.ModelDisplay.format(row, { precision });
       return `
       <article class="model-row">
         <div class="model-rank">${String(index + 1).padStart(2, "0")}</div>
@@ -1202,6 +1215,13 @@ function readTrendPath(item, path, fallback = 0) {
 }
 
 function chartSegmentDefinitions(metric, options = {}) {
+  if (options.modelBreakdown) {
+    const models = [...new Set((options.series || []).flatMap((item) => Object.keys(item.models || {})))].sort();
+    return models.map((model) => ({
+      key: model, label: window.ModelDisplay.format(model, { precision: "coarse" }), className: "model", color: modelColor(model),
+      read: (item) => Math.max(0, readTrendPath(item, ["models", model, metric])),
+    }));
+  }
   const breakdown = Boolean(options.breakdown);
   const speedBreakdown = Boolean(options.speedBreakdown);
   const parts = breakdown ? compositionSegmentDefinitions(metric) : [];
@@ -1233,29 +1253,32 @@ function chartSegmentDefinitions(metric, options = {}) {
   });
 }
 
-function chartSvg(series, metric, range, breakdown = false, speedBreakdown = false) {
+function chartSvg(series, metric, range, breakdown = false, speedBreakdown = false, modelBreakdown = false) {
   if (!series?.length) return `<div class="empty-state">暂无趋势数据</div>`;
   const fullscreen = Boolean(windowState.fullscreen);
-  const width = fullscreen ? 1400 : 400;
+  const custom = range === "custom";
+  const width = custom ? Math.max(fullscreen ? 1400 : 400, series.length * 10 + 100) : fullscreen ? 1400 : 400;
   const height = fullscreen ? 460 : 236;
   const left = fullscreen ? 76 : 45;
   const top = fullscreen ? 24 : 14;
-  const plotWidth = fullscreen ? width - left - 28 : 344;
+  const plotWidth = custom || fullscreen ? width - left - 28 : 344;
   const plotHeight = fullscreen ? height - top - 76 : 170;
   const baseY = top + plotHeight;
-  const stacked = breakdown || speedBreakdown;
-  const segmentDefs = chartSegmentDefinitions(metric, { breakdown, speedBreakdown });
+  const stacked = breakdown || speedBreakdown || modelBreakdown;
+  const segmentDefs = chartSegmentDefinitions(metric, { breakdown, speedBreakdown, modelBreakdown, series });
   const segmentValue = (item, def) => (def.read ? def.read(item) : Number(item[def.key]) || 0);
   const values = series.map((item) => stacked
     ? segmentDefs.reduce((sum, def) => sum + Math.max(0, segmentValue(item, def)), 0)
     : Math.max(0, Number(item[metric]) || 0));
   const maxValue = Math.max(...values, 1);
   const slot = plotWidth / series.length;
-  const gap = fullscreen
+  const gap = custom ? 3 : fullscreen
     ? range === "month" ? 7 : range === "day" ? 12 : 32
     : range === "month" ? 2.2 : range === "day" ? 3.2 : 8;
   const barWidth = Math.max(3, slot - gap);
-  const labelIndexes = range === "week"
+  const labelIndexes = custom
+    ? new Set(series.map((_item, index) => index).filter((index) => index % Math.max(1, Math.ceil(85 / slot)) === 0))
+    : range === "week"
     ? new Set(series.map((_item, index) => index))
     : range === "month"
       ? new Set([0, 4, 9, 14, 19, 24, 29])
@@ -1285,34 +1308,88 @@ function chartSvg(series, metric, range, breakdown = false, speedBreakdown = fal
         const segment = Math.max(0, segmentValue(item, def));
         const heightValue = segment ? Math.max(1, segment / maxValue * plotHeight) : 0;
         y -= heightValue;
-        return `<rect class="chart-segment ${def.className}" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${heightValue.toFixed(2)}" rx="${segmentIndex === segmentDefs.length - 1 ? Math.min(3, barWidth / 2) : 0}"></rect>`;
+        return `<rect class="chart-segment ${def.className}"${def.color ? ` fill="${def.color}"` : ""} x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${heightValue.toFixed(2)}" rx="${segmentIndex === segmentDefs.length - 1 ? Math.min(3, barWidth / 2) : 0}"></rect>`;
       }).join("");
       return `<g class="chart-column" data-chart-index="${index}">${hitbox}${rects}${label}</g>`;
     })
     .join("");
-  return `<svg class="bar-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="消耗柱状图">${grid}${bars}</svg>`;
+  return `<svg class="bar-chart${custom ? " custom-range" : ""}"${custom ? ` width="${width}"` : ""} viewBox="0 0 ${width} ${height}" role="img" aria-label="消耗柱状图">${grid}${bars}</svg>`;
+}
+
+function customTrendPayload() {
+  return { count: settings.trendCustomCount || 1, unit: settings.trendCustomUnit || "day" };
+}
+
+async function loadCustomTrends() {
+  const payload = customTrendPayload();
+  const key = JSON.stringify(payload);
+  const request = ++customTrendRequest;
+  customTrendKey = key;
+  customTrendLoading = true;
+  customTrendError = "";
+  customTrendUsage = null;
+  try {
+    const next = await window.widget.getTrendUsage(payload);
+    if (request !== customTrendRequest) return;
+    customTrendUsage = next;
+  } catch (error) {
+    if (request !== customTrendRequest) return;
+    customTrendError = error?.message || String(error);
+  }
+  if (request !== customTrendRequest) return;
+  customTrendLoading = false;
+  if (snapshot.data && settings.trendRange === "custom") renderTrends(snapshot.data);
 }
 
 function renderTrends(d) {
   const range = settings.trendRange || "day";
+  const custom = range === "custom";
+  const chart = $("trendChart");
+  const scrollKey = custom ? JSON.stringify(customTrendPayload()) : range;
+  if (trendChartScroll.key !== scrollKey) {
+    trendChartScroll = { key: scrollKey, left: 0 };
+  } else if (chart.querySelector(".bar-chart")) {
+    // Loading/error placeholders have no overflow; don't save their reset offset.
+    trendChartScroll.left = chart.scrollLeft;
+  }
+  $("trendCustomForm").hidden = !custom;
+  const formKey = JSON.stringify(customTrendPayload());
+  if (customTrendFormKey !== formKey) {
+    $("trendCustomCount").value = settings.trendCustomCount || 1;
+    $("trendCustomUnit").value = settings.trendCustomUnit || "day";
+    customTrendFormKey = formKey;
+  }
+  if (custom && customTrendKey !== JSON.stringify(customTrendPayload())) loadCustomTrends();
   const source = settings.dataSource || "all";
-  const view = d.sources?.[source] || d.sources?.all || { trends: d.trends, costAvailable: true, label: "Cursor" };
+  const view = custom
+    ? customTrendUsage?.sources?.[source] || { label: { all: "全部", cursor: "Cursor", codex: "Codex" }[source], trends: {}, costAvailable: true }
+    : d.sources?.[source] || d.sources?.all || { trends: d.trends, costAvailable: true, label: "Cursor" };
   let metric = settings.trendMetric || "total";
   if (metric === "costCents") metric = "equivalentCostCents";
-  const breakdown = Boolean(settings.trendBreakdown);
-  const speedBreakdown = Boolean(settings.trendSpeedBreakdown);
+  const modelBreakdown = Boolean(settings.trendModelBreakdown);
+  const breakdown = !modelBreakdown && Boolean(settings.trendBreakdown);
+  const speedBreakdown = !modelBreakdown && Boolean(settings.trendSpeedBreakdown);
   if (metric === "equivalentCostCents" && !view.costAvailable) metric = "total";
   if (breakdown && metric === "effective") metric = "total";
   const series = view.trends?.[range] || [];
   const total = series.reduce((sum, item) => sum + (Number(item[metric]) || 0), 0);
   const peak = series.reduce((best, item) => !best || (item[metric] || 0) > (best[metric] || 0) ? item : best, null);
-  const resolution = range === "day" ? "今天 · 每小时聚合" : range === "week" ? "最近 7 天 · 每日聚合" : "最近 30 天 · 每日聚合";
+  const unit = window.TrendRange.units[settings.trendCustomUnit || "day"];
+  const resolution = custom ? customTrendUsage?.range.label || `近 ${settings.trendCustomCount || 1} ${unit?.label || "天"}`
+    : range === "day" ? "今天 · 每小时聚合" : range === "week" ? "最近 7 天 · 每日聚合" : "最近 30 天 · 每日聚合";
+  const draftUnit = window.TrendRange.units[$("trendCustomUnit").value];
+  $("trendCustomHint").textContent = customTrendError || `按${draftUnit?.bucketLabel || "小时"}聚合 · N 为 1–100`;
   $("trendResolution").textContent = `${view.label || "全部"} · ${resolution}`;
   $("trendTotal").textContent = formatMetric(total, metric);
   hideChartTooltip();
-  chartTooltipContext = { series, metric, breakdown, speedBreakdown };
-  $("trendChart").innerHTML = chartSvg(series, metric, range, breakdown, speedBreakdown);
-  $("legendItems").innerHTML = trendLegendHtml(metric, breakdown, speedBreakdown);
+  chartTooltipContext = { series, metric, breakdown, speedBreakdown, modelBreakdown };
+  $("trendChart").innerHTML = chartSvg(series, metric, range, breakdown, speedBreakdown, modelBreakdown);
+  if (custom && (customTrendLoading || customTrendError)) {
+    $("trendTotal").textContent = "—";
+    $("trendChart").innerHTML = `<div class="empty-state">${customTrendLoading ? "正在读取历史趋势…" : `读取失败：${escapeHtml(customTrendError)}，请点击应用重试`}</div>`;
+  }
+  chart.scrollLeft = trendChartScroll.left;
+  $("legendItems").innerHTML = trendLegendHtml(metric, breakdown, speedBreakdown, modelBreakdown, series);
   $("chartPeak").textContent = peak ? `峰值 ${peak.shortLabel} · ${formatMetric(peak[metric], metric)}` : "峰值 —";
   document.querySelectorAll("[data-range]").forEach((button) => button.classList.toggle("active", button.dataset.range === range));
   document.querySelectorAll("[data-metric]").forEach((button) => {
@@ -1324,6 +1401,8 @@ function renderTrends(d) {
   $("breakdownBtn").setAttribute("aria-pressed", String(breakdown));
   $("speedBreakdownBtn").classList.toggle("active", speedBreakdown);
   $("speedBreakdownBtn").setAttribute("aria-pressed", String(speedBreakdown));
+  $("modelBreakdownBtn").classList.toggle("active", modelBreakdown);
+  $("modelBreakdownBtn").setAttribute("aria-pressed", String(modelBreakdown));
   const coverage = Number(view.costCoveragePercent);
   const priceDate = d.pricing?.fetchedAt ? formatDate(d.pricing.fetchedAt) : "内置";
   $("trendFootnote").textContent = `美元等效价格按事件入库时锁定 · 覆盖 ${Number.isFinite(coverage) ? formatPct(coverage) : "—"} · 价表 ${priceDate} · Codex 走 OpenAI 官方价并按 Fast 2.5×；Cursor 走 Cursor 官方价。`;
@@ -1373,7 +1452,13 @@ function moveChartTooltip(clientX, clientY, immediate = false) {
   if (chartTooltipFrame === null) chartTooltipFrame = requestAnimationFrame(animateChartTooltip);
 }
 
-function trendLegendHtml(metric, breakdown, speedBreakdown) {
+function trendModelSwatch(color) {
+  return `<svg class="trend-model-swatch" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="5" fill="${color}"/></svg>`;
+}
+
+function trendLegendHtml(metric, breakdown, speedBreakdown, modelBreakdown = false, series = []) {
+  if (modelBreakdown) return chartSegmentDefinitions(metric, { modelBreakdown, series })
+    .map((def) => `<span class="legend-key">${trendModelSwatch(def.color)}${escapeHtml(def.label)}</span>`).join("");
   const composition = breakdown
     ? `<span class="legend-key input"><i></i>输入</span><span class="legend-key cache-write"><i></i>缓存写入</span><span class="legend-key cache-read"><i></i>缓存读取</span><span class="legend-key output"><i></i>输出</span>`
     : "";
@@ -1392,20 +1477,21 @@ function fillChartTooltip(index) {
   const metric = chartTooltipContext.metric;
   const breakdown = Boolean(chartTooltipContext.breakdown);
   const speedBreakdown = Boolean(chartTooltipContext.speedBreakdown);
-  const definitions = breakdown || speedBreakdown
-    ? chartSegmentDefinitions(metric, { breakdown, speedBreakdown })
+  const modelBreakdown = Boolean(chartTooltipContext.modelBreakdown);
+  const definitions = breakdown || speedBreakdown || modelBreakdown
+    ? chartSegmentDefinitions(metric, { breakdown, speedBreakdown, modelBreakdown, series: chartTooltipContext.series })
     : compositionSegmentDefinitions(metric);
   const parts = definitions.map((definition) => ({
     ...definition,
     value: Math.max(0, definition.read ? definition.read(item) : Number(item[definition.key]) || 0),
-  })).filter((part) => !speedBreakdown || part.value > 0);
+  })).filter((part) => !(speedBreakdown || modelBreakdown) || part.value > 0);
   const partTotal = parts.reduce((sum, part) => sum + part.value, 0);
-  $("chartTooltip").classList.toggle("wide", Boolean(speedBreakdown && breakdown));
+  $("chartTooltip").classList.toggle("wide", modelBreakdown || Boolean(speedBreakdown && breakdown));
   $("chartTooltipLabel").textContent = item.label || item.shortLabel || "该时段";
   $("chartTooltipTotal").textContent = formatMetric(item[metric], metric);
   $("chartTooltipRows").innerHTML = parts.map((part) => {
     const percent = partTotal > 0 ? part.value / partTotal * 100 : 0;
-    return `<div class="chart-tooltip-row ${part.className}"><span><i></i>${escapeHtml(part.label)}</span><b>${escapeHtml(formatMetric(part.value, metric))}</b><em>${percent.toFixed(percent >= 10 ? 0 : 1)}%</em></div>`;
+    return `<div class="chart-tooltip-row ${part.className}"><span>${part.color ? trendModelSwatch(part.color) : "<i></i>"}${escapeHtml(part.label)}</span><b>${escapeHtml(formatMetric(part.value, metric))}</b><em>${percent.toFixed(percent >= 10 ? 0 : 1)}%</em></div>`;
   }).join("");
   $("chartTooltipMeta").innerHTML = `<span>${formatInteger(item.count)} 次调用</span><span>${metric === "equivalentCostCents" ? "事件价格已锁定" : metric === "effective" ? "不含缓存命中" : "包含缓存命中"}</span>`;
   return true;
@@ -1541,7 +1627,7 @@ function renderLevels() {
   const reference = timeline?.cycle?.reference;
   $("uniformLegend").hidden = !reference;
   $("uniformNote").textContent = reference
-    ? `虚线为匀速使用参考：${formatDateTime(reference.startAt)} 的 100% → ${formatDateTime(reference.endAt)} 的 0%。仅显示已有采样的时间范围。${reference.estimated ? " 周期起点按常规周期长度推算。" : ""}`
+    ? `${timeline.cycle.interrupted ? `本周期于 ${formatDateTime(timeline.cycle.endAt)} 提前重置，原定结束时间为 ${formatDateTime(timeline.cycle.scheduledEndAt)}。` : ""}虚线为匀速使用参考：${formatDateTime(reference.startAt)} 的 100% → ${formatDateTime(reference.endAt)} 的 0%。仅显示已有采样的时间范围。${reference.estimated ? " 周期起点按常规周期长度推算。" : ""}`
     : "周期结束时间未知，暂不显示匀速参考线。";
 }
 
@@ -1566,7 +1652,7 @@ function renderEvents() {
   $("eventList").innerHTML = page.events.length
     ? page.events.map((event) => {
       const speed = speedLabel(event);
-      const model = `${event.model}${event.effort ? ` · ${event.effort}` : ""}`;
+      const model = window.ModelDisplay.format(event);
       return `<article class="event-row">
         <div class="event-row-top"><b>${escapeHtml(model)}</b><em>${escapeHtml(formatUsd(eventCostCents(event)))}</em></div>
         <div class="event-meta">
@@ -1636,7 +1722,7 @@ function renderPricing() {
         ${catalog.rows.map((row) => `
           <tr>
             <td>${row.source === "codex" ? "Codex" : "Cursor"}</td>
-            <td>${escapeHtml(row.model)}</td>
+            <td>${escapeHtml(window.ModelDisplay.format(row.model, { precision: "coarse" }))}</td>
             <td><span class="speed-pill ${row.speed === "fast" ? "fast" : "normal"}">${escapeHtml(row.speedLabel)}</span></td>
             <td>${escapeHtml(row.contextLabel)}</td>
             <td>${escapeHtml(formatRate(row.input))}</td>
@@ -1786,21 +1872,60 @@ function render() {
 }
 
 function scheduleRender() {
+  if (fullscreenRequestInFlight) return;
   if (renderFrame !== null) return;
   renderFrame = requestAnimationFrame(() => {
     renderFrame = null;
-    render();
+    if (!fullscreenRequestInFlight) render();
   });
 }
 
 async function setFullscreen(force) {
+  if (fullscreenRequestInFlight || windowState.fullscreenTransition) return;
+  if (typeof force === "boolean" && force === Boolean(windowState.fullscreen)) return;
+  fullscreenRequestInFlight = true;
+  let plan = null;
+  const wasInert = document.body.inert;
+  document.body.inert = true;
   try {
-    const next = await window.widget.toggleFullscreen(force);
-    windowState = { ...windowState, ...next };
-    render();
+    endTitlebarDrag();
+    if (!reducedMotion() && document.startViewTransition && window.widget.prepareFullscreenMorph) {
+      plan = await window.widget.prepareFullscreenMorph(force);
+      if (plan) {
+        fullscreenMorph.stage(plan, !plan.fullscreen);
+        await window.widget.stageFullscreenMorph(plan.id);
+        // The native viewport stays fixed for the entire shared-element transition.
+        await new Promise(requestAnimationFrame);
+        await new Promise(requestAnimationFrame);
+        await fullscreenMorph.animate(plan, () => {
+          windowState = { ...windowState, fullscreen: plan.fullscreen };
+          render();
+        });
+        const next = await window.widget.finishFullscreenMorph(plan.id);
+        windowState = { ...windowState, ...next };
+      }
+    } else {
+      const next = await window.widget.toggleFullscreen(force);
+      windowState = { ...windowState, ...next };
+    }
   } catch (error) {
     console.error("切换全屏失败", error);
+    if (plan) {
+      const next = await window.widget.finishFullscreenMorph(plan.id).catch(() => null);
+      if (next) windowState = { ...windowState, ...next };
+    }
+  } finally {
+    fullscreenMorph.cleanup();
+    document.body.inert = wasInert;
+    fullscreenRequestInFlight = false;
+    render();
   }
+}
+
+function applyWindowState(next) {
+  if (fullscreenRequestInFlight) return;
+  windowState = { ...windowState, ...next };
+  scheduleRender();
 }
 
 function setSmartPanel(open) {
@@ -1991,7 +2116,9 @@ $("pricingSnapshotSelect").addEventListener("change", (event) => {
 document.querySelectorAll("[data-source]").forEach((button) => {
   button.addEventListener("click", () => {
     settings.dataSource = button.dataset.source;
-    const view = snapshot.data?.sources?.[settings.dataSource];
+    const view = settings.trendRange === "custom"
+      ? customTrendUsage?.sources?.[settings.dataSource]
+      : snapshot.data?.sources?.[settings.dataSource];
     const partial = { dataSource: settings.dataSource };
     if (settings.trendMetric === "equivalentCostCents" && view && !view.costAvailable) {
       settings.trendMetric = "total";
@@ -2023,9 +2150,31 @@ document.querySelectorAll("[data-metric]").forEach((button) => {
   });
 });
 
+$("trendCustomUnit").addEventListener("change", () => {
+  const unit = window.TrendRange.units[$("trendCustomUnit").value];
+  $("trendCustomHint").textContent = `按${unit.bucketLabel}聚合 · N 为 1–100`;
+});
+$("trendCustomForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  let range;
+  try {
+    range = window.TrendRange.normalize({ count: $("trendCustomCount").value, unit: $("trendCustomUnit").value });
+  } catch (error) {
+    $("trendCustomHint").textContent = error.message;
+    return;
+  }
+  settings.trendRange = "custom";
+  settings.trendCustomCount = range.count;
+  settings.trendCustomUnit = range.unit;
+  window.widget.saveSettings({ trendRange: "custom", trendCustomCount: range.count, trendCustomUnit: range.unit });
+  loadCustomTrends();
+  if (snapshot.data) renderTrends(snapshot.data);
+});
+
 $("breakdownBtn").addEventListener("click", () => {
   settings.trendBreakdown = !settings.trendBreakdown;
-  const partial = { trendBreakdown: settings.trendBreakdown };
+  settings.trendModelBreakdown = false;
+  const partial = { trendBreakdown: settings.trendBreakdown, trendModelBreakdown: false };
   if (settings.trendBreakdown && settings.trendMetric === "effective") {
     settings.trendMetric = "total";
     partial.trendMetric = "total";
@@ -2035,13 +2184,52 @@ $("breakdownBtn").addEventListener("click", () => {
 });
 $("speedBreakdownBtn").addEventListener("click", () => {
   settings.trendSpeedBreakdown = !settings.trendSpeedBreakdown;
-  window.widget.saveSettings({ trendSpeedBreakdown: settings.trendSpeedBreakdown });
+  settings.trendModelBreakdown = false;
+  window.widget.saveSettings({ trendSpeedBreakdown: settings.trendSpeedBreakdown, trendModelBreakdown: false });
+  if (snapshot.data) renderTrends(snapshot.data);
+});
+$("modelBreakdownBtn").addEventListener("click", () => {
+  settings.trendModelBreakdown = !settings.trendModelBreakdown;
+  if (settings.trendModelBreakdown) {
+    settings.trendBreakdown = false;
+    settings.trendSpeedBreakdown = false;
+  }
+  window.widget.saveSettings({ trendModelBreakdown: settings.trendModelBreakdown,
+    trendBreakdown: settings.trendBreakdown, trendSpeedBreakdown: settings.trendSpeedBreakdown });
   if (snapshot.data) renderTrends(snapshot.data);
 });
 
 $("refreshBtn").addEventListener("click", () => window.widget.refresh());
 $("priceBtn").addEventListener("click", () => window.widget.refreshPricing());
 $("fullscreenBtn").addEventListener("click", () => setFullscreen());
+let titlebarPointer = null;
+const titlebarControls = ".window-actions, button, input, select, a";
+$("titlebar").addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || windowState.fullscreen || windowState.fullscreenTransition || fullscreenRequestInFlight || event.target.closest(titlebarControls)) return;
+  titlebarPointer = event.pointerId;
+  $("titlebar").setPointerCapture(event.pointerId);
+  window.widget.titlebarDrag?.("start");
+});
+$("titlebar").addEventListener("pointermove", (event) => {
+  if (event.pointerId === titlebarPointer && !windowState.fullscreen) window.widget.titlebarDrag?.("move");
+});
+function endTitlebarDrag(event) {
+  if (event && event.pointerId !== titlebarPointer) return;
+  const pointer = titlebarPointer;
+  titlebarPointer = null;
+  if (pointer === null) return;
+  if ($("titlebar").hasPointerCapture(pointer)) $("titlebar").releasePointerCapture(pointer);
+  window.widget.titlebarDrag?.("end");
+}
+for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) {
+  $("titlebar").addEventListener(name, endTitlebarDrag);
+}
+window.addEventListener("blur", () => endTitlebarDrag());
+$("titlebar").addEventListener("dblclick", (event) => {
+  if (event.button !== 0 || event.target.closest(titlebarControls)) return;
+  event.preventDefault();
+  setFullscreen();
+});
 $("exitFullscreenBtn").addEventListener("click", () => setFullscreen(false));
 $("orbBtn").addEventListener("click", () => window.widget.saveSettings({ orbMode: true, compact: false }));
 $("closeBtn").addEventListener("click", () => window.widget.hide());
@@ -2137,6 +2325,9 @@ window.widget.onSnapshot((next) => {
     if (smartPanelOpen) renderSourceHealth();
     return;
   }
+  customTrendKey = null;
+  customTrendRequest += 1;
+  customTrendLoading = false;
   if (next.data?.modelUsage?.key === settings.modelRange) modelUsage = next.data.modelUsage;
   if (next.data?.quotaTimeline && !quotaTimeline) quotaTimeline = next.data.quotaTimeline;
   if (settings.activeTab === "levels") loadQuotaTimeline();
@@ -2150,10 +2341,10 @@ window.widget.onSettings((next) => {
   scheduleRender();
 });
 window.widget.onWindowState((next) => {
-  windowState = { ...windowState, ...next };
-  scheduleRender();
+  applyWindowState(next);
 });
 window.widget.onWindowMotion?.(handleWindowMotion);
+window.widget.onFullscreenRequest?.(setFullscreen);
 
 window.addEventListener("keydown", (event) => {
   if (event.key === "Tab" && smartPanelOpen) {

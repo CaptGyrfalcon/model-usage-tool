@@ -39,6 +39,11 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
       outputCostCents,
       equivalentCostCents: inputCostCents + cacheWriteCostCents + cacheReadCostCents + outputCostCents,
       count: index % 4 + 1,
+      models: {
+        "gpt-5.6-sol": slice(0.5),
+        "grok-4.6": slice(0.3),
+        "composer-2.5": slice(0.2),
+      },
       speed: {
         normal: slice(normalRatio),
         fast: slice(fastRatio),
@@ -212,6 +217,15 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     getSettings: async () => previewSettings,
     getWindowState: async () => previewWindowState,
     getModelUsage: async (range) => previewModelUsage(range),
+    getTrendUsage: async (payload) => {
+      const range = window.TrendRange.spec(payload);
+      const series = makeSeries(range.boundaries.length - 1, false).map((row, index) => ({
+        ...row, start: range.boundaries[index], end: range.boundaries[index + 1],
+        ...window.TrendRange.labels(range.boundaries[index], range.boundaries[index + 1], range.bucket),
+      }));
+      const source = (label) => ({ label, costAvailable: true, costCoveragePercent: 100, trends: { custom: series } });
+      return { range, sources: { all: source("全部"), cursor: source("Cursor"), codex: source("Codex") } };
+    },
     getQuotaTimeline: async (payload = {}) => previewTimeline(payload.pool || previewSettings.quotaLevelPool, payload.cycleKey || "reset:current"),
     queryUsageEvents: async (payload = {}) => {
       const source = payload.source && payload.source !== "all" ? payload.source : null;

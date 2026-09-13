@@ -54,7 +54,7 @@ test("donut folds unknown Codex speed into non-Fast, preserving list data and ev
   const before = JSON.stringify(data);
   const slices = modelSlices(data.sources, { source: "codex", precision: "speed" });
   assert.equal(slices.rows.length, 2);
-  const normal = slices.rows.find((row) => row.label.endsWith("非 Fast"));
+  const normal = slices.rows.find((row) => row.label === "GPT 5.6 Sol");
   assert.equal(normal.total, 80);
   assert.equal(normal.count, 2);
   assert.equal(normal.costCents, 5);

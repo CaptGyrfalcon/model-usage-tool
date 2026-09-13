@@ -10,7 +10,7 @@ function runtime() {
   const frames = new Map();
   const queries = [];
   let frameId = 0;
-  const element = () => ({ addEventListener() {}, querySelectorAll: () => [], querySelector: () => null,
+  const element = () => ({ listeners: {}, addEventListener(name, callback) { this.listeners[name] = callback; }, querySelectorAll: () => [], querySelector: () => null,
     classList: { toggle() {}, contains: () => true, add() {}, remove() {} },
     style: { setProperty() {} }, setAttribute() {}, getClientRects: () => [],
   });
@@ -28,11 +28,163 @@ function runtime() {
     cancelAnimationFrame(id) { frames.delete(id); },
     ResizeObserver: class { observe() {} },
     window: { widget, addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }),
-      UsageCharts: require("../src/renderer/usage-charts.js"), WidgetMotion: require("../src/renderer/motion.js"), LiquidPool: require("../src/renderer/liquid-pool.js") },
+      TrendRange: require("../src/renderer/trend-range.js"),
+      ModelDisplay: require("../src/renderer/model-display.js"),
+      UsageCharts: require("../src/renderer/usage-charts.js"), WidgetMotion: require("../src/renderer/motion.js"), FullscreenMorph: require("../src/renderer/fullscreen-morph.js"), LiquidPool: require("../src/renderer/liquid-pool.js") },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/renderer/app.js"), "utf8"), context);
   return { context, callbacks, frames, document, queries, run: (code) => vm.runInContext(code, context) };
 }
+
+test("model trend mode renders matching bars, legend and tooltip and persists exclusive selection", () => {
+  const app = runtime();
+  const saved = [];
+  app.context.window.widget.saveSettings = (partial) => saved.push(partial);
+  app.run('settings.trendBreakdown = true; settings.trendSpeedBreakdown = true;');
+  app.document.getElementById("modelBreakdownBtn").listeners.click();
+  assert.equal(saved.at(-1).trendModelBreakdown, true);
+  assert.equal(saved.at(-1).trendBreakdown, false);
+  assert.equal(saved.at(-1).trendSpeedBreakdown, false);
+  app.run(`renderTrends({ sources: { all: { costAvailable: true, trends: { day: [
+    { total: 40, count: 2, shortLabel: '12', models: { 'gpt-5.6-sol': {total: 30}, 'grok-4.6': {total: 10} } }
+  ] } } } }); fillChartTooltip(0);`);
+  assert.match(app.document.getElementById("trendChart").innerHTML, /chart-segment model/);
+  assert.match(app.document.getElementById("legendItems").innerHTML, /GPT 5.6 Sol/);
+  const tooltip = app.document.getElementById("chartTooltipRows").innerHTML;
+  assert.match(tooltip, /75%/);
+  assert.match(tooltip, /25%/);
+  assert.doesNotMatch(tooltip, /Fast/);
+  app.document.getElementById("speedBreakdownBtn").listeners.click();
+  assert.equal(saved.at(-1).trendModelBreakdown, false);
+  assert.equal(saved.at(-1).trendSpeedBreakdown, true);
+});
+
+test("custom trend requests ignore stale responses and allow retry after errors", async () => {
+  const app = runtime();
+  const pending = [];
+  app.context.window.widget.getTrendUsage = (payload) => new Promise((resolve, reject) => pending.push({payload, resolve, reject}));
+  app.run('settings.trendCustomCount=1; settings.trendCustomUnit="hour";');
+  const first = app.run('loadCustomTrends()');
+  app.run('settings.trendCustomCount=2;');
+  const second = app.run('loadCustomTrends()');
+  pending[1].resolve({ marker: "new" });
+  await second;
+  pending[0].resolve({ marker: "old" });
+  await first;
+  assert.equal(app.run('customTrendUsage.marker'), "new");
+  const failed = app.run('loadCustomTrends()');
+  pending[2].reject(new Error("读取失败"));
+  await failed;
+  assert.equal(app.run('customTrendLoading'), false);
+  assert.equal(app.run('customTrendError'), "读取失败");
+  const retry = app.run('loadCustomTrends()');
+  pending[3].resolve({ marker: "retried" });
+  await retry;
+  assert.equal(app.run('customTrendUsage.marker'), "retried");
+  assert.equal(app.run('customTrendError'), "");
+});
+
+test("custom trend refresh preserves pixel scroll through loading, failure and retry", async () => {
+  const app = runtime();
+  const chart = app.document.getElementById("trendChart");
+  let html = "", left = 0, maxLeft = 0;
+  Object.defineProperties(chart, {
+    innerHTML: { get: () => html, set(value) {
+      html = value;
+      maxLeft = Math.max(0, Number(value.match(/<svg[^>]* width="(\d+)"/)?.[1] || 400) - 400);
+      left = Math.min(left, maxLeft);
+    } },
+    scrollLeft: { get: () => left, set(value) { left = Math.max(0, Math.min(value, maxLeft)); } },
+  });
+  chart.querySelector = () => html.includes('class="bar-chart') ? { classList: { remove() {} } } : null;
+  const data = (length) => ({ range: { label: "近 10 天" }, sources: { all: {
+    trends: { custom: Array.from({ length }, (_, i) => ({ total: i, shortLabel: String(i) })) },
+  } } });
+  const pending = [];
+  app.context.window.widget.getTrendUsage = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  app.run('settings.trendRange="custom"; settings.trendCustomCount=10; snapshot.data={};');
+  const initial = app.run('loadCustomTrends()');
+  pending.shift().resolve(data(240));
+  await initial;
+  chart.scrollLeft = 713.5;
+  for (const outcome of [data(300), new Error("offline"), data(240)]) {
+    // Snapshot refresh invalidates the query before the scheduled render.
+    app.run('customTrendKey=null; renderTrends(snapshot.data); renderTrends(snapshot.data);');
+    assert.equal(chart.scrollLeft, 0); // Placeholder cannot physically scroll.
+    const request = pending.shift();
+    if (outcome instanceof Error) request.reject(outcome);
+    else request.resolve(outcome);
+    await new Promise(setImmediate);
+    assert.equal(chart.scrollLeft, outcome instanceof Error ? 0 : 713.5);
+  }
+  chart.scrollLeft = 500;
+  app.run('renderTrends(snapshot.data);');
+  assert.equal(chart.scrollLeft, 500);
+  app.run('settings.trendCustomCount=20; renderTrends(snapshot.data);');
+  pending.shift().resolve(data(480));
+  await new Promise(setImmediate);
+  assert.equal(chart.scrollLeft, 0);
+});
+
+test("custom trend form saves its range and rejects invalid N without querying", async () => {
+  const app = runtime();
+  const saved = [];
+  const queries = [];
+  app.context.window.widget.saveSettings = (value) => saved.push(value);
+  app.context.window.widget.getTrendUsage = async (payload) => { queries.push(payload); return {}; };
+  const submit = app.document.getElementById("trendCustomForm").listeners.submit;
+  app.document.getElementById("trendCustomCount").value = "0";
+  app.document.getElementById("trendCustomUnit").value = "year";
+  submit({preventDefault() {}});
+  assert.equal(queries.length, 0);
+  assert.match(app.document.getElementById("trendCustomHint").textContent, /1–100/);
+  app.document.getElementById("trendCustomCount").value = "3";
+  submit({preventDefault() {}});
+  assert.equal(saved[0].trendRange, "custom");
+  assert.equal(saved[0].trendCustomCount, 3);
+  assert.equal(queries[0].unit, "year");
+  await Promise.resolve();
+});
+
+test("titlebar double-click toggles fullscreen both ways but ignores window controls", () => {
+  const app = runtime();
+  app.run('setFullscreen = () => { windowState.fullscreen = !windowState.fullscreen; };');
+  const doubleClick = app.document.getElementById("titlebar").listeners.dblclick;
+  const event = { button: 0, target: { closest: () => null }, preventDefault() {} };
+  doubleClick(event);
+  assert.equal(app.run("windowState.fullscreen"), true);
+  doubleClick(event);
+  assert.equal(app.run("windowState.fullscreen"), false);
+  doubleClick({ ...event, target: { closest: () => ({}) } });
+  assert.equal(app.run("windowState.fullscreen"), false);
+  doubleClick({ ...event, button: 2 });
+  assert.equal(app.run("windowState.fullscreen"), false);
+});
+
+test("titlebar dragging uses pointer capture and is disabled in fullscreen", () => {
+  const app = runtime();
+  const phases = [];
+  app.context.window.widget.titlebarDrag = (phase) => phases.push(phase);
+  const titlebar = app.document.getElementById("titlebar");
+  let captured = null;
+  titlebar.setPointerCapture = (id) => { captured = id; };
+  titlebar.hasPointerCapture = (id) => captured === id;
+  titlebar.releasePointerCapture = () => { captured = null; };
+  const event = { button: 0, pointerId: 1, target: { closest: () => null } };
+  titlebar.listeners.pointerdown(event);
+  titlebar.listeners.pointermove(event);
+  titlebar.listeners.pointerup(event);
+  titlebar.listeners.pointermove(event);
+  assert.deepEqual(phases, ["start", "move", "end"]);
+  assert.equal(captured, null);
+  app.run("windowState.fullscreen = true;");
+  titlebar.listeners.pointerdown(event);
+  titlebar.listeners.pointermove(event);
+  assert.deepEqual(phases, ["start", "move", "end"]);
+  app.run("windowState.fullscreen = false;");
+  titlebar.listeners.pointerdown({ ...event, target: { closest: () => ({}) } });
+  assert.deepEqual(phases, ["start", "move", "end"]);
+});
 
 test("renderer cancels its scheduled liquid frame when the window is hidden", () => {
   const app = runtime();

@@ -1,4 +1,5 @@
 (function (root) {
+  const ModelDisplay = typeof module === "object" && module.exports ? require("./model-display.js") : root.ModelDisplay;
   const numeric = (value) => value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value);
   function uniformRemaining(cycle, at) {
     const start = numeric(cycle?.reference?.startAt);
@@ -26,8 +27,7 @@
         const effort = row.effort || "默认";
         const key = JSON.stringify([name, precision === "coarse" ? null : speed, precision === "exact" ? effort : null]);
         if (!groups.has(key)) {
-          const speedLabel = speed === "fast" ? "Fast" : speed === "unknown" ? "速度未知" : "非 Fast";
-          groups.set(key, { key, name, label: [name, ...(precision === "exact" ? [effort] : []), ...(precision !== "coarse" ? [speedLabel] : [])].join(" · "),
+          groups.set(key, { key, name, label: ModelDisplay.format({ name, effort: row.effort, fast: speed === "fast", fastKnown: speed !== "unknown" }, { precision }),
             unknownCount: 0, ...Object.fromEntries(fields.map((field) => [field, 0])) });
         }
         const group = groups.get(key);

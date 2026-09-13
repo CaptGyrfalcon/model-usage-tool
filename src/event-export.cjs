@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
+const ModelDisplay = require("./renderer/model-display.js");
 
 // Spreadsheet programs interpret formula prefixes even inside quoted CSV fields.
 function csvCell(value) {
@@ -10,8 +11,8 @@ function csvCell(value) {
 }
 
 function csvRow(event) {
-  return [new Date(event.timestamp).toISOString(), event.source, event.model,
-    event.effort || "", event.fastKnown === false ? "unknown" : event.fast ? "fast" : "standard",
+  return [new Date(event.timestamp).toISOString(), event.source, ModelDisplay.format(event, { precision: "coarse" }),
+    ModelDisplay.effort(event.effort || ModelDisplay.descriptor(event.model).effort), event.fastKnown === false ? "unknown" : event.fast ? "fast" : "standard",
     event.input, event.cacheWrite, event.cacheRead, event.output,
     event.equivalentCostCents == null ? "" : (Number(event.equivalentCostCents) / 100).toFixed(6),
   ].map(csvCell).join(",");

@@ -11,6 +11,25 @@ function event(timestamp, model, input = 0, output = 0, cacheRead = 0, chargedCe
   };
 }
 
+test("trend model groups merge effort and speed across sources without losing usage", () => {
+  const now = new Date(2026, 8, 12, 12, 30).getTime();
+  const events = [
+    { model: "cursor-gpt-5.6-sol-high-fast", source: "cursor", fast: true, fastKnown: true },
+    { model: "gpt-5.6-sol", source: "codex", effort: "low", fast: false, fastKnown: true },
+    { model: "gpt-5.6-sol-xhigh", source: "codex", fastKnown: false },
+    { model: "grok-4.6", source: "cursor" },
+  ].map((row) => ({ ...row, timestamp: now, input: 10, output: 2, cacheRead: 8,
+    equivalentCostCents: 3, inputCostCents: 1, outputCostCents: 2 }));
+  for (const range of ["day", "week", "month"]) {
+    const bucket = buildTrendSeries(events, range, now).find((row) => row.count);
+    assert.deepEqual(Object.keys(bucket.models).sort(), ["gpt-5.6-sol", "grok-4.6"]);
+    assert.equal(bucket.models["gpt-5.6-sol"].total, 60);
+    for (const metric of ["total", "effective", "equivalentCostCents", "inputCostCents", "outputCostCents"]) {
+      assert.equal(Object.values(bucket.models).reduce((sum, row) => sum + row[metric], 0), bucket[metric]);
+    }
+  }
+});
+
 test("normalizes Fast and thinking effort independently", () => {
   assert.deepEqual(normalizeModelDescriptor("cursor-grok-4.6-xhigh-fast"), {
     original: "cursor-grok-4.6-xhigh-fast",

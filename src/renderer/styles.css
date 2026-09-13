@@ -18,6 +18,31 @@
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
+/* Keep the viewport stable while the visible window and its shared elements morph. */
+.morph-stage { view-transition-name: none; }
+.morph-stage body { position: absolute; inset: 0 auto auto 0; }
+.morph-stage .shell, .morph-stage .orb-view { width: 100%; height: 100%; }
+.morph-stage::view-transition {
+  pointer-events: none;
+  animation: morph-window-clip 560ms cubic-bezier(0.22, 0.8, 0.2, 1) both;
+}
+.morph-stage::view-transition-group(*) {
+  animation-duration: 560ms;
+  animation-timing-function: cubic-bezier(0.22, 0.8, 0.2, 1);
+}
+.morph-stage::view-transition-old(*), .morph-stage::view-transition-new(*) {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  animation: none;
+}
+.morph-stage::view-transition-old(*) { opacity: 0; }
+.morph-stage::view-transition-new(*) { opacity: 1; }
+@keyframes morph-window-clip {
+  from { clip-path: inset(var(--morph-from)); }
+  to { clip-path: inset(var(--morph-to)); }
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -97,7 +122,8 @@ button {
   align-items: center;
   min-height: 70px;
   padding: 14px 12px 10px 16px;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
+  touch-action: none;
 }
 
 .brand-mark {
@@ -414,6 +440,7 @@ h1 {
 .quota-card,
 .detail-card,
 .chart-card {
+  min-width: 0;
   background: linear-gradient(145deg, rgba(33, 40, 55, 0.84), rgba(19, 24, 35, 0.76));
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -1004,7 +1031,31 @@ progress::-webkit-progress-bar {
 
 .chart-wrap {
   min-height: 236px;
+  overflow-x: auto;
 }
+
+.trend-custom-range {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  grid-column: 1 / -1;
+}
+.trend-range-switch { grid-template-columns: repeat(4, 1fr); }
+.trend-custom-range[hidden] { display: none; }
+.trend-custom-range input { width: 72px; }
+.trend-custom-range input,
+.trend-custom-range select,
+.trend-custom-range button {
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.trend-custom-range small { color: var(--muted); }
+.bar-chart.custom-range { width: auto; min-width: 100%; }
 
 .bar-chart {
   display: block;
@@ -1056,6 +1107,12 @@ progress::-webkit-progress-bar {
 .chart-segment {
   opacity: 0.9;
   transition: opacity 120ms ease;
+}
+
+.trend-model-swatch {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
 }
 
 .chart-segment.input,
@@ -1618,6 +1675,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .fullscreen .ambient-two { top: 280px; right: -220px; }
 
 .fullscreen .titlebar {
+  -webkit-app-region: no-drag;
   min-height: 88px;
   padding: 18px 34px 12px;
 }
@@ -1956,9 +2014,19 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .fullscreen #trendsView.active {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-auto-rows: auto;
   gap: 12px 16px;
   align-content: start;
+}
+
+.fullscreen #trendsView .metric-switch {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.fullscreen #trendsView .trend-custom-range {
+  grid-row: 3;
+  margin: 0;
 }
 
 .fullscreen #trendsView .section-heading,
@@ -2462,6 +2530,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 
 .orb-ring {
   --orb-used: 0;
+  --orb-unknown-end: 0%;
   --orb-normal-end: 0%;
   --orb-fast-end: 0%;
   --orb-used-end: 0%;
@@ -2491,9 +2560,9 @@ button:active:not(:disabled) { transform: scale(0.97); }
 
 .orb-ring.speed-mode {
   background: conic-gradient(
-    #58d49a 0 var(--orb-normal-end),
+    #7ead96 0 var(--orb-unknown-end),
+    #58d49a var(--orb-unknown-end) var(--orb-normal-end),
     #f39a46 var(--orb-normal-end) var(--orb-fast-end),
-    #697181 var(--orb-fast-end) var(--orb-used-end),
     rgba(255, 255, 255, 0.085) var(--orb-used-end) 100%
   );
   box-shadow: 0 0 30px rgba(88, 212, 154, 0.08), inset 0 0 0 1px rgba(255, 255, 255, 0.08);

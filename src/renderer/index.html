@@ -13,7 +13,7 @@
       <div class="ambient ambient-one"></div>
       <div class="ambient ambient-two"></div>
 
-      <header class="titlebar">
+      <header class="titlebar" id="titlebar" title="双击切换全屏">
         <div class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></div>
         <div class="brand-copy">
           <div class="title-row">
@@ -129,11 +129,25 @@
             <button type="button" data-source="cursor">Cursor</button>
             <button type="button" data-source="codex">Codex</button>
           </div>
-          <div class="segmented" aria-label="趋势范围">
+          <div class="segmented trend-range-switch" aria-label="趋势范围">
             <button type="button" data-range="day" class="active">日</button>
             <button type="button" data-range="week">周</button>
             <button type="button" data-range="month">月</button>
+            <button type="button" data-range="custom">近 N…</button>
           </div>
+          <form id="trendCustomForm" class="trend-custom-range" hidden>
+            <label for="trendCustomCount">近</label>
+            <input id="trendCustomCount" type="number" min="1" max="100" step="1" value="1" required aria-label="最近数量，1 到 100" />
+            <select id="trendCustomUnit" aria-label="时间单位">
+              <option value="hour">小时</option>
+              <option value="day" selected>天</option>
+              <option value="week">星期</option>
+              <option value="month">月</option>
+              <option value="year">年</option>
+            </select>
+            <button type="submit">应用</button>
+            <small id="trendCustomHint" role="status">按小时聚合 · N 为 1–100</small>
+          </form>
           <div class="segmented metric-switch" aria-label="趋势指标">
             <button type="button" data-metric="total" class="active">总 Token</button>
             <button type="button" data-metric="effective">有效 Token</button>
@@ -147,6 +161,10 @@
             <button type="button" id="speedBreakdownBtn" class="breakdown-btn speed-breakdown-btn" aria-pressed="false">
               <span class="toggle-track"><i></i></span>
               柱内显示 Fast 比例
+            </button>
+            <button type="button" id="modelBreakdownBtn" class="breakdown-btn" aria-pressed="false">
+              <span class="toggle-track"><i></i></span>
+              柱内按模型分类
             </button>
           </div>
           <article class="chart-card">
@@ -348,9 +366,12 @@
       <div id="chartTooltipMeta" class="chart-tooltip-meta"></div>
     </div>
     <script src="codex-monthly.js"></script>
+    <script src="model-display.js"></script>
+    <script src="trend-range.js"></script>
     <script src="preview.js?v=10"></script>
     <script src="liquid-pool.js?v=6"></script>
     <script src="motion.js"></script>
+    <script src="fullscreen-morph.js"></script>
     <script src="usage-charts.js"></script>
     <script src="app.js?v=25"></script>
   </body>

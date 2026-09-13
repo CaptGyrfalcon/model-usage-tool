@@ -1,5 +1,5 @@
 const { parentPort } = require("node:worker_threads");
-const { fetchSnapshot, getModelUsage, getQuotaTimeline, queryUsageEvents, getPricingCatalog } = require("./lib.cjs");
+const { fetchSnapshot, getModelUsage, getTrendUsage, getQuotaTimeline, queryUsageEvents, getPricingCatalog } = require("./lib.cjs");
 const { getHistory } = require("./history.cjs");
 const { exportUsageEvents } = require("./event-export.cjs");
 
@@ -12,6 +12,8 @@ parentPort.on("message", async ({ id, task, payload } = {}) => {
       data = await fetchSnapshot(payload || {});
     } else if (task === "get-model-usage") {
       data = getModelUsage(payload?.range);
+    } else if (task === "get-trend-usage") {
+      data = getTrendUsage(payload);
     } else if (task === "get-quota-timeline") {
       data = getQuotaTimeline(payload || {});
     } else if (task === "query-usage-events") {

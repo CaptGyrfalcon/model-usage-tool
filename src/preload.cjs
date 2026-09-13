@@ -7,11 +7,21 @@ contextBridge.exposeInMainWorld("widget", {
   getSettings: () => ipcRenderer.invoke("get-settings"),
   getWindowState: () => ipcRenderer.invoke("get-window-state"),
   getModelUsage: (range) => ipcRenderer.invoke("get-model-usage", range),
+  getTrendUsage: (payload) => ipcRenderer.invoke("get-trend-usage", payload),
   getQuotaTimeline: (payload) => ipcRenderer.invoke("get-quota-timeline", payload),
   queryUsageEvents: (payload) => ipcRenderer.invoke("query-usage-events", payload),
   getPricingCatalog: (payload) => ipcRenderer.invoke("get-pricing-catalog", payload),
   exportUsageEvents: (payload) => ipcRenderer.invoke("export-usage-events", payload),
   toggleFullscreen: (force) => ipcRenderer.invoke("toggle-fullscreen", force),
+  prepareFullscreenMorph: (force) => ipcRenderer.invoke("prepare-fullscreen-morph", force),
+  stageFullscreenMorph: (id) => ipcRenderer.invoke("stage-fullscreen-morph", id),
+  finishFullscreenMorph: (id) => ipcRenderer.invoke("finish-fullscreen-morph", id),
+  onFullscreenRequest: (cb) => {
+    const listener = (_event, force) => cb(force);
+    ipcRenderer.on("fullscreen-request", listener);
+    return () => ipcRenderer.removeListener("fullscreen-request", listener);
+  },
+  titlebarDrag: (phase) => ipcRenderer.send("titlebar-drag", phase),
   saveSettings: (partial) => ipcRenderer.invoke("save-settings", partial),
   setPointerPresence: (present) => ipcRenderer.invoke("pointer-presence", present),
   setOpacity: (value) => ipcRenderer.invoke("set-opacity", value),

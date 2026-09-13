@@ -6,6 +6,7 @@ const { loadSettings, saveSettings } = require("./lib.cjs");
 const { codexHomePath } = require("./codex.cjs");
 const { smartDockBounds, windowMetrics, windowModeOptions } = require("./window-layout.cjs");
 const { alertLevel } = require("./quota-insights.cjs");
+const { createWindowDrag } = require("./window-drag.cjs");
 const { createTaskbarMeters } = require("./taskbar-meters.cjs");
 
 const MIN_INTERVAL = 15_000;
@@ -27,6 +28,16 @@ let fullscreenRestoreTimer = null;
 let boundsSaveTimer = null;
 let lastWindowMotionAt = 0;
 let dashboardFullscreen = false;
+let fullscreenTransition = false;
+let fullscreenMorph = null;
+let fullscreenMorphId = 0;
+let fullscreenMorphTimer = null;
+const titlebarDrag = createWindowDrag({
+  getWindow: () => win,
+  getCursor: () => screen.getCursorScreenPoint(),
+  isFullscreen: () => dashboardFullscreen,
+  getSize: (window) => windowMetrics(loadSettings(), screen.getDisplayMatching(window.getBounds())),
+});
 let presentationDisplayId = null;
 let smartDockTimer = null;
 let dockAnimationTimer = null;
@@ -223,7 +234,7 @@ function trayMenu() {
       label: "全屏仪表盘",
       type: "checkbox",
       checked: dashboardFullscreen,
-      click: () => toggleFullscreen(),
+      click: () => { showWindow(); win?.webContents.send("fullscreen-request"); },
     },
     { type: "separator" },
     {
@@ -317,6 +328,10 @@ function createWindow() {
   });
 
   presentationDisplayId = initialDisplay.id;
+  win.on("blur", () => titlebarDrag.end());
+  win.on("will-move", (event) => {
+    if (dashboardFullscreen || win.isFullScreen()) event.preventDefault();
+  });
   win.webContents.setZoomFactor(metrics.zoomFactor);
   win.setAlwaysOnTop(mode.alwaysOnTop, "floating");
   win.setOpacity(Math.min(1, Math.max(0.65, settings.opacity ?? 0.96)));
@@ -324,6 +339,7 @@ function createWindow() {
   win.once("ready-to-show", () => showWindow());
   win.on("move", () => broadcastWindowMotion(false));
   win.on("moved", () => {
+    if (fullscreenMorph || fullscreenTransition) return;
     broadcastWindowMotion(true);
     persistBounds();
     const display = screen.getDisplayMatching(win.getBounds());
@@ -333,10 +349,13 @@ function createWindow() {
     if (fullscreenRestoreTimer) clearTimeout(fullscreenRestoreTimer);
     fullscreenRestoreTimer = null;
     dashboardFullscreen = true;
+    fullscreenTransition = false;
+    win.setMovable(false);
     broadcastWindowState();
   });
   win.on("leave-full-screen", () => {
     dashboardFullscreen = false;
+    win.setMovable(true);
     broadcastWindowState();
     scheduleWidgetRestore();
   });
@@ -348,6 +367,8 @@ function createWindow() {
     updateTray();
   });
   win.on("closed", () => {
+    clearTimeout(fullscreenMorphTimer);
+    fullscreenMorph = null;
     cancelDockAnimation();
     dockTransition = false;
     if (fullscreenRestoreTimer) clearTimeout(fullscreenRestoreTimer);
@@ -366,11 +387,11 @@ function broadcastWindowMotion(settled = false) {
 }
 
 function persistBounds() {
-  if (!win || win.isFullScreen() || smartDockState || dockTransition) return;
+  if (!win || fullscreenMorph || fullscreenTransition || win.isFullScreen() || smartDockState || dockTransition) return;
   if (boundsSaveTimer) clearTimeout(boundsSaveTimer);
   boundsSaveTimer = setTimeout(() => {
     boundsSaveTimer = null;
-    if (!win || win.isDestroyed() || win.isFullScreen()) return;
+    if (!win || win.isDestroyed() || fullscreenMorph || fullscreenTransition || win.isFullScreen()) return;
     const [x, y] = win.getPosition();
     saveSettings({ x, y });
   }, 180);
@@ -495,7 +516,7 @@ function quitApp() {
 }
 
 function applyWindowMode(settings = loadSettings(), targetDisplay = null) {
-  if (!win || dashboardFullscreen || win.isFullScreen()) return;
+  if (!win || fullscreenMorph || fullscreenTransition || dashboardFullscreen || win.isFullScreen()) return;
   restoreSmartDock(false);
   const display = targetDisplay || screen.getDisplayMatching(win.getBounds());
   const metrics = windowMetrics(settings, display);
@@ -505,12 +526,12 @@ function applyWindowMode(settings = loadSettings(), targetDisplay = null) {
   const area = display.workArea;
   const maxX = area.x + Math.max(0, area.width - size.width);
   const maxY = area.y + Math.max(0, area.height - size.height);
+  presentationDisplayId = display.id;
   win.setBounds({
     x: Math.min(maxX, Math.max(area.x, current.x)),
     y: Math.min(maxY, Math.max(area.y, current.y)),
     ...size,
   }, true);
-  presentationDisplayId = display.id;
   win.webContents.setZoomFactor(metrics.zoomFactor);
   win.setSkipTaskbar(mode.skipTaskbar);
   win.setAlwaysOnTop(mode.alwaysOnTop, "floating");
@@ -523,6 +544,7 @@ function windowState() {
   const mode = windowModeOptions(settings, dashboardFullscreen);
   return {
     fullscreen: dashboardFullscreen,
+    fullscreenTransition,
     uiScale: dashboardFullscreen ? 1 : windowMetrics(settings, display).zoomFactor,
     taskbarVisible: !mode.skipTaskbar,
     smartDocked: Boolean(smartDockState),
@@ -545,17 +567,19 @@ function restoreWidgetWindow() {
   const size = { width: metrics.width, height: metrics.height };
   const targetBounds = {
     ...fullscreenRestore.bounds,
-    ...size,
+    ...(fullscreenRestore.zoomFactor ? {} : size),
   };
   win.setOpacity(Math.min(1, Math.max(0.65, settings.opacity ?? 0.96)));
-  win.webContents.setZoomFactor(metrics.zoomFactor);
+  win.webContents.setZoomFactor(fullscreenRestore.zoomFactor || metrics.zoomFactor);
   win.setSkipTaskbar(mode.skipTaskbar);
   win.setAlwaysOnTop(mode.alwaysOnTop, "floating");
   presentationDisplayId = display.id;
   win.setResizable(false);
   win.setMaximizable(false);
+  win.setMovable(true);
   win.setBounds(targetBounds, false);
   fullscreenRestore = null;
+  fullscreenTransition = false;
   showWindow();
   return true;
 }
@@ -573,15 +597,74 @@ function scheduleWidgetRestore(attempt = 0) {
   }, 75);
 }
 
+function prepareFullscreenMorph(force) {
+  if (!win || fullscreenMorph || fullscreenTransition) return null;
+  const current = dashboardFullscreen || win.isFullScreen();
+  const next = typeof force === "boolean" ? force : !current;
+  if (next === current) return null;
+  titlebarDrag.end();
+  const settings = loadSettings();
+  const display = screen.getDisplayMatching(win.getBounds());
+  const widgetBounds = current ? fullscreenRestore?.bounds : win.getBounds();
+  if (!widgetBounds) return null;
+  const widgetDisplay = screen.getDisplayMatching(widgetBounds);
+  const metrics = windowMetrics(settings, widgetDisplay);
+  fullscreenMorph = {
+    id: ++fullscreenMorphId, fullscreen: next, stage: display.bounds,
+    widget: { ...widgetBounds },
+    zoom: current ? (fullscreenRestore.zoomFactor || metrics.zoomFactor) : win.webContents.getZoomFactor(),
+  };
+  if (next) fullscreenRestore = { bounds: widgetBounds, zoomFactor: fullscreenMorph.zoom };
+  fullscreenTransition = true;
+  win.setMovable(false);
+  // Recover even if the renderer reloads or a transition is interrupted.
+  fullscreenMorphTimer = setTimeout(() => {
+    if (fullscreenMorph) finishFullscreenMorph(fullscreenMorph.id).catch(console.error);
+  }, 5000);
+  return fullscreenMorph;
+}
+
+function stageFullscreenMorph(id) {
+  if (!win || fullscreenMorph?.id !== id) throw new Error("全屏动画已失效");
+  if (fullscreenMorph.fullscreen) {
+    win.setResizable(true);
+    win.setSkipTaskbar(false);
+    win.webContents.setZoomFactor(1);
+    win.setBounds(fullscreenMorph.stage, false);
+    win.setOpacity(1);
+  }
+  return true;
+}
+
+async function finishFullscreenMorph(id) {
+  if (!win || fullscreenMorph?.id !== id) return windowState();
+  const plan = fullscreenMorph;
+  clearTimeout(fullscreenMorphTimer);
+  fullscreenMorphTimer = null;
+  fullscreenTransition = false;
+  toggleFullscreen(plan.fullscreen);
+  // Commit only after the OS fullscreen event AND widget bounds restoration.
+  for (let attempt = 0; win && fullscreenTransition && attempt < 200; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 16));
+  }
+  fullscreenMorph = null;
+  return windowState();
+}
+
 function toggleFullscreen(force) {
   if (!win) return windowState();
+  if (fullscreenTransition) return windowState();
+  titlebarDrag.end();
   const currentlyFullscreen = dashboardFullscreen || win.isFullScreen();
   const next = typeof force === "boolean" ? force : !currentlyFullscreen;
   if (next === currentlyFullscreen) return windowState();
+  fullscreenTransition = true;
+  broadcastWindowState();
   if (next) {
     dashboardFullscreen = true;
+    win.setMovable(false);
     broadcastWindowState();
-    fullscreenRestore = { bounds: win.getBounds() };
+    fullscreenRestore ||= { bounds: win.getBounds(), zoomFactor: win.webContents.getZoomFactor() };
     const mode = windowModeOptions(loadSettings(), true);
     win.setSkipTaskbar(mode.skipTaskbar);
     win.setAlwaysOnTop(mode.alwaysOnTop);
@@ -707,6 +790,7 @@ ipcMain.handle("refresh-pricing", () => pull(true));
 ipcMain.handle("get-settings", () => loadSettings());
 ipcMain.handle("get-window-state", () => windowState());
 ipcMain.handle("get-model-usage", (_event, range) => runDataTask("get-model-usage", { range }));
+ipcMain.handle("get-trend-usage", (_event, payload) => runDataTask("get-trend-usage", payload));
 ipcMain.handle("get-quota-timeline", (_event, payload) => runDataTask("get-quota-timeline", payload || {}));
 ipcMain.handle("query-usage-events", (_event, payload) => runDataTask("query-usage-events", payload || {}));
 ipcMain.handle("get-pricing-catalog", (_event, payload) => runDataTask("get-pricing-catalog", payload || {}));
@@ -732,6 +816,15 @@ ipcMain.handle("export-usage-events", async (_event, payload) => {
   } finally { exporting = false; }
 });
 ipcMain.handle("toggle-fullscreen", (_event, force) => toggleFullscreen(force));
+ipcMain.handle("prepare-fullscreen-morph", (_event, force) => prepareFullscreenMorph(force));
+ipcMain.handle("stage-fullscreen-morph", (_event, id) => stageFullscreenMorph(id));
+ipcMain.handle("finish-fullscreen-morph", (_event, id) => finishFullscreenMorph(id));
+ipcMain.on("titlebar-drag", (event, phase) => {
+  if (!win || event.sender !== win.webContents) return;
+  if (phase === "start") titlebarDrag.start();
+  else if (phase === "move") titlebarDrag.move();
+  else if (phase === "end") { titlebarDrag.end(); persistBounds(); }
+});
 ipcMain.handle("save-settings", (_event, partial) => applySettings(partial));
 ipcMain.handle("pointer-presence", (_event, present) => handlePointerPresence(Boolean(present)));
 ipcMain.handle("set-opacity", (_event, value) => {
