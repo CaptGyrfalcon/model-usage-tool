@@ -62,6 +62,17 @@
             <article class="quota-card codex-card" id="codexPool"></article>
           </div>
           <article class="detail-card" id="recentPanel"></article>
+          <article class="detail-card verification-card" id="verificationPanel">
+            <h3>Codex 额度验证</h3>
+            <p id="verificationStatus" role="status">主动查询会单独保留整数额度和查询时间。</p>
+            <div class="verification-actions">
+              <button type="button" data-verification="sample">查询一次</button>
+              <button type="button" data-verification="start">开始记录</button>
+              <button type="button" data-verification="stop" disabled>结束记录</button>
+              <button type="button" data-verification="export">导出记录</button>
+            </div>
+            <p class="verification-help">记录期间约每 30 秒独立查询，不调用模型。请使用单一模型、关闭 Fast，并在起止时等待任务结束；记录会保留原始回退，方便核验。</p>
+          </article>
         </section>
 
         <section class="view" id="modelsView">

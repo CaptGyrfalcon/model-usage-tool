@@ -1,0 +1,10 @@
+const fs=require('node:fs');
+const {RawQuotaScanner}=require('./raw-quota-source.cjs');
+const d=JSON.parse(fs.readFileSync('out/image-flat-fee/data.json','utf8'));
+const keys=new Set(d.cycles.flatMap(c=>c.events.map(e=>e.key)));
+const scan=new RawQuotaScanner(undefined,{fullHistory:true}).scan();
+if(scan.scanErrors.length)throw Error(JSON.stringify(scan.scanErrors));
+const tokens={};
+for(const e of scan.events)if(keys.has(e.eventKey))tokens[e.eventKey]={input:e.input,cacheRead:e.cacheRead,cacheWrite:e.cacheWrite,output:e.output,fast:e.fastKnown&&e.fast};
+fs.writeFileSync('out/full-cycle-pattern/tokens.json',JSON.stringify(tokens));
+console.log(JSON.stringify({keys:keys.size,matched:Object.keys(tokens).length,missing:[...keys].filter(k=>!tokens[k]).length}));

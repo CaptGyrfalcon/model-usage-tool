@@ -17,10 +17,28 @@ test('remaining dollars use inferred leftover and never invent a pool size', () 
   } }, now);
   assert.equal(rows.rows[0].meters[0].remainingCents, 114514.4);
   assert.equal(rows.rows[1].meters[0].remainingCents, 5692 * 8.76 / 100);
-  assert.ok(Math.abs(rows.rows[2].meters[0].remainingCents - 31481 * 0.61) < 1e-6);
+  assert.equal(rows.rows[2].meters[0].remainingCents, 31481 - 8500);
   assert.equal(meterRows({ data: { cursorModels: { percentRemaining: 80 } } }, now).rows[0].meters[0].remainingCents, null);
   assert.equal(meterRows({ data: { otherModels: { percentRemaining: 50, includedCents: { remaining: 180 } } } }, now).rows[1].meters[0].remainingCents, 180);
   assert.equal(meterRows({ data: { cursorModels: { percentRemaining: 20, expired: true, quotaEstimate: { inferredRemainingCents: 100 } } } }, now).rows[0].meters[0].remainingCents, null);
+});
+
+test('taskbar publishes changing dollar consumption even while percentage and capacity stay fixed', () => {
+  let usedCents = 3000;
+  const publish = createMeterPublisher(() => ({ data: { codex: { quota: { windows: [{
+    windowMinutes: 10080, percentRemaining: 89,
+    quotaEstimate: { inferredTotalCents: 35000, usedCents },
+  }] } } } }));
+  const messages = [];
+  const send = line => messages.push(JSON.parse(line).rows[2].meters[0]);
+  publish(send, true);
+  usedCents = 3050;
+  publish(send, true);
+  assert.deepEqual(messages.map(m => m.value), [89, 89]);
+  assert.deepEqual(messages.map(m => m.remainingCents), [32000, 31950]);
+  usedCents = 36000;
+  publish(send, true);
+  assert.equal(messages.at(-1).remainingCents, 0);
 });
 test('pace is leftover percent if the pool is spent evenly through the cycle', () => {
   const now = 10 * 86_400_000;

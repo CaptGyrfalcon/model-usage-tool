@@ -75,7 +75,7 @@ test("keeps the newest plan across session, archive, HTTP log and incremental sc
 test("formats the new Pro tier while preserving other and unknown plan names", () => {
   assert.equal(codexPlanName("prolite"), "Pro 5×");
   assert.equal(codexPlanName("plus"), "Plus");
-  assert.equal(codexPlanName("pro"), "Pro");
+  assert.equal(codexPlanName("pro"), "Pro 20×");
   assert.equal(codexPlanName("business"), "Business");
   assert.equal(codexPlanName("future"), "Future");
   assert.equal(codexPlanName(null), "Codex");

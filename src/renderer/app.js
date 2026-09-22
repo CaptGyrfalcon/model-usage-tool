@@ -133,7 +133,7 @@ function formatUsdRange(low, high) {
 function formatPct(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return "—";
-  return `${v >= 10 ? v.toFixed(0) : v.toFixed(1)}%`;
+  return `${v.toFixed(2)}%`;
 }
 
 function formatCursorPct(n) {
@@ -895,6 +895,7 @@ function costPartsHtml(costs) {
     <span>写缓存 ${formatUsd(value.cacheWriteCostCents)}</span>
     <span>读缓存 ${formatUsd(value.cacheReadCostCents)}</span>
     <span>输出 ${formatUsd(value.outputCostCents)}</span>
+    ${value.reviewCostCents ? `<span>自动审批 ${formatUsd(value.reviewCostCents)}</span>` : ""}
   </div>`;
 }
 
@@ -918,6 +919,7 @@ function codexQuotaWindowsHtml(codex) {
       </div>
       <progress class="quota-progress codex" max="100" value="${used}" aria-label="${escapeHtml(name)}已用比例">${used}%</progress>
       <div class="codex-window-stats"><span>已用 <b>${formatPct(used)}</b></span><span>剩余 <b>${formatPct(remaining)}</b></span></div>
+      ${quota.quotaEstimate?.estimateStatus === "local-dollar-usage" ? `<div class="quota-credit"><span>按累计美元消耗计算剩余</span><b>${formatUsd(quota.quotaEstimate.inferredRemainingCents)} / ${formatUsd(quota.quotaEstimate.inferredTotalCents)}</b></div>` : ""}
       ${forecastHtml(insight)}
     </section>`;
   }).join("");
@@ -932,6 +934,7 @@ function codexQuotaWindowsHtml(codex) {
 }
 
 function renderOverview(d) {
+  renderVerification(d?.verification);
   const names = { "cursor-models": "Cursor 模型", "cursor-api": "三方模型", "codex-window-300": "Codex 5h", "codex-window-10080": "Codex 7d" };
   $("quotaGlance").innerHTML = quotaPools(d).map((pool) => {
     const target = pool.source === "codex" ? "codexPool" : pool.id === "cursor-models" ? "cursorPool" : "otherPool";
@@ -951,7 +954,7 @@ function renderOverview(d) {
     || (d.quotaInsights || []).find((item) => item.id === "cursor");
   $("heroGrid").innerHTML = `
     <div class="hero-metric primary"><span>今日总 Token（含缓存）</span><strong>${formatTokens(combined.tokens?.today?.total)}</strong><small>有效 ${formatTokens(combined.tokens?.today?.effective)} · 写缓存 ${formatTokens(combined.tokens?.today?.cacheWrite)} · 读缓存 ${formatTokens(combined.tokens?.today?.cacheRead)} · 近 1 小时总 ${formatTokens(combined.tokens?.h1?.total)}</small></div>
-    <div class="hero-metric"><span>Cursor 模型池</span><strong>${formatUsd(cursorPoolQuota.usedCents)}</strong><small>${cursorPoolQuota.inferredTotalCents == null ? "池总额等待用量比例" : `按比例反推总额 ${formatUsd(cursorPoolQuota.inferredTotalCents)}`}</small></div>
+    <div class="hero-metric"><span>Cursor 模型池</span><strong>${formatUsd(cursorPoolQuota.usedCents)}</strong><small>${cursorPoolQuota.inferredTotalCents == null ? "池总额待确认" : `套餐额度 ${formatUsd(cursorPoolQuota.inferredTotalCents)}`}</small></div>
     <div class="hero-metric"><span>其他 API 模型池</span><strong>${formatUsd(otherPoolQuota.usedCents)}</strong><small>套餐总额 ${formatUsd(otherPoolQuota.packageTotalCents)} · 官方已计 ${formatUsd(cursorIncluded.used)}</small></div>
   `;
 
@@ -961,7 +964,7 @@ function renderOverview(d) {
       "cursor",
       `<div class="quota-credit"><span>本周期 API 等效</span><b>${formatUsd(cursorPoolCost.equivalentCostCents)}</b></div>
        ${costPartsHtml(cursorPoolCost)}
-       <div class="quota-credit"><span>按 ${formatCursorPct(d.cursorModels.percentUsed)} 反推池总额</span><b>${formatUsd(cursorPoolQuota.inferredTotalCents)}</b></div>
+       <div class="quota-credit"><span>剩余额度 / 套餐额度</span><b>${formatUsd(cursorPoolQuota.inferredRemainingCents)} / ${formatUsd(cursorPoolQuota.inferredTotalCents)}</b></div>
        ${forecastHtml(cursorModelInsight)}
        ${d.cursorModels.message ? `<div class="quota-message">${escapeHtml(d.cursorModels.message)}</div>` : ""}`
     );
@@ -998,13 +1001,14 @@ function renderOverview(d) {
     $("codexPool").innerHTML = `
       <div class="quota-head">
         <div class="quota-icon codex" aria-hidden="true">OX</div>
-        <div class="quota-title"><h3>Codex</h3><span>${escapeHtml(codex.planName)} · 本机会话日志</span></div>
+        <div class="quota-title"><h3>Codex</h3><span>${escapeHtml(codex.planName)} · 周额度按累计美元消耗计算</span></div>
         <div class="quota-remain codex-window-count"><b>${formatInteger(codexWindows.length)}</b><span>额度窗口</span></div>
       </div>
       ${codexQuotaWindowsHtml(codex)}
       <div class="quota-stats codex-token-stats"><span>短周期总 Token <b>${formatTokens(codex.tokens?.period?.total)}</b></span><span class="token-pair">有效 <b>${formatTokens(codex.tokens?.period?.effective)}</b></span></div>
-      <div class="quota-credit"><span>美元等效（Fast 按 2.5×）</span><b>${formatUsdRange(codexCost.equivalentCostLowCents, codexCost.equivalentCostHighCents)} <em>${codexCost.inferredTotalCents == null ? "" : `/ ${formatUsdRange(codexCost.inferredTotalLowCents, codexCost.inferredTotalHighCents)}`}</em></b></div>
+      <div class="quota-credit"><span>本周期本地成本（假设价格）</span><b>${formatUsdRange(codexCost.equivalentCostLowCents, codexCost.equivalentCostHighCents)}</b></div>
       ${costPartsHtml(codexCost)}
+      <div class="quota-message">Pro5x 周额度按 $500、Plus 按 $100；非官方金额。自动审批每完整 turn $0.01，输入／缓存／输出均按假设价，未知 Fast 按普通。余额按官方百分比折算，与本地累计成本分别展示。</div>
       <div class="quota-message">${escapeHtml(codex.periodLabel)} · ${formatInteger(codex.eventCount)} 次 · tier：服务端 ${formatInteger(codex.tierEvidence?.response)} / 本地 ${formatInteger(codex.tierEvidence?.local)} / 未知 ${formatInteger(codex.tierEvidence?.unknown)} · ${codex.files} 个本地会话文件</div>
     `;
   } else {
@@ -1019,6 +1023,38 @@ function renderOverview(d) {
     ? `<div class="recent-icon">↗</div><div class="recent-copy"><span>最近一次调用 · ${last.source === "codex" ? "Codex" : "Cursor"}</span><b>${escapeHtml(window.ModelDisplay.format(last))}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>${recentDonutHtml(last)}`
     : `<div class="empty-state">本周期还没有可显示的用量事件</div>`;
 }
+
+let verificationBusy = false;
+function renderVerification(state) {
+  if (!$('verificationStatus') || verificationBusy) return;
+  const attempt=state?.lastAttempt, good=state?.lastSuccess;
+  const quota=good?.snapshots?.find(s=>s.limitId === 'codex');
+  const week=[quota?.primary,quota?.secondary].find(w=>w?.windowDurationMins === 10080);
+  $('verificationStatus').textContent = `后台约每 ${Math.round((state?.intervalMs || 15000)/1000)} 秒主动查询${state?.active ? ' · 实验记录中' : ' · 未标记实验'}${week ? ` · 最近主动查询剩余 ${100-week.usedPercent}%` : ''}${good ? ` · ${new Date(good.responseReceivedAt).toLocaleTimeString('zh-CN')}` : ''}${attempt && !attempt.ok ? ` · ${attempt.error}（保留失败记录）` : ''}`;
+  $('verificationPanel').querySelector('[data-verification="start"]').disabled=Boolean(state?.active);
+  $('verificationPanel').querySelector('[data-verification="stop"]').disabled=!state?.active;
+}
+$('verificationPanel').addEventListener('click',async event=>{
+  const button=event.target.closest('[data-verification]');
+  if(!button || verificationBusy)return;
+  if(!window.widget.verification){$('verificationStatus').textContent='预览模式不执行账户查询';return;}
+  verificationBusy=true;
+  $('verificationPanel').querySelectorAll('button').forEach(b=>b.disabled=true);
+  $('verificationStatus').textContent='正在处理…';
+  let message=null;
+  try {
+    const result=await window.widget.verification(button.dataset.verification);
+    if(button.dataset.verification==='export')message=result.canceled?'已取消导出':`已导出：${result.filePath}`;
+    else if(snapshot.data)snapshot.data.verification=result;
+  } catch(error){message=error.message || '操作失败';}
+  finally {
+    verificationBusy=false;
+    $('verificationPanel').querySelectorAll('button').forEach(b=>b.disabled=false);
+    renderVerification(snapshot.data?.verification);
+    if(message)$('verificationStatus').textContent=message;
+    if(button.dataset.verification!=='export')window.widget.refresh();
+  }
+});
 
 function recentDonutHtml(last) {
   const tokens = last?.tokens || {};
@@ -1407,7 +1443,7 @@ function renderTrends(d) {
   $("modelBreakdownBtn").setAttribute("aria-pressed", String(modelBreakdown));
   const coverage = Number(view.costCoveragePercent);
   const priceDate = d.pricing?.fetchedAt ? formatDate(d.pricing.fetchedAt) : "内置";
-  $("trendFootnote").textContent = `美元等效价格按事件入库时锁定 · 覆盖 ${Number.isFinite(coverage) ? formatPct(coverage) : "—"} · 价表 ${priceDate} · Codex 走 OpenAI 官方价并按 Fast 2.5×；Cursor 走 Cursor 官方价。`;
+  $("trendFootnote").textContent = `覆盖 ${Number.isFinite(coverage) ? formatPct(coverage) : "—"} · 价表 ${priceDate} · Codex 使用 9/18 假设计价并按 Fast 2.5×，自动审批每完整 turn $0.01；Cursor 使用官方价。`;
 }
 
 function chartTooltipTarget(clientX, clientY) {

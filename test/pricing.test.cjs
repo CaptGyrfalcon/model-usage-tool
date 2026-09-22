@@ -2,6 +2,18 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { FALLBACK_MODELS, builtInSnapshot, parseOpenAiPricing, parseCursorPricing, priceEvent, modelKey, mergeFallbackCatalog } = require("../src/pricing.cjs");
 
+test("Codex review token updates carry no fee; completed turn carries the flat fee", () => {
+  const event = { source: "codex", model: "codex-auto-review", input: 10000, output: 500, fast: true, fastKnown: false };
+  const priced = priceEvent(event, null);
+  for (const [key, value] of Object.entries(priced)) {
+    if (key.endsWith("Cents")) assert.equal(value, 0, key);
+  }
+  assert.equal(priced.pricingStatus, "codex-hypothesis-2026-09-18-v1-review-token-only");
+  assert.equal(event.input, 10000);
+  assert.equal(priceEvent({ ...event, source: "cursor" }, null).pricingStatus, "unavailable");
+  assert.equal(priceEvent({ ...event, model: "another-unknown-model" }, null).pricingStatus, "unavailable");
+});
+
 test("parses Standard and Fast OpenAI pricing tables", () => {
   const markdown = `
 gpt-5.6-sol | $4.00 | $0.40 | $5.00 | $20.00 | $8.00 | $0.80 | $10.00 | $30.00
@@ -14,7 +26,7 @@ gpt-5.6-sol | $8.00 | $0.80 | $10.00 | $40.00 | $16.00 | $1.60 | $20.00 | $60.00
   assert.equal(models["gpt-5.6-sol"].fast.long.output, 60);
 });
 
-test("prices cache/input/output separately and keeps unknown Fast range", () => {
+test("prices cache/input/output separately and treats unknown Fast as non-fast", () => {
   const snapshot = { id: 7, models: FALLBACK_MODELS };
   const event = {
     source: "codex", model: "gpt-5.6-sol", input: 100_000, cacheRead: 100_000,
@@ -27,10 +39,10 @@ test("prices cache/input/output separately and keeps unknown Fast range", () => 
   assert.equal(priced.cacheCostCents, 29);
   assert.equal(priced.outputCostCents, 200);
   assert.equal(priced.equivalentCostLowCents, 269);
-  assert.equal(priced.equivalentCostHighCents, 672.5);
+  assert.equal(priced.equivalentCostHighCents, 269);
   assert.equal(priced.quotaEquivalentCostLowCents, 269);
-  assert.equal(priced.quotaEquivalentCostHighCents, 672.5);
-  assert.equal(priced.pricingStatus, "official-standard-rate-credit-multiplier-tier-unknown");
+  assert.equal(priced.quotaEquivalentCostHighCents, 269);
+  assert.equal(priced.pricingStatus, "codex-hypothesis-2026-09-18-v1-tier-unknown");
 });
 
 test("uses Cursor official cache-write rows only for Cursor events", () => {
@@ -92,9 +104,9 @@ test("aliases gpt-6 to gpt-6-astra and prices it from the built-in catalog", () 
     source: "codex", model: "gpt-6", input: 100_000, output: 10_000,
     cacheRead: 0, cacheWrite: 0, fast: false, fastKnown: true,
   }, { id: 9, models: {}, modelsBySource: { codex: {}, cursor: {} } });
-  assert.equal(priced.inputCostCents, 100);
-  assert.equal(priced.outputCostCents, 50);
-  assert.equal(priced.equivalentCostCents, 150);
+  assert.equal(priced.inputCostCents, 150);
+  assert.equal(priced.outputCostCents, 75);
+  assert.equal(priced.equivalentCostCents, 225);
   assert.notEqual(priced.pricingStatus, "unavailable");
 });
 
@@ -104,20 +116,20 @@ test("uses 2.5x Codex credit for GPT-6 Astra Fast and skips long-context surchar
     source: "codex", model: "gpt-6-astra", input: 100_000, output: 10_000,
     cacheRead: 0, cacheWrite: 0, fast: true, fastKnown: true,
   }, snapshot);
-  assert.equal(fast.equivalentCostCents, 375);
-  assert.equal(fast.quotaEquivalentCostCents, 375);
+  assert.equal(fast.equivalentCostCents, 562.5);
+  assert.equal(fast.quotaEquivalentCostCents, 562.5);
 
   const longAstra = priceEvent({
     source: "codex", model: "gpt-6-astra", input: 300_000, output: 0,
     cacheRead: 0, cacheWrite: 0, fast: false, fastKnown: true,
   }, snapshot);
-  assert.equal(longAstra.inputCostCents, 300);
+  assert.equal(longAstra.inputCostCents, 450);
 
   const longSol = priceEvent({
     source: "codex", model: "gpt-5.6-sol", input: 300_000, output: 0,
     cacheRead: 0, cacheWrite: 0, fast: false, fastKnown: true,
   }, snapshot);
-  assert.equal(longSol.inputCostCents, 240);
+  assert.equal(longSol.inputCostCents, 120);
 });
 
 test("fills GPT-6 Astra into a cached catalog that predates the model", () => {

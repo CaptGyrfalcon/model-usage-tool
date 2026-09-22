@@ -116,6 +116,14 @@ class UsageHistory {
         PRIMARY KEY (source, pool, bucket)
       );
       CREATE INDEX IF NOT EXISTS idx_quota_samples_time ON quota_samples(source, timestamp);
+      CREATE TABLE IF NOT EXISTS codex_quota_observations (
+        sample_key TEXT PRIMARY KEY, pool TEXT NOT NULL, timestamp INTEGER NOT NULL,
+        used_percent REAL, window_minutes INTEGER, resets_at INTEGER, plan_type TEXT,
+        origin TEXT NOT NULL, origin_path TEXT, session_id TEXT, record_index INTEGER,
+        record_fingerprint TEXT, quality TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_codex_observations_time ON codex_quota_observations(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_codex_observations_session_time ON codex_quota_observations(session_id, timestamp);
       CREATE TABLE IF NOT EXISTS app_cache (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -219,7 +227,24 @@ class UsageHistory {
     `);
     this.deleteCursorEvent = this.db.prepare("DELETE FROM usage_events WHERE source = 'cursor' AND event_key = ?");
     this.unifyCodexDollarEquivalent();
+    this.normalizeUnknownTierCosts();
     this.migrateLegacyHistory();
+  }
+
+  normalizeUnknownTierCosts() {
+    // Existing unknown-tier estimates already selected the standard price;
+    // retire their speculative Fast upper bounds without altering tier evidence.
+    return this.db.prepare(`UPDATE usage_events SET
+      equivalent_cost_low_cents = equivalent_cost_cents,
+      equivalent_cost_high_cents = equivalent_cost_cents,
+      quota_equivalent_cost_low_cents = quota_equivalent_cost_cents,
+      quota_equivalent_cost_high_cents = quota_equivalent_cost_cents
+      WHERE fast IS NULL AND pricing_status LIKE '%tier-unknown%'
+        AND (equivalent_cost_low_cents IS NOT equivalent_cost_cents
+          OR equivalent_cost_high_cents IS NOT equivalent_cost_cents
+          OR quota_equivalent_cost_low_cents IS NOT quota_equivalent_cost_cents
+          OR quota_equivalent_cost_high_cents IS NOT quota_equivalent_cost_cents)
+    `).run().changes;
   }
 
   ensureUsageColumns() {
@@ -439,7 +464,7 @@ class UsageHistory {
           event.quotaEquivalentCostHighCents == null ? null : finite(event.quotaEquivalentCostHighCents),
           event.pricingSnapshotId == null ? null : Math.trunc(finite(event.pricingSnapshotId)),
           event.pricingStatus == null ? null : String(event.pricingStatus),
-          Math.max(1, Math.trunc(finite(event.count, 1)))
+          String(event.eventKey).startsWith("codex:review-turn:") ? 0 : Math.max(1, Math.trunc(finite(event.count, 1)))
         );
         count += 1;
       }
@@ -449,6 +474,29 @@ class UsageHistory {
       throw error;
     }
     return count;
+  }
+
+  applyCodexAccounting(snapshot) {
+    const { VERSION } = require("./codex-accounting.cjs");
+    if (this.loadCache(VERSION)) return;
+    const { priceEvent } = require("./pricing.cjs");
+    const backupPath = this.dbPath === ":memory:" ? null : `${this.dbPath}.before-${VERSION}-${Date.now()}.sqlite`;
+    if (backupPath) this.db.exec(`VACUUM INTO '${backupPath.replaceAll("'", "''")}'`);
+    const columns = ["input_cost_cents", "cache_read_cost_cents", "cache_write_cost_cents", "cache_cost_cents", "output_cost_cents",
+      "equivalent_cost_cents", "equivalent_cost_low_cents", "equivalent_cost_high_cents", "quota_equivalent_cost_cents",
+      "quota_equivalent_cost_low_cents", "quota_equivalent_cost_high_cents", "pricing_status"];
+    const keys = ["inputCostCents","cacheReadCostCents","cacheWriteCostCents","cacheCostCents","outputCostCents",
+      "equivalentCostCents","equivalentCostLowCents","equivalentCostHighCents","quotaEquivalentCostCents",
+      "quotaEquivalentCostLowCents","quotaEquivalentCostHighCents","pricingStatus"];
+    const update = this.db.prepare(`UPDATE usage_events SET ${columns.map(c=>`${c}=?`).join(",")} WHERE source='codex' AND event_key=?`);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const event of this.getEvents({sources:"codex"})) {
+        const p = priceEvent(event,snapshot);
+        update.run(...keys.map(k=>p[k] ?? null),event.eventKey);
+      }
+      this.saveCache(VERSION,{at:Date.now(),backupPath});this.db.exec("COMMIT");
+    } catch(e) {this.db.exec("ROLLBACK");throw e;}
   }
 
   getEvents({ sources, start = 0, end = Date.now() + 60_000 } = {}) {
@@ -654,7 +702,29 @@ class UsageHistory {
     }));
   }
 
-  getQuotaSamples({ source, start = 0, end = Number.MAX_SAFE_INTEGER } = {}) {
+  getQuotaSamples({ source, start = 0, end = Number.MAX_SAFE_INTEGER, includeUnreliable = false } = {}) {
+    if (this.loadCache("codex-provenance-samples-v1")) {
+      const codex = !source || source === "codex" ? this.db.prepare(`
+        SELECT * FROM codex_quota_observations WHERE timestamp >= ? AND timestamp < ?
+          ${includeUnreliable ? "" : "AND quality = 'valid'"} ORDER BY timestamp, sample_key
+      `).all(start, end).map(row => ({
+        source: "codex", pool: row.pool, timestamp: row.timestamp, bucket: row.timestamp,
+        usedPercent: row.used_percent, windowMinutes: row.window_minutes,
+        resetsAt: row.resets_at, startsAt: null, planType: row.plan_type,
+        sampleKey: row.sample_key, origin: row.origin, originPath: row.origin_path,
+        sessionId: row.session_id, recordIndex: row.record_index,
+        quality: row.quality,
+      })) : [];
+      const other = source === "codex" ? [] : this.db.prepare(`
+        SELECT * FROM quota_samples WHERE source != 'codex' AND timestamp >= ? AND timestamp < ?
+          ${source ? "AND source = ?" : ""}
+      `).all(start, end, ...(source ? [source] : [])).map(row => ({
+        source: row.source, pool: row.pool, timestamp: row.timestamp, bucket: row.bucket,
+        usedPercent: row.used_percent, windowMinutes: row.window_minutes,
+        resetsAt: row.resets_at, startsAt: row.starts_at, planType: row.plan_type,
+      }));
+      return [...codex, ...other].sort((a, b) => a.timestamp - b.timestamp);
+    }
     const samples = this.db.prepare(`
       SELECT source, pool, bucket, timestamp, used_percent, window_minutes, resets_at, starts_at, plan_type
       FROM quota_samples
@@ -749,6 +819,18 @@ class UsageHistory {
 
   saveQuotaSample(sample) {
     if (!sample?.source || !sample?.pool || !Number.isFinite(Number(sample.timestamp))) return;
+    if (sample.source === "codex" && sample.sampleKey) {
+      this.db.prepare(`INSERT INTO codex_quota_observations (
+        sample_key, pool, timestamp, used_percent, window_minutes, resets_at, plan_type,
+        origin, origin_path, session_id, record_index, record_fingerprint, quality
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(sample_key) DO UPDATE SET origin_path = excluded.origin_path, quality = excluded.quality
+      `).run(sample.sampleKey, sample.pool, Math.trunc(sample.timestamp), sample.usedPercent,
+        sample.windowMinutes, sample.resetsAt, sample.planType || null,
+        sample.origin || "unknown", sample.originPath || null, sample.sessionId || null,
+        sample.recordIndex ?? null, sample.recordFingerprint || null, sample.quality || "unverified");
+      return;
+    }
     const timestamp = Math.trunc(Number(sample.timestamp));
     // Keep reset boundaries even when both observations fall in one five-minute bucket.
     const bucket = sample.source === "codex" ? timestamp : Math.floor(timestamp / 300_000) * 300_000;

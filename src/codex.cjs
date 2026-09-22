@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
+const { createHash } = require("node:crypto");
 
 function codexHomePath() {
   return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
@@ -26,6 +27,7 @@ function codexPlanName(planType) {
   const plan = String(planType || "").trim().toLowerCase();
   if (!plan) return "Codex";
   if (plan === "prolite") return "Pro 5×";
+  if (plan === "pro") return "Pro 20×";
   return plan[0].toUpperCase() + plan.slice(1);
 }
 
@@ -49,7 +51,7 @@ function collapseCumulativeEvents(events) {
     if (!existing) {
       collapsed.set(event.eventKey, {
         ...event,
-        legacyEventKeys: event.legacyEventKey ? [event.legacyEventKey] : [],
+        legacyEventKeys: [...new Set([...(event.legacyEventKeys || []), ...(event.legacyEventKey ? [event.legacyEventKey] : [])])],
       });
       continue;
     }
@@ -157,7 +159,8 @@ function mergeRateLimitSnapshots(snapshots, maxAgeMs = 8 * 86_400_000) {
       if (minutes === 300 && shortEvidence?.shortLimit === "absent" && snapshot.timestamp <= shortEvidence.timestamp) continue;
       if (!Number.isFinite(minutes) || windowsByMinutes.has(minutes)) continue;
       if (Number.isFinite(Number(window.resetsAt)) && Number(window.resetsAt) < newest.timestamp) continue;
-      windowsByMinutes.set(minutes, { ...window });
+      windowsByMinutes.set(minutes, { ...window, sampledAt: window.sampledAt ?? snapshot.timestamp,
+        planType: window.planType ?? snapshot.planType });
     }
   }
   const windows = [...windowsByMinutes.values()]
@@ -208,7 +211,7 @@ function responseTierFromRecord(record) {
 }
 
 class CodexUsageScanner {
-  constructor(home = codexHomePath()) {
+  constructor(home = codexHomePath(), { fullHistory = false } = {}) {
     this.home = home;
     this.fileStates = new Map();
     this.latestRateLimit = null;
@@ -218,6 +221,10 @@ class CodexUsageScanner {
     this.tierTimelines = new Map();
     this.quotaSamples = [];
     this.excludedQuotaSamples = [];
+    this.fullHistory = fullHistory;
+    this.sessionSnapshots = new Map();
+    this.timestampGroups = new Map();
+    this.scanErrors = [];
   }
 
   updatePlanType(planType, timestamp) {
@@ -267,7 +274,7 @@ class CodexUsageScanner {
     try {
       db = new DatabaseSync(dbPath, { readOnly: true });
       const rows = db.prepare(`
-        SELECT ts, feedback_log_body
+        SELECT id, ts, thread_id, feedback_log_body
         FROM logs
         WHERE target = 'codex_http_client::client'
           AND (
@@ -275,17 +282,23 @@ class CodexUsageScanner {
             OR feedback_log_body LIKE '%x-codex-secondary-window-minutes%'
           )
         ORDER BY ts DESC, id DESC
-        LIMIT 512
+        ${this.fullHistory ? "" : "LIMIT 512"}
       `).all();
       const snapshots = rows
-        .map((row) => rateLimitFromResponseHeaders(row.feedback_log_body, Number(row.ts)))
+        .map((row) => {
+          const snapshot = rateLimitFromResponseHeaders(row.feedback_log_body, Number(row.ts));
+          return snapshot && { ...snapshot, origin: "http-log", originPath: dbPath,
+            recordKey: `http:${row.id}:${createHash("sha256").update(String(row.feedback_log_body)).digest("hex")}`,
+            recordIndex: row.id, sessionId: row.thread_id || null };
+        })
         .filter(Boolean);
       for (const snapshot of snapshots) this.collectQuotaSamples(snapshot);
       const rateLimit = mergeRateLimitSnapshots([...snapshots, this.latestRateLimit]);
       if (rateLimit && (!this.latestRateLimit || rateLimit.timestamp >= this.latestRateLimit.timestamp)) this.latestRateLimit = rateLimit;
       for (const snapshot of snapshots) this.updatePlanType(snapshot.planType, snapshot.timestamp);
-    } catch {
+    } catch (error) {
       // Response headers are optional and the database can be briefly locked while Codex writes to it.
+      this.scanErrors.push({ path: dbPath, error: error.message });
     } finally {
       try { db?.close(); } catch {}
     }
@@ -312,6 +325,7 @@ class CodexUsageScanner {
   scan() {
     this.quotaSamples = [];
     this.excludedQuotaSamples = [];
+    this.scanErrors = [];
     if (!fs.existsSync(this.home)) {
       return { available: false, home: this.home, events: [], rateLimit: null, planType: null, files: 0 };
     }
@@ -322,10 +336,20 @@ class CodexUsageScanner {
     for (const file of files) {
       try {
         this.scanFile(file, events);
-      } catch {
+      } catch (error) {
         // A session can be moved to the archive while it is being scanned; the next refresh retries it.
+        this.scanErrors.push({ path: file, error: error.message });
       }
     }
+    // Recompute from qualified original observations, never from a synthesized
+    // snapshot whose windows may have come from different observation times.
+    const qualified = [...this.sessionSnapshots.values()].map(snapshot => ({ ...snapshot,
+      windows: snapshot.quality ? [] : snapshot.windows.filter(w => !w.resetsAt
+        || snapshot.samples.some(s => s.slot === w.slot && s.quality === "valid")).map(w => ({
+        ...w, sampledAt: snapshot.timestamp, planType: snapshot.planType,
+      })),
+    })).filter(snapshot => snapshot.windows.length);
+    this.latestRateLimit = mergeRateLimitSnapshots(qualified);
     this.loadRateLimitFromLogs();
     for (const file of this.fileStates.keys()) {
       if (!present.has(file)) this.fileStates.delete(file);
@@ -337,6 +361,7 @@ class CodexUsageScanner {
       rateLimit: this.latestRateLimit,
       quotaSamples: this.quotaSamples,
       excludedQuotaSamples: this.excludedQuotaSamples,
+      scanErrors: this.scanErrors,
       planType: this.planType,
       origins: [...this.origins],
       files: files.length,
@@ -344,10 +369,38 @@ class CodexUsageScanner {
   }
 
   collectQuotaSamples(snapshot) {
+    snapshot.samples = [];
     for (const window of snapshot.windows || []) {
       if (!window.resetsAt || window.usedPercent == null) continue;
-      this.quotaSamples.push({ source: "codex", pool: `${window.slot || "window"}-${window.windowMinutes}`,
-        timestamp: snapshot.timestamp, planType: snapshot.planType || null, ...window });
+      const outside = snapshot.timestamp < window.resetsAt - window.windowMinutes * 60_000 - 60_000
+        || snapshot.timestamp >= window.resetsAt;
+      const sample = { source: "codex", pool: `${window.slot || "window"}-${window.windowMinutes}`,
+        timestamp: snapshot.timestamp, planType: snapshot.planType || null, ...window,
+        sampleKey: snapshot.recordKey ? `${snapshot.recordKey}:${window.slot}:${window.windowMinutes}` : null,
+        origin: snapshot.origin, originPath: snapshot.originPath, sessionId: snapshot.sessionId,
+        recordIndex: snapshot.recordIndex, recordFingerprint: snapshot.recordFingerprint,
+        quality: snapshot.quality || (outside ? "outside-cycle" : "valid") };
+      snapshot.samples.push(sample);
+      this.quotaSamples.push(sample);
+    }
+  }
+
+  collectSessionSnapshot(snapshot) {
+    const groupKey = `${snapshot.sessionId}:${snapshot.timestamp}`;
+    const group = this.timestampGroups.get(groupKey) || new Map();
+    group.set(snapshot.recordKey, snapshot);
+    this.timestampGroups.set(groupKey, group);
+    this.collectQuotaSamples(snapshot);
+    this.sessionSnapshots.set(snapshot.recordKey, snapshot);
+    if (new Set([...group.values()].map(s => s.recordFingerprint)).size > 1) {
+      // Invalidate earlier records too, including records saved on an earlier scan.
+      for (const item of group.values()) {
+        item.quality = "conflicting-timestamp";
+        for (const sample of item.samples) {
+          sample.quality = item.quality;
+          if (!this.quotaSamples.includes(sample)) this.quotaSamples.push(sample);
+        }
+      }
     }
   }
 
@@ -385,6 +438,7 @@ class CodexUsageScanner {
   }
 
   parseLine(line, state, file, events) {
+    state.lineNumber = (state.lineNumber || 0) + 1;
     if (!line) return;
     let record;
     try {
@@ -394,15 +448,31 @@ class CodexUsageScanner {
     }
     const payload = record.payload || {};
     if (record.type === "session_meta") {
+      if (state.sessionId) {
+        state.inheritedSessionId = payload.id || payload.session_id;
+        return;
+      }
       state.sessionId = payload.id || payload.session_id || state.sessionId;
+      state.ownerCreated = Date.parse(payload.timestamp || record.timestamp);
       if (payload.originator) this.origins.add(String(payload.originator));
       return;
     }
+    if (Date.parse(record.timestamp) < state.ownerCreated) return;
     if (record.type === "turn_context") {
+      state.turnId = payload.turn_id || null;
       if (payload.model) state.model = String(payload.model);
       state.effort = payload.effort == null ? state.effort : String(payload.effort);
       const turnTier = tierEvidence(payload.service_tier, "local-log");
       if (turnTier) state.requestTier = turnTier;
+      return;
+    }
+    if (record.type === "event_msg" && payload.type === "task_complete"
+      && state.model === "codex-auto-review" && state.turnId) {
+      const timestamp = Date.parse(record.timestamp);
+      if (Number.isFinite(timestamp)) events.push({ source: "codex",
+        eventKey: `codex:review-turn:${state.sessionId}:${state.turnId}`, timestamp,
+        model: "codex-auto-review", fast: false, fastKnown: true,
+        input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, count: 0 });
       return;
     }
     if (record.type === "event_msg" && payload.type === "thread_settings_applied") {
@@ -426,7 +496,14 @@ class CodexUsageScanner {
       }
     }
     if (Number.isFinite(timestamp) && (rateLimits?.primary || rateLimits?.secondary) && isMainCodexRateLimit(rateLimits, state.model)) {
-      this.collectQuotaSamples({ timestamp, planType: rateLimits.plan_type,
+      const recordFingerprint = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+      const sessionId = state.sessionId || path.basename(file, ".jsonl");
+      this.collectSessionSnapshot({ timestamp, planType: rateLimits.plan_type,
+        origin: "session", originPath: file, sessionId, recordIndex: state.lineNumber,
+        recordFingerprint, recordKey: `session:${sessionId}:${state.lineNumber}:${recordFingerprint}`,
+        shortLimit: Object.hasOwn(rateLimits, "primary") && Object.hasOwn(rateLimits, "secondary")
+          ? [rateLimits.primary, rateLimits.secondary].some(w => w?.window_minutes === 300) ? "present" : "absent" : "unknown",
+        credits: rateLimits.credits,
         windows: [rateWindow(rateLimits.primary), rateWindow(rateLimits.secondary)]
           .map((window, index) => window && { ...window, slot: index === 0 ? "primary" : "secondary" }).filter(Boolean) });
       if (!this.latestRateLimit || timestamp >= this.latestRateLimit.timestamp) {
@@ -482,6 +559,8 @@ class CodexUsageScanner {
       source: "codex",
       eventKey,
       legacyEventKey: eventKey === legacyEventKey ? null : legacyEventKey,
+      legacyEventKeys: state.inheritedSessionId && state.inheritedSessionId !== sessionId
+        ? [cumulativeEventKey(state.inheritedSessionId, payload.info?.total_token_usage)].filter(Boolean) : [],
       timestamp,
       model: state.model || "unknown",
       effort: state.effort,
@@ -503,7 +582,7 @@ class CodexUsageScanner {
 let singleton;
 
 function scanCodexUsage() {
-  if (!singleton) singleton = new CodexUsageScanner();
+  if (!singleton) singleton = new CodexUsageScanner(undefined, { fullHistory: true });
   return singleton.scan();
 }
 

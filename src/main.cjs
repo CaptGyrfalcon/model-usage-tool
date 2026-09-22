@@ -808,6 +808,16 @@ ipcMain.handle("get-snapshot", () => latest);
 ipcMain.handle("refresh", () => pull());
 ipcMain.handle("refresh-pricing", () => pull(true));
 ipcMain.handle("get-settings", () => loadSettings());
+ipcMain.handle("codex-verification", async (_event, action) => {
+  if (!["status","sample","start","stop","export"].includes(action)) throw new Error("未知验证操作");
+  const payload={action};
+  if(action === "export") {
+    const result=await dialog.showSaveDialog(win,{title:"导出 Codex 验证记录",defaultPath:"codex-verification.json",filters:[{name:"JSON",extensions:["json"]}]});
+    if(result.canceled)return {canceled:true};
+    payload.filePath=result.filePath;
+  }
+  return runDataTask("verification",payload);
+});
 ipcMain.handle("get-window-state", () => windowState());
 ipcMain.handle("get-model-usage", (_event, range) => runDataTask("get-model-usage", { range }));
 ipcMain.handle("get-trend-usage", (_event, payload) => runDataTask("get-trend-usage", payload));

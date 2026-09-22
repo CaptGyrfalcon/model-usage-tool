@@ -1,4 +1,5 @@
 const DAY_MS = 86_400_000;
+const codexAccounting = require("./codex-accounting.cjs");
 const OPENAI_PRICING_URL = "https://developers.openai.com/api/docs/pricing.md";
 const CURSOR_PRICING_URL = "https://cursor.com/docs/models-and-pricing.md";
 
@@ -334,7 +335,20 @@ function scaleComponents(parts, total) {
 function priceEvent(event, snapshot, { authoritativeTotalCents = null, fallbackSnapshot = null } = {}) {
   const key = modelKey(event.model);
   const source = String(event.source || "").toLowerCase();
-  const model = catalogModel(snapshot, source, key)
+  // User-selected accounting assumption, not an official published rate.
+  // Token updates are retained; a separate, stable completed-turn event carries the fee.
+  if (source === "codex" && String(event.model || "").toLowerCase() === "codex-auto-review") {
+    const fee = String(event.eventKey || "").startsWith("codex:review-turn:") ? 1 : 0;
+    return {
+      inputCostCents: 0, cacheReadCostCents: 0, cacheWriteCostCents: 0,
+      cacheCostCents: 0, outputCostCents: 0, reviewCostCents: fee,
+      equivalentCostCents: fee, equivalentCostLowCents: fee, equivalentCostHighCents: fee,
+      quotaEquivalentCostCents: fee, quotaEquivalentCostLowCents: fee, quotaEquivalentCostHighCents: fee,
+      pricingSnapshotId: snapshot?.id || null,
+      pricingStatus: `${codexAccounting.VERSION}-${fee ? "review-turn" : "review-token-only"}`,
+    };
+  }
+  const model = (source === "codex" ? codexAccounting.model(key) : null) || catalogModel(snapshot, source, key)
     || catalogModel(fallbackSnapshot, source, key)
     || fallbackModel(source, key);
   if (!model?.standard) {
@@ -366,8 +380,10 @@ function priceEvent(event, snapshot, { authoritativeTotalCents = null, fallbackS
   let selected = isCodex
     ? knownFast && event.fast ? creditFast : standard
     : knownFast && event.fast ? apiFast : standard;
-  let low = standard;
-  let high = isCodex ? creditFast : apiFast;
+  // Unknown tier is accounted as non-fast by user preference. Preserve the
+  // original tier evidence; only the accounting assumption changes.
+  let low = selected;
+  let high = selected;
   const authoritative = authoritativeTotalCents == null ? null : Number(authoritativeTotalCents);
   if (Number.isFinite(authoritative) && authoritative >= 0) {
     selected = scaleComponents(selected, authoritative);
@@ -392,7 +408,7 @@ function priceEvent(event, snapshot, { authoritativeTotalCents = null, fallbackS
     pricingStatus: Number.isFinite(authoritative)
       ? "api-total-allocated"
       : isCodex
-        ? knownFast ? "official-standard-rate-credit-multiplier" : "official-standard-rate-credit-multiplier-tier-unknown"
+        ? `${codexAccounting.model(key) ? codexAccounting.VERSION : "official-standard-rate-credit-multiplier"}${knownFast ? "" : "-tier-unknown"}`
         : knownFast ? "official-rate" : "official-rate-tier-unknown",
   };
 }

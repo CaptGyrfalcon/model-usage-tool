@@ -3,6 +3,8 @@ dist/
 out/
 release/
 coverage/
+backups/
+__pycache__/
 _probe*.py
 *.log
 .DS_Store

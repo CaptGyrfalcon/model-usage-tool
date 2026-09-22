@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("widget", {
   getSnapshot: () => ipcRenderer.invoke("get-snapshot"),
   refresh: () => ipcRenderer.invoke("refresh"),
   refreshPricing: () => ipcRenderer.invoke("refresh-pricing"),
+  verification: (action) => ipcRenderer.invoke("codex-verification", action),
   getSettings: () => ipcRenderer.invoke("get-settings"),
   getWindowState: () => ipcRenderer.invoke("get-window-state"),
   getModelUsage: (range) => ipcRenderer.invoke("get-model-usage", range),

@@ -40,7 +40,7 @@ test("plan changes close the actual old cycle and retain its own capacity and cu
   conserved(month);
 });
 
-test("same-plan early resets remain separate and reuse that plan's estimate at zero percent", () => {
+test("same-plan early resets never borrow the previous cycle capacity at zero percent", () => {
   const oldStart = monthStart;
   const change = monthStart + 2 * 86400_000;
   const live = { ...windows[1], planType: "prolite", resetsAt: change + WEEK_MS,
@@ -48,11 +48,7 @@ test("same-plan early resets remain separate and reuse that plan's estimate at z
   const month = buildCodexMonthly({ windows: [live], shortLimit: "absent", now: change + 1000,
     samples: [{ ...sample(oldStart + WEEK_MS, 50, change - 1000), planType: "prolite" }],
     events: [event(oldStart + 1000, 5000)] });
-  assert.equal(month.cycles[0].endAt, change);
-  assert.equal(month.cycles[0].unusedCents, 5000);
-  assert.equal(month.weeklyRemainingCents, 10000);
-  assert.equal(month.currentStart, change);
-  conserved(month);
+  assert.equal(month, null);
 });
 
 test("small reset timestamp jitter does not create extra cycles or lose the final snapshot", () => {

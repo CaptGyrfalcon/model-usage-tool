@@ -95,7 +95,7 @@ function livePointsFromSnapshot(data, now = Date.now()) {
       source: "cursor",
       pool: "cursor-models",
       timestamp: at,
-      usedPercent: data.cursorModels.percentUsed,
+      usedPercent: data.cursorModels.officialPercentUsed ?? data.cursorModels.percentUsed,
       resetsAt: data.billingCycleEnd,
       startsAt: data.billingCycleStart,
     });
@@ -117,8 +117,8 @@ function livePointsFromSnapshot(data, now = Date.now()) {
     points.push({
       source: "codex",
       pool: `${window.slot || "window"}-${window.windowMinutes}`,
-      timestamp: at,
-      usedPercent: window.usedPercent,
+      timestamp: window.sampledAt ?? at,
+      usedPercent: window.officialUsedPercent ?? window.usedPercent,
       windowMinutes: window.windowMinutes,
       resetsAt: window.resetsAt,
     });

@@ -253,7 +253,7 @@ test("monthly pool shows the current window separately, capped by weekly availab
     return app.run('renderUsagePoolCard(testPool, "sphere")');
   };
   assert.match(render([short, weekly], "present"), /5h 可用<\/span><b>≈10\.00%/);
-  assert.match(render([weekly], "absent"), /本周可用<\/span><b>2(?:\.0)?%/);
+  assert.match(render([weekly], "absent"), /本周可用<\/span><b>2\.00%/);
   assert.match(render([weekly], "unknown"), /当前可用<\/span><b>待确认/);
   assert.match(render([short, { ...weekly, usedPercent: 100 }], "present"), /5h 可用<\/span><b>0\.00%/);
 });

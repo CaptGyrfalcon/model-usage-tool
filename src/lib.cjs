@@ -7,6 +7,9 @@ const { scanCodexUsage, codexPlanName } = require("./codex.cjs");
 const { refreshPricing, priceEvent, mergeFallbackCatalog } = require("./pricing.cjs");
 const { cursorEventKey } = require("./identity.cjs");
 const { buildQuotaInsights } = require("./quota-insights.cjs");
+const { estimateQuota } = require("./quota-estimate.cjs");
+const codexAccounting = require("./codex-accounting.cjs");
+const { getVerification } = require("./codex-verification.cjs");
 const { buildQuotaTimeline, livePointsFromSnapshot } = require("./quota-timeline.cjs");
 const { buildCodexMonthly, monthBounds, WEEK_MS } = require("./renderer/codex-monthly.js");
 const { flattenPricingSnapshot, summarizePricingSnapshot } = require("./pricing-table.cjs");
@@ -343,6 +346,7 @@ function costSummary(events) {
     cacheWriteCostCents: 0,
     cacheCostCents: 0,
     outputCostCents: 0,
+    reviewCostCents: 0,
     pricedEvents: 0,
     totalEvents: events.length,
   };
@@ -357,6 +361,7 @@ function costSummary(events) {
     summary.cacheWriteCostCents += num(event.cacheWriteCostCents);
     summary.cacheCostCents += num(event.cacheCostCents);
     summary.outputCostCents += num(event.outputCostCents);
+    if (String(event.eventKey).startsWith("codex:review-turn:")) summary.reviewCostCents += num(event.equivalentCostCents);
   }
   summary.coveragePercent = summary.totalEvents ? summary.pricedEvents / summary.totalEvents * 100 : 100;
   return summary;
@@ -478,7 +483,7 @@ function buildModelBreakdown(events, precision, autoBucketModels = []) {
       });
     }
     const group = groups.get(key);
-    group.count += Math.max(1, num(event.count) || 1);
+    group.count += eventCount([event]);
     group.reasoning += Math.max(0, num(event.reasoning));
     group.costCents += eventEquivalentCostCents(event);
     group.inputCostCents += num(event.inputCostCents);
@@ -710,7 +715,7 @@ function sumEventTokens(events) {
 }
 
 function eventCount(events) {
-  return events.reduce((sum, event) => sum + Math.max(1, num(event.count) || 1), 0);
+  return events.reduce((sum, event) => sum + (String(event.eventKey).startsWith("codex:review-turn:") ? 0 : Math.max(1, num(event.count) || 1)), 0);
 }
 
 function lastEventFromHistory(events) {
@@ -809,14 +814,16 @@ async function fetchCursorSnapshot(pricingSnapshot) {
   const otherPoolEvents = cycleEvents.filter((event) => event.pool === "other-models" || (!event.pool && !isCursorModel(event.model, autoBucketModels)));
   const cursorPoolEquivalent = costSummary(cursorPoolEvents);
   const otherPoolEquivalent = costSummary(otherPoolEvents);
-  const cursorPoolQuota = inferPoolQuota(cursorPoolEquivalent, autoPct);
+  const cursorPlanName = plan?.planInfo?.planName || summary?.membershipType || auth.membership || "Cursor";
+  const cursorCapacity = codexAccounting.cursorCapacity(summary?.membershipType) || codexAccounting.cursorCapacity(auth.membership) || codexAccounting.cursorCapacity(cursorPlanName);
+  const cursorPoolQuota = codexAccounting.dollarQuota(cursorCapacity,cursorPoolEquivalent.equivalentCostCents) || inferPoolQuota(cursorPoolEquivalent, autoPct);
   const otherPoolQuota = inferPoolQuota(otherPoolEquivalent, apiPct, includedLimit);
   const todayEquivalent = costSummary(todayEvents);
 
   return {
     fetchedAt: now,
     email: me?.email || auth.email,
-    planName: plan?.planInfo?.planName || summary?.membershipType || auth.membership || "Cursor",
+    planName: cursorPlanName,
     planPrice: plan?.planInfo?.price || null,
     unlimited: Boolean(summary?.isUnlimited),
     billingCycleStart: cycleStart,
@@ -825,8 +832,9 @@ async function fetchCursorSnapshot(pricingSnapshot) {
     displayMessage: period?.displayMessage || null,
     totalPercentUsed: totalPct,
     cursorModels: {
-      name: "Cursor 模型", hint: "Grok / Composer", percentUsed: autoPct,
-      percentRemaining: Math.max(0, 100 - autoPct),
+      name: "Cursor 模型", hint: "Grok / Composer", percentUsed: cursorPoolQuota.percentUsed ?? autoPct,
+      percentRemaining: cursorPoolQuota.percentRemaining ?? Math.max(0, 100 - autoPct),
+      officialPercentUsed: autoPct,
       message: period?.autoModelSelectedDisplayMessage || summary?.autoModelSelectedDisplayMessage || null,
       tokens: decorateTokens(cursorTokens),
       apiEquivalent: cursorPoolEquivalent,
@@ -930,6 +938,9 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
   try {
     history.quarantineCodexQuotaSamples(scan.excludedQuotaSamples);
     for (const sample of scan.quotaSamples || []) history.saveQuotaSample(sample);
+    if (!scan.scanErrors?.length && scan.files > 0 && !history.loadCache("codex-provenance-samples-v1")) {
+      history.saveCache("codex-provenance-samples-v1", { at: now });
+    }
     history.db.exec("COMMIT");
   } catch (error) { history.db.exec("ROLLBACK"); throw error; }
   history.upsertEvents(scan.events.map((event) => {
@@ -942,44 +953,42 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
     ) priced.pricingStatus = `first-import-${priced.pricingStatus}`;
     return { ...event, ...priced };
   }));
+  if (!scan.scanErrors?.length) history.applyCodexAccounting(pricingSnapshot);
   history.unifyCodexDollarEquivalent();
-  const rate = scan.rateLimit;
+  const rate = getVerification().displayRate(now) || scan.rateLimit;
   const sampledRateWindows = codexRateWindows(rate);
   const rateWindows = sampledRateWindows.map((window) => currentCodexRateWindow(window, now));
   const usageWindow = rateWindows
     .slice()
     .sort((a, b) => Number(a.windowMinutes) - Number(b.windowMinutes))[0] || null;
-  for (const window of sampledRateWindows) {
-    history.saveQuotaSample({
-      source: "codex",
-      pool: `${window.slot || "window"}-${window.windowMinutes}`,
-      timestamp: rate.timestamp || now,
-      usedPercent: window.usedPercent,
-      windowMinutes: window.windowMinutes,
-      resetsAt: window.resetsAt,
-      planType: rate.planType || scan.planType,
-    });
-  }
+  // Persist only source observations above. A merged display snapshot can carry
+  // older windows and must never be written back with its newest timestamp.
   const periodStart = usageWindow?.expired
     ? usageWindow.expiredAt
     : codexPeriodStart({ primary: usageWindow }, now);
   const periodEvents = history.getEvents({ sources: "codex", start: periodStart, end: now + 60_000 });
+  const quotaSamples = history.getQuotaSamples({ source: "codex", end: (rate?.timestamp || now) + 1 });
   const quotaWindows = rateWindows.map((window) => {
     const start = window.expired ? window.expiredAt : codexPeriodStart({ primary: window }, now);
-    const events = history.getEvents({ sources: "codex", start, end: Math.min(now + 1, (rate.timestamp || now) + 1) });
+    const sampledAt = window.sampledAt ?? rate?.timestamp ?? now;
+    const events = history.getEvents({ sources: "codex", start, end: now + 1 });
     const quotaEquivalent = quotaCostSummary(events);
-    const ratio = Number(window.usedPercent) > 0 ? Number(window.usedPercent) / 100 : null;
+    const estimate = estimateQuota({ samples: quotaSamples, events, window,
+      sampledAt: Math.min(now, sampledAt), planType: window.planType || rate?.planType || scan.planType });
+    const dollarQuota = codexAccounting.quota(window, window.planType || rate?.planType || scan.planType, quotaEquivalent.equivalentCostCents);
     return {
       ...window,
+      officialUsedPercent: window.usedPercent,
+      ...(dollarQuota ? {usedPercent:dollarQuota.percentUsed,percentRemaining:dollarQuota.percentRemaining} : {}),
       planType: rate.planType || scan.planType,
       name: quotaWindowLabel(window.windowMinutes),
       speedUsage: speedUsageSummary(events, { quota: true }),
       quotaEstimate: {
         usedCents: quotaEquivalent.equivalentCostCents,
-        inferredTotalCents: ratio ? quotaEquivalent.equivalentCostCents / ratio : null,
-        inferredTotalLowCents: ratio ? quotaEquivalent.equivalentCostLowCents / ratio : null,
-        inferredTotalHighCents: ratio ? quotaEquivalent.equivalentCostHighCents / ratio : null,
-        packageTotalSource: "usage-percent",
+        ...estimate,
+        inferredRemainingCents: estimate.inferredTotalCents == null ? null
+          : Math.max(0, estimate.inferredTotalCents - quotaEquivalent.equivalentCostCents),
+        ...dollarQuota,
       },
     };
   });
@@ -993,17 +1002,15 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
   const minuteEvents = trendEvents.filter((event) => event.timestamp >= now - 5 * 60_000);
   const periodEquivalent = costSummary(periodEvents);
   const periodQuotaEquivalent = quotaCostSummary(periodEvents);
-  const usedPercent = usageWindow?.usedPercent;
-  const ratio = Number(usedPercent) > 0 ? Number(usedPercent) / 100 : null;
-  const totalEquivalent = ratio ? periodEquivalent.equivalentCostCents / ratio : null;
-  const totalLow = ratio ? periodEquivalent.equivalentCostLowCents / ratio : null;
-  const totalHigh = ratio ? periodEquivalent.equivalentCostHighCents / ratio : null;
-  const quotaTotal = ratio ? periodQuotaEquivalent.equivalentCostCents / ratio : null;
-  const quotaTotalLow = ratio ? periodQuotaEquivalent.equivalentCostLowCents / ratio : null;
-  const quotaTotalHigh = ratio ? periodQuotaEquivalent.equivalentCostHighCents / ratio : null;
+  const totalEquivalent = activeQuota?.quotaEstimate?.inferredTotalCents ?? null;
+  const totalLow = activeQuota?.quotaEstimate?.inferredTotalLowCents ?? null;
+  const totalHigh = activeQuota?.quotaEstimate?.inferredTotalHighCents ?? null;
+  const quotaTotal = totalEquivalent;
+  const quotaTotalLow = totalLow;
+  const quotaTotalHigh = totalHigh;
   const tierEvidence = periodEvents.reduce((counts, event) => {
     const key = event.tierSource === "response" ? "response" : event.tierSource ? "local" : "unknown";
-    counts[key] += Math.max(1, num(event.count) || 1);
+    counts[key] += eventCount([event]);
     return counts;
   }, { response: 0, local: 0, unknown: 0 });
   return {
@@ -1039,16 +1046,18 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
       inferredTotalCents: totalEquivalent,
       inferredTotalLowCents: totalLow,
       inferredTotalHighCents: totalHigh,
-      inferredRemainingCents: totalEquivalent == null ? null : Math.max(0, totalEquivalent - periodEquivalent.equivalentCostCents),
+      inferredRemainingCents: activeQuota?.quotaEstimate?.inferredRemainingCents ?? null,
     },
     quotaEquivalent: {
       ...periodQuotaEquivalent,
       inferredTotalCents: quotaTotal,
       inferredTotalLowCents: quotaTotalLow,
       inferredTotalHighCents: quotaTotalHigh,
-      inferredRemainingCents: quotaTotal == null ? null : Math.max(0, quotaTotal - periodQuotaEquivalent.equivalentCostCents),
+      inferredRemainingCents: activeQuota?.quotaEstimate?.inferredRemainingCents ?? null,
     },
     tierEvidence,
+    accounting: { version: codexAccounting.VERSION, note: codexAccounting.NOTE },
+    quotaOrigin: rate?.origin || "session-log",
     costAvailable: periodEquivalent.pricedEvents > 0,
     dedupe: codexDedupe,
   };
@@ -1126,6 +1135,7 @@ function getTrendUsage(payload, now = Date.now(), history = getHistory()) {
 }
 
 async function fetchSnapshot({ forcePricing = false } = {}) {
+  await getVerification().tick();
   const now = Date.now();
   const history = getHistory();
   const pricingResult = await refreshPricing(history, { force: forcePricing, now });
@@ -1189,6 +1199,8 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
   if (codex) {
     const start = monthBounds(now).startAt - WEEK_MS;
     codex.monthlyQuota = buildCodexMonthly({
+      capacitiesByPlan: { plus: 10000, prolite: 50000, pro: 200000, pro5x:50000, pro20x:200000 },
+      dollarBased: true,
       windows: codex.quota?.windows,
       shortLimit: codex.quota?.shortLimit,
       samples: history.getQuotaSamples({ source: "codex", start, end: now + 1 }),
@@ -1247,6 +1259,7 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
     ...base,
     fetchedAt: now,
     codex,
+    verification: getVerification().status(),
     modelUsage: getModelUsage(loadSettings().modelRange, now),
     combined: {
       tokens: {
@@ -1303,7 +1316,7 @@ function getPricingCatalog({ snapshotId = null, source = "all" } = {}) {
   const selected = snapshotId == null
     ? mergeFallbackCatalog(history.latestPricingSnapshot())
     : history.pricingSnapshot(snapshotId);
-  const current = selected || mergeFallbackCatalog(history.latestPricingSnapshot());
+  const current = codexAccounting.catalog(selected || mergeFallbackCatalog(history.latestPricingSnapshot()));
   return {
     snapshots,
     selectedId: current?.id ?? null,

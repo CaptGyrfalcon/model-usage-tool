@@ -21,8 +21,11 @@ function remainingCents(pool) {
   if (leftover != null) return Math.max(0, leftover);
   const remaining = finite(pool.percentRemaining);
   const total = finite(estimate.inferredTotalCents);
-  if (total != null && remaining != null) return Math.max(0, total * Math.max(0, Math.min(100, remaining)) / 100);
   const used = finite(estimate.usedCents);
+  // A converged capacity can stay fixed while the integer percentage is flat.
+  // Use request-level consumption so the dollar balance still advances.
+  if (total != null && used != null) return Math.max(0, total - used);
+  if (total != null && remaining != null) return Math.max(0, total * Math.max(0, Math.min(100, remaining)) / 100);
   const usedPct = finite(pool.percentUsed);
   if (used != null && usedPct > 0 && remaining != null) return Math.max(0, used / usedPct * remaining);
   const included = finite(pool.includedCents?.remaining);

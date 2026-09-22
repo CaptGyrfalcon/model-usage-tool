@@ -18,7 +18,8 @@ function monthBounds(now = Date.now()) {
 
 // Use a snapshot only from inside the requested interval, then add subsequent
 // recorded costs. A snapshot after the cutoff cannot reveal pre-cutoff usage.
-function historicalConsumption(samples, events, start, end, cycleEnd, capacity) {
+function historicalConsumption(samples, events, start, end, cycleEnd, capacity, dollarBased = false) {
+  if (dollarBased) samples = [];
   const sample = samples.filter((item) => item.source === "codex" && Number(item.windowMinutes) === 10080
     && Math.abs(Number(item.resetsAt) - cycleEnd) <= RESET_TOLERANCE_MS && item.timestamp >= start && item.timestamp < end
     && number(item.usedPercent) != null).sort((a, b) => b.timestamp - a.timestamp)[0];
@@ -93,7 +94,7 @@ function capacityFromCycle(samples, events, cycle) {
 
 // Calendar-month planning estimate: full intersecting weeks, less consumption
 // already spent before this month in the first overlapping week.
-function buildCodexMonthly({ windows = [], shortLimit = "unknown", samples = [], events = [], now = Date.now() } = {}) {
+function buildCodexMonthly({ windows = [], shortLimit = "unknown", samples = [], events = [], capacitiesByPlan = {}, dollarBased = false, now = Date.now() } = {}) {
   const weekly = windows.find((item) => Number(item.windowMinutes) === 10080);
   const short = shortLimit === "absent" ? null : windows.find((item) => Number(item.windowMinutes) === 300);
   const shortLimitState = shortLimit === "absent" ? "absent" : short ? "present" : "unknown";
@@ -103,10 +104,6 @@ function buildCodexMonthly({ windows = [], shortLimit = "unknown", samples = [],
   const { startAt, endAt } = monthBounds(now);
   const currentStart = reset - WEEK_MS;
   const observed = observedCycles(samples, weekly, now, startAt, endAt);
-  if (!(weeklyCapacity > 0) && weekly.planType) {
-    const previous = observed.filter((c) => c.endAt <= currentStart && c.planType === weekly.planType).reverse();
-    weeklyCapacity = previous.map((c) => capacityFromCycle(samples, events, c)).find((value) => value > 0);
-  }
   if (!(weeklyCapacity > 0)) return null;
   const weeklyUsed = number(weekly.usedPercent) ?? (number(weekly.percentRemaining) == null ? null : 100 - number(weekly.percentRemaining));
   if (weeklyUsed == null) return null;
@@ -120,16 +117,16 @@ function buildCodexMonthly({ windows = [], shortLimit = "unknown", samples = [],
     let evidence = "missing";
     const state = end <= now ? "completed" : start <= now ? "current" : "future";
     const capacity = state === "completed" && planType
-      ? capacityFromCycle(samples, events, observedCycle) : weeklyCapacity;
+      ? (capacitiesByPlan[planType] ?? capacityFromCycle(samples, events, observedCycle)) : weeklyCapacity;
     // An old plan with no usable price evidence has no defensible dollar total.
     if (!(capacity > 0)) return null;
     if (state === "current") { usedCents = weeklyCapacity * percent(weeklyUsed) / 100; evidence = "live"; }
     if (state === "future") { usedCents = 0; evidence = "projected"; }
     if (state === "completed") {
-      ({ usedCents, knownUsedCents, unpricedCount, unknownReason, evidence } = historicalConsumption(samples, events, start, end, resetAt, capacity));
+      ({ usedCents, knownUsedCents, unpricedCount, unknownReason, evidence } = historicalConsumption(samples, events, start, end, resetAt, capacity, dollarBased));
     }
     knownUsedCents = usedCents ?? knownUsedCents;
-    const previous = start < startAt ? historicalConsumption(samples, events, start, startAt, resetAt, capacity) : null;
+    const previous = start < startAt ? historicalConsumption(samples, events, start, startAt, resetAt, capacity, dollarBased) : null;
     // Remove the same amount from capacity and usage. Remaining water and
     // expired/unknown balances are unchanged, so prior-month use is not charged twice.
     const previousMonthUsedCents = Math.min(previous?.knownUsedCents || 0, knownUsedCents);

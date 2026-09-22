@@ -3556,3 +3556,9 @@ body.fullscreen .source-health, body.fullscreen .smart-setting-row { font-size: 
 .fullscreen .model-donut-legend-row small { font-size: 13px; }
 .fullscreen .model-donut-legend-row strong { font-size: 18px; }
 @media (max-width: 850px) { .fullscreen .model-donut-content { grid-template-columns: 1fr; } }
+/* Account sampling controls wrap cleanly in the compact dashboard. */
+.detail-card.verification-card { display: block; margin-top: 12px; }
+.detail-card.verification-card p { color: var(--muted, #a3acc0); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.verification-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.verification-actions button { border: 1px solid rgba(140,155,190,.3); border-radius: 8px; padding: 8px 12px; background: rgba(120,145,200,.12); color: inherit; cursor: pointer; }
+.verification-actions button:disabled { opacity: .45; cursor: default; }

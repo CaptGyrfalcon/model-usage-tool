@@ -7,6 +7,26 @@ const { UsageHistory } = require("../src/history.cjs");
 const { CodexUsageScanner, mergeRateLimitSnapshots } = require("../src/codex.cjs");
 const { DatabaseSync } = require("node:sqlite");
 
+test("unknown tier history collapses to standard cost without changing known Fast or tier evidence", () => {
+  class FixtureHistory extends UsageHistory { migrateLegacyHistory() {} }
+  const history = new FixtureHistory(":memory:");
+  try {
+    const base = { source: "codex", model: "gpt-6-astra", timestamp: 1000,
+      equivalentCostCents: 10, equivalentCostLowCents: 10, equivalentCostHighCents: 25,
+      quotaEquivalentCostCents: 10, quotaEquivalentCostLowCents: 10, quotaEquivalentCostHighCents: 25,
+      pricingStatus: "official-standard-rate-credit-multiplier-tier-unknown" };
+    history.upsertEvents([{ ...base, eventKey: "unknown", fastKnown: false },
+      { ...base, eventKey: "fast", fastKnown: true, fast: true }]);
+    assert.equal(Number(history.normalizeUnknownTierCosts()), 1);
+    const unknown = history.getEvent("codex", "unknown");
+    assert.equal(unknown.equivalentCostHighCents, 10);
+    assert.equal(unknown.quotaEquivalentCostHighCents, 10);
+    assert.equal(unknown.fastKnown, false);
+    assert.equal(history.getEvent("codex", "fast").quotaEquivalentCostHighCents, 25);
+    assert.equal(Number(history.normalizeUnknownTierCosts()), 0);
+  } finally { history.close(); }
+});
+
 test("preserves both sides of a reset inside five minutes and supersedes legacy mixed-pool samples", () => {
   class FixtureHistory extends UsageHistory { migrateLegacyHistory() {} }
   const history = new FixtureHistory(":memory:");
@@ -103,8 +123,8 @@ test("extracts Codex token metadata without reading message bodies", () => {
           last_token_usage: { input_tokens: 100, cached_input_tokens: 60, output_tokens: 20, reasoning_output_tokens: 8, total_tokens: 120 },
         },
         rate_limits: {
-          primary: { used_percent: 25, window_minutes: 300, resets_at: 1_800_000_000 },
-          secondary: { used_percent: 8, window_minutes: 10_080, resets_at: 1_800_600_000 },
+          primary: { used_percent: 25, window_minutes: 300, resets_at: Date.parse("2026-08-24T05:00:00Z") / 1000 },
+          secondary: { used_percent: 8, window_minutes: 10_080, resets_at: Date.parse("2026-08-31T00:00:00Z") / 1000 },
           plan_type: "plus",
         },
       },
@@ -295,7 +315,7 @@ test("full weekly-only snapshots remove a stale 5h window, while partial respons
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-no-short-"));
   fs.mkdirSync(path.join(temp, "sessions"));
   const file = path.join(temp, "sessions", "rollout-quota.jsonl");
-  const weekly = { window_minutes: 10080, used_percent: 30, resets_at: 1800600000 };
+  const weekly = { window_minutes: 10080, used_percent: 30, resets_at: Date.parse("2026-09-14T00:00:00Z") / 1000 };
   const record = (limits) => JSON.stringify({ timestamp: "2026-09-07T00:00:00Z", type: "event_msg", payload: { type: "token_count", rate_limits: limits } });
   try {
     fs.writeFileSync(file, record({ plan_type: "pro", primary: null, secondary: weekly }) + "\n");
@@ -353,8 +373,8 @@ test("reprices events that were stored before a model entered the catalog", () =
     const priced = priceEvent(unpriced[0], builtInSnapshot(1));
     history.upsertEvents([{ ...unpriced[0], ...priced, pricingSnapshotId: 2 }]);
     const row = history.getEvents({ start: 0, end: 2_000 })[0];
-    assert.equal(row.equivalentCostCents, 150);
-    assert.equal(row.quotaEquivalentCostCents, 150);
+    assert.equal(row.equivalentCostCents, 225);
+    assert.equal(row.quotaEquivalentCostCents, 225);
     assert.equal(row.pricingSnapshotId, 2);
     assert.notEqual(row.pricingStatus, "unavailable");
     history.close();

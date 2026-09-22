@@ -52,17 +52,17 @@ public sealed class QuotaRow { public string label; public QuotaMeter[] meters; 
 public sealed class QuotaData { public bool stale; public double? sampledAt; public QuotaRow[] rows; public bool? secondary; }
 
 internal static class MeterLayout {
-    internal const int Width = 376;
+    internal const int Width = 448;
     internal const int Height = 44;
     internal const float NameLeft = 7f;
-    internal const float NameWidth = 43f;
-    internal const float MeterLeft = 51f;
+    internal const float NameWidth = 49f;
+    internal const float MeterLeft = 57f;
     internal const float RightPad = 7f;
-    internal const float ValueWidth = 112f;
+    internal const float ValueWidth = 136f;
     internal const float MeterGap = 5f;
     internal const float ValueGap = 6f;
-    internal const float MinMoneyWidth = 52f;
-    internal const float BarHeight = 3f;
+    internal const float MinMoneyWidth = 70f;
+    internal const float BarHeight = 4f;
     internal static float Segment(float width, int meters, float scale) {
         return (width - MeterLeft * scale - RightPad * scale) / Math.Max(1, meters);
     }
@@ -165,7 +165,7 @@ internal sealed class MeterControl : Control {
         return rowLabel == "Codex" ? meter.label + " " : "";
     }
     private static string Percent(QuotaMeter meter) {
-        return meter.value.HasValue ? Math.Max(0, Math.Min(100, meter.value.Value)).ToString("0.#") + "%" : "—";
+        return meter.value.HasValue ? Math.Max(0, Math.Min(100, meter.value.Value)).ToString("0.00") + "%" : "—";
     }
     private static string Money(QuotaMeter meter) {
         if (!meter.remainingCents.HasValue) return "";
@@ -231,8 +231,8 @@ internal sealed class MeterControl : Control {
         var fg = SystemInformation.HighContrast ? SystemColors.ControlText : light ? Color.FromArgb(35,35,35) : Color.FromArgb(242,242,242);
         var track = SystemInformation.HighContrast ? SystemColors.GrayText : light ? Color.FromArgb(210,210,210) : Color.FromArgb(77,77,77);
         float rowHeight = (Height - 4*scale) / 3f;
-        using (var nameFont = new Font("Segoe UI", 9.5f * scale, FontStyle.Regular, GraphicsUnit.Pixel))
-        using (var valueFont = new Font("Microsoft YaHei UI", 8.5f * scale, FontStyle.Regular, GraphicsUnit.Pixel))
+        using (var nameFont = new Font("Segoe UI", 10.5f * scale, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (var valueFont = new Font("Microsoft YaHei UI", 10.5f * scale, FontStyle.Bold, GraphicsUnit.Pixel))
         using (var text = new SolidBrush(fg))
         using (var format = new StringFormat { LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter }) {
             var cells = new List<MeterCell>();
