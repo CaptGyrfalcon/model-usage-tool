@@ -1,0 +1,14 @@
+.tabs { grid-template-columns: repeat(7, minmax(58px, 1fr)); overflow-x: auto; }
+.tab { flex-shrink: 0; }
+.receipt-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+.receipt-controls label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; }
+.receipt-controls input, .receipt-controls select, .receipt-controls button { color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); padding: 9px 10px; border-radius: 7px; font: inherit; color-scheme: dark; }
+.receipt-controls input, .receipt-controls select, .receipt-controls button { height: 38px; box-sizing: border-box; font-size: 12px; }
+.receipt-controls button { cursor: pointer; }
+.receipt-controls #receiptSave { background: var(--mint); color: #15261c; }
+.receipt-controls button:disabled { opacity: .45; cursor: default; }
+#receiptStatus { color: var(--muted); font-size: 11px; min-height: 1.4em; margin: 12px 0; }
+#receiptCanvas { width: 100%; max-width: 780px; height: auto; margin: 0 auto; display: block; border-radius: 3px; }
+#receiptCanvas[hidden] { display: none; }
+.receipt-details { max-width: 780px; margin: 15px auto; color: var(--muted); font-size: 11px; }
+.receipt-details pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }

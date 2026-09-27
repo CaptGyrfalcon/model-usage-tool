@@ -34,6 +34,7 @@ internal static class NativeTaskbar {
     [DllImport("user32.dll")] internal static extern IntPtr GetWindowDpiAwarenessContext(IntPtr hwnd);
     [DllImport("user32.dll")] internal static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] internal static extern int GetWindowLong(IntPtr hwnd, int index);
+    [DllImport("kernel32.dll")] internal static extern uint GetCurrentProcessId();
     [StructLayout(LayoutKind.Sequential)] internal struct Point { public int X,Y; public Point(int x,int y) { X=x; Y=y; } }
     [StructLayout(LayoutKind.Sequential)] internal struct Size { public int Width,Height; public Size(int w,int h) { Width=w; Height=h; } }
     [StructLayout(LayoutKind.Sequential, Pack=1)] internal struct Blend { public byte Op,Flags,Alpha,Format; }
@@ -313,10 +314,10 @@ internal sealed class TaskbarPane {
     internal Task<List<Rectangle>> scan;
     internal IntPtr scanShell;
     internal List<Rectangle> occupied;
-    internal DateTime scannedAt = DateTime.MinValue, nextScan = DateTime.MinValue;
+    internal DateTime scannedAt = DateTime.MinValue, nextScan = DateTime.MinValue, lastScanStarted = DateTime.MinValue;
     internal uint currentDpi;
     internal string lastStatus;
-    internal void InvalidateScan() { nextScan = DateTime.MinValue; }
+    internal void InvalidateScan() { nextScan = lastScanStarted.AddSeconds(2); }
     internal void DisposeMeter() { if (meter != null) { meter.Dispose(); meter = null; } }
 }
 
@@ -338,7 +339,7 @@ internal sealed class TaskbarHost : ApplicationContext {
         });
         Task.Run(() => {
             try {
-                using (var events = new QuotaTaskbarEvents((uint)Process.GetCurrentProcess().Id)) {
+                using (var events = new QuotaTaskbarEvents(NativeTaskbar.GetCurrentProcessId())) {
                     while (!stopped) { events.Wait(); if (!stopped) dispatcher.BeginInvoke((Action)(() => { foreach (var pane in panes.Values) pane.InvalidateScan(); Tick(); })); }
                 }
             } catch (Exception) { /* The timer still handles Explorer recovery. */ }
@@ -346,9 +347,10 @@ internal sealed class TaskbarHost : ApplicationContext {
         timer.Interval=1000; timer.Tick += (s,e) => Tick(); timer.Start();
         Tick();
     }
-    // UI Automation runs off the UI thread: a stalled shell provider cannot
-    // freeze painting, stdin handling, shutdown or the visibility safety check.
-    private static List<Rectangle> ScanButtons(IntPtr bar) {
+    // UI Automation retains native resources after FindAll even when the managed
+    // elements are collected. Keep it in a short-lived process so every scan
+    // releases those resources without restarting the visible taskbar control.
+    private static List<Rectangle> ScanButtonsLocal(IntPtr bar, int helperPid) {
         var root = AutomationElement.FromHandle(bar);
         var elements = root.FindAll(TreeScope.Descendants, new OrCondition(
             new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button),
@@ -356,15 +358,46 @@ internal sealed class TaskbarHost : ApplicationContext {
             new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.ListItem),
             new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.MenuItem)));
         var result = new List<Rectangle>();
-        int pid = Process.GetCurrentProcess().Id;
         foreach (AutomationElement item in elements) {
             var current = item.Current;
-            if (current.ProcessId == pid || current.IsOffscreen) continue;
+            if (current.ProcessId == helperPid || current.IsOffscreen) continue;
             var r = current.BoundingRectangle;
             if (!r.IsEmpty && r.Width > 0 && r.Height > 0) result.Add(Rectangle.FromLTRB((int)Math.Floor(r.Left),(int)Math.Floor(r.Top),(int)Math.Ceiling(r.Right),(int)Math.Ceiling(r.Bottom)));
         }
         if (result.Count == 0) throw new InvalidOperationException("Taskbar buttons are not exposed yet");
         return result;
+    }
+    internal static int RunScanWorker(IntPtr bar, int helperPid) {
+        try {
+            foreach (var r in ScanButtonsLocal(bar, helperPid))
+                Console.WriteLine(string.Format(CultureInfo.InvariantCulture, "{0},{1},{2},{3}", r.Left, r.Top, r.Right, r.Bottom));
+            return 0;
+        } catch (Exception) { return 1; }
+    }
+    private static List<Rectangle> ScanButtons(IntPtr bar) {
+        var start = new ProcessStartInfo(Application.ExecutablePath, "--scan " + bar.ToInt64().ToString(CultureInfo.InvariantCulture)
+            + " " + NativeTaskbar.GetCurrentProcessId().ToString(CultureInfo.InvariantCulture)) {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true
+        };
+        using (var worker = Process.Start(start)) {
+            if (worker == null) throw new InvalidOperationException("Cannot start taskbar scan worker");
+            var output = worker.StandardOutput.ReadToEndAsync();
+            if (!worker.WaitForExit(5000)) {
+                worker.Kill();
+                throw new TimeoutException("Taskbar button scan timed out");
+            }
+            if (worker.ExitCode != 0) throw new InvalidOperationException("Taskbar buttons are not exposed yet");
+            var result = new List<Rectangle>();
+            foreach (var line in output.Result.Split(new[] {'\r', '\n'}, StringSplitOptions.RemoveEmptyEntries)) {
+                var fields = line.Split(',');
+                if (fields.Length != 4) throw new FormatException("Invalid taskbar scan result");
+                result.Add(Rectangle.FromLTRB(
+                    int.Parse(fields[0], CultureInfo.InvariantCulture), int.Parse(fields[1], CultureInfo.InvariantCulture),
+                    int.Parse(fields[2], CultureInfo.InvariantCulture), int.Parse(fields[3], CultureInfo.InvariantCulture)));
+            }
+            if (result.Count == 0) throw new InvalidOperationException("Taskbar buttons are not exposed yet");
+            return result;
+        }
     }
     internal static Rectangle FindSlot(Rectangle bar, Rectangle tray, IList<Rectangle> buttons, int width, int height, int gap) {
         if (bar.Height < height || bar.Height > bar.Width) return Rectangle.Empty;
@@ -452,7 +485,7 @@ internal sealed class TaskbarHost : ApplicationContext {
         NativeTaskbar.SetThreadDpiAwarenessContext(NativeTaskbar.GetWindowDpiAwarenessContext(bar));
         if (bar != pane.shell || pane.currentDpi != NativeTaskbar.GetDpiForWindow(bar) || pane.meter == null || !pane.meter.IsHandleCreated || !NativeTaskbar.IsWindow(pane.meter.Handle)) {
             pane.DisposeMeter();
-            pane.shell=bar; pane.occupied=null; pane.scannedAt=DateTime.MinValue; pane.nextScan=DateTime.MinValue;
+            pane.shell=bar; pane.occupied=null; pane.scannedAt=DateTime.MinValue; pane.nextScan=DateTime.MinValue; pane.lastScanStarted=DateTime.MinValue;
             pane.currentDpi=NativeTaskbar.GetDpiForWindow(bar);
             float scale=pane.currentDpi/96f;
             pane.meter=new MeterControl(bar,scale);
@@ -470,7 +503,7 @@ internal sealed class TaskbarHost : ApplicationContext {
         }
         if (pane.scan == null && DateTime.UtcNow >= pane.nextScan) {
             pane.scanShell=pane.shell; var target=pane.shell;
-            pane.scan=Task.Run(() => ScanButtons(target)); pane.nextScan=DateTime.UtcNow.AddSeconds(2);
+            pane.scan=Task.Run(() => ScanButtons(target)); pane.lastScanStarted=DateTime.UtcNow; pane.nextScan=pane.lastScanStarted.AddSeconds(2);
         }
         NativeTaskbar.Rect b,client;
         if (!NativeTaskbar.IsWindowVisible(bar) || !NativeTaskbar.GetWindowRect(bar,out b) || !NativeTaskbar.GetClientRect(bar,out client)) { Hide(pane, "taskbar-hidden"); return; }
@@ -501,6 +534,9 @@ internal static class TaskbarProgram {
     [STAThread] private static int Main(string[] args) {
         try {
             Console.InputEncoding = new UTF8Encoding(false); Console.OutputEncoding = new UTF8Encoding(false);
+            if (args.Length == 3 && args[0] == "--scan")
+                return TaskbarHost.RunScanWorker(new IntPtr(long.Parse(args[1], CultureInfo.InvariantCulture)),
+                    int.Parse(args[2], CultureInfo.InvariantCulture));
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new TaskbarHost(int.Parse(args[0]))); return 0;

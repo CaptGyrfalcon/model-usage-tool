@@ -5,11 +5,41 @@ const {priceEvent,builtInSnapshot}=require('../src/pricing.cjs');
 const {UsageHistory}=require('../src/history.cjs');
 const accounting=require('../src/codex-accounting.cjs');
 const {Verification,queryAccount}=require('../src/codex-verification.cjs');
+
+test('September 27 catalog and historical migration agree for all six models and both speeds',()=>{
+ const expected=[['gpt-6-astra',15,1.5,75,2.5],['gpt-6-sol',3,.3,15,2.5],
+  ['gpt-6-luna',.25,.025,1.25,2.5],['gpt-5.6-sol',4.4,.44,22,2.5],
+  ['gpt-5.6-terra',3.5,.35,21,2],['gpt-5.6-luna',.35,.035,2.1,2]];
+ const snapshot=builtInSnapshot();
+ for(const [name] of expected)snapshot.modelsBySource.codex[name].standard.short={input:99,cacheRead:99,cacheWrite:99,output:99};
+ const catalog=accounting.catalog(snapshot);
+ assert.deepEqual(catalog.modelsBySource.cursor,snapshot.modelsBySource.cursor);
+ const h=new UsageHistory(':memory:');
+ try {
+  for(const [name,input,cacheRead,output,multiplier] of expected){
+   for(const fast of [false,true]){
+    const event={source:'codex',eventKey:name+fast,timestamp:1000,model:name,input:100000,
+     cacheRead:200000,cacheWrite:0,output:10000,fast,fastKnown:true,equivalentCostCents:999,pricingStatus:'old'};
+    h.upsertEvents([event]);
+    const factor=fast?multiplier:1, tier=catalog.modelsBySource.codex[name][fast?'fast':'standard'].short;
+    for(const [key,value] of Object.entries({input,cacheRead,output}))assert.ok(Math.abs(tier[key]-value*factor)<1e-10);
+    const cost=(input*.1+cacheRead*.2+output*.01)*100*factor;
+    assert.ok(Math.abs(priceEvent(event,snapshot).equivalentCostCents-cost)<1e-9);
+   }
+  }
+  h.applyCodexAccounting(snapshot);
+  for(const [name,input,cacheRead,output,multiplier] of expected)for(const fast of [false,true]){
+   const row=h.getEvent('codex',name+fast),cost=(input*.1+cacheRead*.2+output*.01)*100*(fast?multiplier:1);
+   assert.ok(Math.abs(row.equivalentCostCents-cost)<1e-9);
+   assert.equal(row.input,100000);assert.equal(row.cacheRead,200000);assert.equal(row.fast,fast);
+  }
+ } finally {h.close();}
+});
 test('fixed Luna hypothesis survives catalog refresh; Cursor is isolated; Fast evidence retained',()=>{
  const event={source:'codex',model:'gpt-5.6-luna',input:1e6,cacheRead:1e6,output:1e6,fast:true,fastKnown:false};
  const normal=priceEvent(event,{models:{'gpt-5.6-luna':{standard:{short:{input:99,output:99}}}}});
- assert.ok(Math.abs(normal.equivalentCostCents-236.6666666667)<1e-7);
- assert.ok(Math.abs(priceEvent({...event,fastKnown:true},null).equivalentCostCents-normal.equivalentCostCents*2.5)<1e-7);
+ assert.ok(Math.abs(normal.equivalentCostCents-248.5)<1e-7);
+ assert.ok(Math.abs(priceEvent({...event,fastKnown:true},null).equivalentCostCents-normal.equivalentCostCents*2)<1e-7);
  assert.equal(priceEvent({...event,source:'cursor',fast:false,fastKnown:true},builtInSnapshot()).equivalentCostCents,142);
  const q=accounting.quota({windowMinutes:10080,usedPercent:78},'prolite',999);
  assert.equal(q.inferredRemainingCents,49001);assert.equal(q.localEstimatedCostCents,999);
@@ -48,7 +78,7 @@ test('accounting migration backs up, preserves tokens and Cursor prices, and is 
  h=new UsageHistory(path.join(dir,'history.sqlite'));
  h.upsertEvents(['codex','cursor'].map(source=>({source,eventKey:'original',timestamp:1234,model:'gpt-5.6-luna',input:0,output:1e6,equivalentCostCents:120,pricingStatus:'old'})));
  h.applyCodexAccounting(builtInSnapshot());h.applyCodexAccounting(builtInSnapshot());
- assert.equal(h.getEvent('codex','original').equivalentCostCents,200);
+ assert.equal(h.getEvent('codex','original').equivalentCostCents,210);
  assert.equal(h.getEvent('codex','original').output,1e6);
  assert.equal(h.getEvent('cursor','original').equivalentCostCents,120);
  assert.equal(fs.readdirSync(dir).filter(n=>n.includes('before-codex')).length,1);

@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("widget", {
   getSettings: () => ipcRenderer.invoke("get-settings"),
   getWindowState: () => ipcRenderer.invoke("get-window-state"),
   getModelUsage: (range) => ipcRenderer.invoke("get-model-usage", range),
+  getReceipt: (payload) => ipcRenderer.invoke("get-receipt", payload),
+  saveReceipt: (payload) => ipcRenderer.invoke("save-receipt", payload),
   getTrendUsage: (payload) => ipcRenderer.invoke("get-trend-usage", payload),
   getQuotaTimeline: (payload) => ipcRenderer.invoke("get-quota-timeline", payload),
   queryUsageEvents: (payload) => ipcRenderer.invoke("query-usage-events", payload),

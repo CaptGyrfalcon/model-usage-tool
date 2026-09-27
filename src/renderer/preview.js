@@ -217,6 +217,16 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     getSettings: async () => previewSettings,
     getWindowState: async () => previewWindowState,
     getModelUsage: async (range) => previewModelUsage(range),
+    getReceipt: async ({ date, source = "all" }) => {
+      const today = new Date(now);
+      const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      const rows = [
+        { source: "cursor", model: "claude-opus-4-6", costCents: 1456, input: 400000, cacheRead: 42000000, cacheWrite: 120000, output: 180000, count: 38, unpriced: 0 },
+        { source: "cursor", model: "grok-4.6", costCents: 176, input: 100000, cacheRead: 6000000, cacheWrite: 0, output: 62800, count: 12, unpriced: 0 },
+        { source: "codex", model: "gpt-5.6", costCents: 62, input: 100000, cacheRead: 12931400, cacheWrite: 0, output: 50000, count: 13, unpriced: 0 },
+      ].filter((r) => source === "all" || r.source === source);
+      return { date, source, generatedAt: Date.now(), rows: date === todayKey ? rows : [] };
+    },
     getTrendUsage: async (payload) => {
       const range = window.TrendRange.spec(payload);
       const series = makeSeries(range.boundaries.length - 1, false).map((row, index) => ({

@@ -7,6 +7,8 @@
     <title>AI 用量</title>
     <link rel="stylesheet" href="styles.css?v=20" />
     <link rel="stylesheet" href="orb.css" />
+    <link rel="stylesheet" href="modern.css" />
+    <link rel="stylesheet" href="receipt.css" />
   </head>
   <body>
     <div class="shell">
@@ -23,14 +25,14 @@
           <div class="subtitle" id="planLine">正在读取本机登录态</div>
         </div>
         <div class="window-actions">
-          <button type="button" id="priceBtn" class="icon-btn price-btn" title="手动更新官方价目表" aria-label="手动更新官方价目表">$</button>
-          <button type="button" id="refreshBtn" class="icon-btn" title="立即刷新" aria-label="立即刷新">↻</button>
+          <button type="button" id="priceQuickBtn" class="icon-btn price-btn" title="手动更新官方价目表" aria-label="手动更新官方价目表">$</button>
+          <button type="button" id="refreshBtn" class="icon-btn" title="立即刷新" aria-label="立即刷新"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 18 17"/></svg></button>
           <button type="button" id="exitFullscreenBtn" class="exit-fullscreen-btn" title="退出全屏（Esc）" aria-label="退出全屏">退出全屏 <kbd>Esc</kbd></button>
-          <button type="button" id="fullscreenBtn" class="icon-btn fullscreen-btn" title="全屏仪表盘（F11）" aria-label="切换全屏仪表盘">⛶</button>
-          <button type="button" id="orbBtn" class="icon-btn orb-btn" title="极简额度球" aria-label="切换极简额度球">◉</button>
-          <button type="button" id="compactBtn" class="icon-btn" title="迷你模式" aria-label="切换迷你模式">▱</button>
-          <button type="button" id="smartBtn" class="icon-btn" title="设置" aria-label="打开设置" aria-expanded="false" aria-controls="smartPanel">⚙</button>
-          <button type="button" id="closeBtn" class="icon-btn close" title="隐藏到状态栏" aria-label="隐藏到状态栏">×</button>
+          <button type="button" id="fullscreenBtn" class="icon-btn fullscreen-btn" title="全屏仪表盘（F11）" aria-label="切换全屏仪表盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg></button>
+          <button type="button" id="orbBtn" class="icon-btn orb-btn" title="极简额度球" aria-label="切换极简额度球"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 13c4-5 12 5 16-1"/></svg></button>
+          <button type="button" id="compactBtn" class="icon-btn" title="迷你模式" aria-label="切换迷你模式"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M14 13h4v3h-4z"/></svg></button>
+          <button type="button" id="smartBtn" class="icon-btn" title="设置" aria-label="打开设置" aria-expanded="false" aria-controls="smartPanel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 3-.7 2.2-2 .9-2.1-.5-2 3.4 1.5 1.7v2.6L2.2 15l2 3.4 2.1-.5 2 .9L9 21h4l.7-2.2 2-.9 2.1.5 2-3.4-1.5-1.7v-2.6L19.8 9l-2-3.4-2.1.5-2-.9L13 3z"/><circle cx="11" cy="12" r="3"/></svg></button>
+          <button type="button" id="closeBtn" class="icon-btn close" title="隐藏到状态栏" aria-label="隐藏到状态栏"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
         </div>
       </header>
 
@@ -48,31 +50,35 @@
         <button class="tab" data-tab="levels" type="button">额度水位</button>
         <button class="tab" data-tab="events" type="button">请求明细</button>
         <button class="tab" data-tab="pricing" type="button">价目表</button>
+        <button class="tab" data-tab="receipt" type="button">账单小票</button>
       </nav>
 
       <main class="content">
+        <section class="view" id="receiptView">
+          <div class="section-heading"><div><h2>账单小票</h2><p>把一天的 AI 用量，留在一张小票里。</p></div></div>
+          <div class="receipt-controls">
+            <label>日期 <input id="receiptDate" type="date" aria-label="小票日期"></label>
+            <label>来源 <select id="receiptSource"><option value="all">全部</option><option value="cursor">Cursor</option><option value="codex">Codex</option></select></label>
+            <button type="button" id="receiptRefresh">生成小票</button>
+            <button type="button" id="receiptSave" disabled>保存 PNG</button>
+          </div>
+          <p id="receiptStatus" role="status" aria-live="polite"></p>
+          <canvas id="receiptCanvas" role="img" aria-label="每日 AI 对账单" hidden></canvas>
+          <details class="receipt-details"><summary>查看小票文字明细</summary><pre id="receiptText"></pre></details>
+        </section>
         <div id="bootstrapState" class="bootstrap-state" role="status" hidden></div>
         <section class="view active" id="overviewView">
-          <div class="overview-heading"><div><span class="eyebrow">USAGE OVERVIEW</span><h2>用量概览</h2></div><span class="local-badge">本地历史 · 持续保留</span></div>
+          <div class="overview-heading"><div><span class="eyebrow">OVERVIEW</span><h2>用量概览</h2></div><span class="local-badge">本地记录 · 自动同步</span></div>
           <div id="quotaGlance" class="quota-glance" aria-label="各池剩余额度"></div>
           <div class="hero-grid" id="heroGrid"></div>
+          <div class="overview-section-label">额度详情 <span>当前周期</span></div>
           <div class="quota-stack">
             <article class="quota-card cursor-card" id="cursorPool"></article>
             <article class="quota-card other-card" id="otherPool"></article>
             <article class="quota-card codex-card" id="codexPool"></article>
           </div>
           <article class="detail-card" id="recentPanel"></article>
-          <article class="detail-card verification-card" id="verificationPanel">
-            <h3>Codex 额度验证</h3>
-            <p id="verificationStatus" role="status">主动查询会单独保留整数额度和查询时间。</p>
-            <div class="verification-actions">
-              <button type="button" data-verification="sample">查询一次</button>
-              <button type="button" data-verification="start">开始记录</button>
-              <button type="button" data-verification="stop" disabled>结束记录</button>
-              <button type="button" data-verification="export">导出记录</button>
-            </div>
-            <p class="verification-help">记录期间约每 30 秒独立查询，不调用模型。请使用单一模型、关闭 Fast，并在起止时等待任务结束；记录会保留原始回退，方便核验。</p>
-          </article>
+
         </section>
 
         <section class="view" id="modelsView">
@@ -242,7 +248,7 @@
               <h2>令牌价目表</h2>
               <p id="pricingSubtitle">按模型与 Fast / 非 Fast 分档</p>
             </div>
-            <span class="count-pill" id="pricingCount">0 档</span>
+            <div class="pricing-heading-actions"><span class="count-pill" id="pricingCount">0 档</span><button type="button" id="priceBtn" class="text-btn" title="手动更新官方价目表" aria-label="手动更新官方价目表">更新价格 ↻</button></div>
           </div>
           <label class="model-range-control">
             <span>版本</span>
@@ -278,7 +284,7 @@
       <aside id="smartPanel" class="smart-panel" hidden role="dialog" aria-modal="true" aria-label="应用设置" tabindex="-1">
         <div class="smart-panel-head">
           <div><b>应用设置</b><span>更安静地关注用量，更清楚地掌握状态</span></div>
-          <button type="button" id="smartCloseBtn" class="icon-btn close" aria-label="关闭设置">×</button>
+          <button type="button" id="smartCloseBtn" class="icon-btn close" aria-label="关闭设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
         </div>
         <div id="sourceHealth" class="source-health"></div>
         <label class="smart-setting-row">
@@ -320,6 +326,17 @@
             <option value="30">30%</option>
           </select>
         </label>
+          <details class="detail-card verification-card" id="verificationPanel">
+            <summary>高级工具 · Codex 额度验证</summary>
+            <p id="verificationStatus" role="status">主动查询会单独保留整数额度和查询时间。</p>
+            <div class="verification-actions">
+              <button type="button" data-verification="sample">查询一次</button>
+              <button type="button" data-verification="start">开始记录</button>
+              <button type="button" data-verification="stop" disabled>结束记录</button>
+              <button type="button" data-verification="export">导出记录</button>
+            </div>
+            <p class="verification-help">记录期间约每 30 秒独立查询，不调用模型。请使用单一模型、关闭 Fast，并在起止时等待任务结束；记录会保留原始回退，方便核验。</p>
+          </details>
         <div class="shortcut-card">
           <span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>U</kbd> 显示/隐藏</span>
           <span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>O</kbd> 额度球</span>
@@ -393,5 +410,7 @@
     <script src="fullscreen-morph.js"></script>
     <script src="usage-charts.js"></script>
     <script src="app.js?v=25"></script>
+    <script src="brand-icons.js"></script>
+    <script src="receipt.js"></script>
   </body>
 </html>

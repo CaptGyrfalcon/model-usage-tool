@@ -141,14 +141,13 @@ function decodeJwt(token) {
 function readCursorAuth() {
   const dbPath = stateDbPath();
   if (!fs.existsSync(dbPath)) throw new Error("未找到 Cursor 登录数据。请先在 Cursor 里登录账号。");
-  const tmp = path.join(os.tmpdir(), `cursor-usage-state-${process.pid}.vscdb`);
-  fs.copyFileSync(dbPath, tmp);
   let accessToken;
   let refreshToken;
   let email;
   let membership;
+  let db;
   try {
-    const db = new DatabaseSync(tmp, { readOnly: true });
+    db = new DatabaseSync(dbPath, { readOnly: true });
     const get = (key) => {
       const row = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get(key);
       return row ? String(row.value) : null;
@@ -157,13 +156,8 @@ function readCursorAuth() {
     refreshToken = get("cursorAuth/refreshToken");
     email = get("cursorAuth/cachedEmail");
     membership = get("cursorAuth/stripeMembershipType");
-    db.close();
   } finally {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      // The copied database is disposable and replaced next refresh.
-    }
+    db?.close();
   }
   if (!accessToken) throw new Error("Cursor 本地状态里没有 accessToken，请重新登录 Cursor。");
   return { accessToken, refreshToken, email, membership };
@@ -336,6 +330,14 @@ function eventEquivalentCostCents(event) {
   return value == null ? 0 : num(value);
 }
 
+function unallocatedEventCostCents(event) {
+  if (String(event.eventKey).startsWith("codex:review-turn:")) return 0;
+  const allocated = num(event.inputCostCents) + num(event.cacheReadCostCents)
+    + num(event.cacheWriteCostCents) + num(event.outputCostCents);
+  const remainder = eventEquivalentCostCents(event) - allocated;
+  return remainder > 1e-6 ? remainder : 0;
+}
+
 function costSummary(events) {
   const summary = {
     equivalentCostCents: 0,
@@ -346,6 +348,7 @@ function costSummary(events) {
     cacheWriteCostCents: 0,
     cacheCostCents: 0,
     outputCostCents: 0,
+    unallocatedCostCents: 0,
     reviewCostCents: 0,
     pricedEvents: 0,
     totalEvents: events.length,
@@ -361,6 +364,7 @@ function costSummary(events) {
     summary.cacheWriteCostCents += num(event.cacheWriteCostCents);
     summary.cacheCostCents += num(event.cacheCostCents);
     summary.outputCostCents += num(event.outputCostCents);
+    summary.unallocatedCostCents += unallocatedEventCostCents(event);
     if (String(event.eventKey).startsWith("codex:review-turn:")) summary.reviewCostCents += num(event.equivalentCostCents);
   }
   summary.coveragePercent = summary.totalEvents ? summary.pricedEvents / summary.totalEvents * 100 : 100;
@@ -415,6 +419,27 @@ function inferPoolQuota(costs, percentUsed, officialLimitCents = null) {
     inferredRemainingCents: inferredTotalCents == null ? null : Math.max(0, inferredTotalCents - usedCents),
     packageTotalCents: official ?? inferredTotalCents,
     packageTotalSource: official == null ? "usage-percent" : "cursor-api",
+  };
+}
+
+function cursorModelQuota(capacityCents, officialPercentUsed, events, equivalentCosts) {
+  const chargedCents = events.reduce((sum, event) => sum + eventCostCents(event), 0);
+  const officialPercent = finitePercent(officialPercentUsed);
+  if (capacityCents) {
+    const usedCents = officialPercent == null
+      ? chargedCents : capacityCents * officialPercent / 100;
+    return {
+      ...codexAccounting.dollarQuota(capacityCents, usedCents),
+      chargedCents,
+      estimateStatus: officialPercent == null ? "local-dollar-usage" : "cursor-api-percent",
+    };
+  }
+  const inferred = inferPoolQuota(equivalentCosts, officialPercent);
+  return {
+    ...inferred,
+    chargedCents,
+    percentUsed: officialPercent,
+    percentRemaining: officialPercent == null ? null : Math.max(0, 100 - officialPercent),
   };
 }
 
@@ -478,6 +503,7 @@ function buildModelBreakdown(events, precision, autoBucketModels = []) {
         cacheReadCostCents: 0,
         cacheWriteCostCents: 0,
         outputCostCents: 0,
+        unallocatedCostCents: 0,
         tokens: emptyTokens(),
         cursor: isCursorModel(event.model, autoBucketModels),
       });
@@ -490,6 +516,7 @@ function buildModelBreakdown(events, precision, autoBucketModels = []) {
     group.cacheReadCostCents += num(event.cacheReadCostCents);
     group.cacheWriteCostCents += num(event.cacheWriteCostCents);
     group.outputCostCents += num(event.outputCostCents);
+    group.unallocatedCostCents += unallocatedEventCostCents(event);
     group.tokens = addTokens(group.tokens, eventTokens(event));
   }
   return [...groups.values()]
@@ -541,6 +568,7 @@ function emptyTrendSlice() {
     cacheWriteCostCents: 0,
     cacheCostCents: 0,
     outputCostCents: 0,
+    unallocatedCostCents: 0,
   };
 }
 
@@ -562,6 +590,7 @@ function addTrendSlice(target, tokens, event) {
   target.cacheWriteCostCents += num(event.cacheWriteCostCents);
   target.cacheCostCents += num(event.cacheCostCents);
   target.outputCostCents += num(event.outputCostCents);
+  target.unallocatedCostCents += unallocatedEventCostCents(event);
   if ("costCents" in target) target.costCents += cost;
 }
 
@@ -695,7 +724,7 @@ function cursorEventToHistory(event, pricingSnapshot, autoBucketModels = [], his
     model: event.model || "unknown",
     effort: descriptor.effort,
     fast: descriptor.fast,
-    fastKnown: true,
+    fastKnown: String(event.model || "").toLowerCase() !== "default",
     pool: isCursorModel(event.model, autoBucketModels) ? "cursor-models" : "other-models",
     ...tokens,
     reasoning: 0,
@@ -704,8 +733,12 @@ function cursorEventToHistory(event, pricingSnapshot, autoBucketModels = [], his
   };
   const existing = history?.getEvent("cursor", normalized.eventKey);
   const lockedPricing = history?.pricingSnapshot(existing?.pricingSnapshotId) || pricingSnapshot;
-  const exactTotal = event.tokenUsage?.totalCents ?? event.chargedCents ?? null;
-  return { ...normalized, ...priceEvent(normalized, lockedPricing, { authoritativeTotalCents: exactTotal }) };
+  const modelTotal = event.tokenUsage?.totalCents;
+  const exactTotal = modelTotal ?? event.chargedCents ?? null;
+  return { ...normalized, ...priceEvent(normalized, lockedPricing, {
+    authoritativeTotalCents: exactTotal,
+    authoritativeSource: modelTotal == null ? "charged-total" : "model-total",
+  }) };
 }
 
 function sumEventTokens(events) {
@@ -773,6 +806,8 @@ async function fetchCursorSnapshot(pricingSnapshot) {
   history.upsertEvents(usageResult.events.map((event) => cursorEventToHistory(event, pricingSnapshot, autoBucketModels, history)));
 
   const autoPct = pickUsagePercent(individual.autoPercentUsed, planUsage.autoPercentUsed);
+  const officialAutoPct = [individual.autoPercentUsed, planUsage.autoPercentUsed]
+    .some((value) => finitePercent(value) != null) ? autoPct : null;
   const apiPct = pickUsagePercent(individual.apiPercentUsed, planUsage.apiPercentUsed);
   const totalPct = pickUsagePercent(individual.totalPercentUsed, planUsage.totalPercentUsed);
   const includedLimit = num(individual.limit ?? planUsage.limit);
@@ -816,7 +851,7 @@ async function fetchCursorSnapshot(pricingSnapshot) {
   const otherPoolEquivalent = costSummary(otherPoolEvents);
   const cursorPlanName = plan?.planInfo?.planName || summary?.membershipType || auth.membership || "Cursor";
   const cursorCapacity = codexAccounting.cursorCapacity(summary?.membershipType) || codexAccounting.cursorCapacity(auth.membership) || codexAccounting.cursorCapacity(cursorPlanName);
-  const cursorPoolQuota = codexAccounting.dollarQuota(cursorCapacity,cursorPoolEquivalent.equivalentCostCents) || inferPoolQuota(cursorPoolEquivalent, autoPct);
+  const cursorPoolQuota = cursorModelQuota(cursorCapacity, officialAutoPct, cursorPoolEvents, cursorPoolEquivalent);
   const otherPoolQuota = inferPoolQuota(otherPoolEquivalent, apiPct, includedLimit);
   const todayEquivalent = costSummary(todayEvents);
 
@@ -834,7 +869,7 @@ async function fetchCursorSnapshot(pricingSnapshot) {
     cursorModels: {
       name: "Cursor 模型", hint: "Grok / Composer", percentUsed: cursorPoolQuota.percentUsed ?? autoPct,
       percentRemaining: cursorPoolQuota.percentRemaining ?? Math.max(0, 100 - autoPct),
-      officialPercentUsed: autoPct,
+      officialPercentUsed: officialAutoPct,
       message: period?.autoModelSelectedDisplayMessage || summary?.autoModelSelectedDisplayMessage || null,
       tokens: decorateTokens(cursorTokens),
       apiEquivalent: cursorPoolEquivalent,
@@ -1166,6 +1201,8 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
         const eventPricing = history.pricingSnapshot(event.pricingSnapshotId) || pricingSnapshot;
         const priced = priceEvent(event, eventPricing, {
           authoritativeTotalCents: event.source === "cursor" ? event.costCents : null,
+          authoritativeSource: "charged-total",
+          fallbackSnapshot: pricingSnapshot,
         });
         if (priced.pricingStatus !== "unavailable") priced.pricingStatus = `first-import-${priced.pricingStatus}`;
         return priced;
@@ -1287,6 +1324,7 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
       fetchedAt: pricingSnapshot?.fetchedAt || null,
       status: pricingSnapshot?.status || "built-in",
       note: pricingSnapshot?.note || null,
+      refreshErrors: pricingResult.errors || [],
       sourceUrls: pricingSnapshot?.sourceUrls || [],
       nextCheckAt: pricingResult.nextCheckAt || null,
       updated: pricingResult.updated,
@@ -1348,6 +1386,7 @@ module.exports = {
   collapseCursorSnapshots,
   currentCodexRateWindow,
   inferPoolQuota,
+  cursorModelQuota,
   isCursorModel,
   pickUsagePercent,
 };

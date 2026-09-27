@@ -8,6 +8,28 @@ function tier(short, long = short) {
 }
 
 const FALLBACK_MODELS = {
+  "gpt-6-sol": {
+    provider: "openai",
+    standard: tier(
+      { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
+      { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 15 },
+    ),
+    fast: tier(
+      { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
+      { input: 8, cacheRead: 0.8, cacheWrite: 10, output: 30 },
+    ),
+  },
+  "gpt-6-luna": {
+    provider: "openai",
+    standard: tier(
+      { input: 0.1, cacheRead: 0.01, cacheWrite: 0.125, output: 0.5 },
+      { input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 0.75 },
+    ),
+    fast: tier(
+      { input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1 },
+      { input: 0.4, cacheRead: 0.04, cacheWrite: 0.5, output: 1.5 },
+    ),
+  },
   "gpt-6-astra": {
     provider: "openai",
     standard: tier(
@@ -61,6 +83,16 @@ const FALLBACK_MODELS = {
     provider: "cursor",
     standard: tier({ input: 2, cacheRead: 0.5, cacheWrite: 0, output: 6 }),
     fast: tier({ input: 4, cacheRead: 1, cacheWrite: 0, output: 18 }),
+  },
+  "grok-4.7": {
+    provider: "cursor",
+    standard: tier({ input: 2, cacheRead: 0.5, cacheWrite: 0, output: 6 }),
+    fast: tier({ input: 4, cacheRead: 1, cacheWrite: 0, output: 12 }),
+  },
+  "grok-4.7-500k": {
+    provider: "cursor",
+    standard: tier({ input: 4, cacheRead: 1, cacheWrite: 0, output: 12 }),
+    fast: tier({ input: 6, cacheRead: 1.5, cacheWrite: 0, output: 18 }),
   },
   "composer-2.5": {
     provider: "cursor",
@@ -153,36 +185,48 @@ function tableCells(line) {
 
 function parseOpenAiPricing(text, baseModels = FALLBACK_MODELS) {
   const models = clone(baseModels);
-  const tracked = Object.keys(models).filter((name) => name.startsWith("gpt-"));
+  text = String(text).replace(/<\/(?:td|th)>/gi, " | ").replace(/<\/tr>/gi, "\n")
+    .replace(/<[^>]+>/g, "").replaceAll("&nbsp;", " ");
+  const nameOf = (cell) => cell.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").trim().toLowerCase();
+  const tracked = new Set(Object.keys(models).filter((name) => name.startsWith("gpt-")));
+  for (const line of text.split(/\r?\n/)) {
+    const name = nameOf(tableCells(line)[0] || "");
+    if (/^gpt-[a-z0-9.-]+$/.test(name)) tracked.add(name);
+  }
   for (const model of tracked) {
     const rows = [];
     for (const line of String(text).split(/\r?\n/)) {
       if (!line.toLowerCase().includes(model)) continue;
       const cells = tableCells(line);
-      const index = cells.findIndex((cell) => cell.toLowerCase().includes(model));
+      const index = cells.findIndex((cell) => nameOf(cell) === model);
       if (index < 0) continue;
       const values = cells.slice(index + 1, index + 9).map(money);
       if (values.length === 8 && values.every(Number.isFinite)) rows.push(values);
     }
-    if (rows.length < 2) continue;
+    if (!rows.length) continue;
     const standard = rows[0];
-    const fast = rows.at(-1);
+    // Batch/Flex rows are cheaper; never mistake them for Fast pricing.
+    const fast = rows.slice(1).findLast((row) => row[0] > standard[0] && row[3] > standard[3]);
     models[model] = {
       provider: "openai",
       standard: tier(
         { input: standard[0], cacheRead: standard[1], cacheWrite: standard[2], output: standard[3] },
         { input: standard[4], cacheRead: standard[5], cacheWrite: standard[6], output: standard[7] },
       ),
-      fast: tier(
+      ...(fast ? { fast: tier(
         { input: fast[0], cacheRead: fast[1], cacheWrite: fast[2], output: fast[3] },
         { input: fast[4], cacheRead: fast[5], cacheWrite: fast[6], output: fast[7] },
-      ),
+      ) } : {}),
     };
   }
   return models;
 }
 
 const CURSOR_NAMES = new Map([
+  ["grok 4.7 500k (fast)", ["grok-4.7-500k", "fast"]],
+  ["grok 4.7 500k", ["grok-4.7-500k", "standard"]],
+  ["grok 4.7 (fast)", ["grok-4.7", "fast"]],
+  ["grok 4.7", ["grok-4.7", "standard"]],
   ["grok 4.6 (fast)", ["grok-4.6", "fast"]],
   ["grok 4.6", ["grok-4.6", "standard"]],
   ["grok 4.5 (fast)", ["grok-4.5", "fast"]],
@@ -194,6 +238,10 @@ const CURSOR_NAMES = new Map([
   ["claude sonnet 5", ["claude-sonnet-5", "standard"]],
   ["gpt-6 astra (fast)", ["gpt-6-astra", "fast"]],
   ["gpt-6 astra", ["gpt-6-astra", "standard"]],
+  ["gpt-6 sol (fast)", ["gpt-6-sol", "fast"]],
+  ["gpt-6 sol", ["gpt-6-sol", "standard"]],
+  ["gpt-6 luna (fast)", ["gpt-6-luna", "fast"]],
+  ["gpt-6 luna", ["gpt-6-luna", "standard"]],
   ["gpt-5.6 luna", ["gpt-5.6-luna", "standard"]],
   ["gpt-5.6 sol", ["gpt-5.6-sol", "standard"]],
   ["gpt-5.6 terra", ["gpt-5.6-terra", "standard"]],
@@ -224,7 +272,7 @@ function parseCursorPricing(text, baseModels = FALLBACK_MODELS) {
     const cells = tableCells(line);
     if (cells.length < 5) continue;
     const name = cleanCursorName(cells[0]);
-    const match = [...CURSOR_NAMES.entries()].find(([label]) => name.includes(label));
+    const match = [...CURSOR_NAMES.entries()].find(([label]) => name === label || name.endsWith(` ${label}`));
     if (!match) continue;
     const [model, speed] = match[1];
     const values = cells.slice(1, 5).map(money);
@@ -252,13 +300,19 @@ async function refreshPricing(history, { force = false, now = Date.now() } = {})
   }
   history.saveCache("pricing-last-attempt", { at: now, force: Boolean(force) });
   const results = await Promise.allSettled([fetchText(OPENAI_PRICING_URL), fetchText(CURSOR_PRICING_URL)]);
-  let codexModels = clone(FALLBACK_CODEX_MODELS);
-  let cursorModels = clone(FALLBACK_CURSOR_MODELS);
+  const previous = mergeFallbackCatalog(latest);
+  let codexModels = clone(previous.modelsBySource.codex);
+  let cursorModels = clone(previous.modelsBySource.cursor);
   const errors = [];
-  if (results[0].status === "fulfilled") codexModels = parseOpenAiPricing(results[0].value, codexModels);
-  else errors.push(results[0].reason?.message || "OpenAI 价目表更新失败");
-  if (results[1].status === "fulfilled") cursorModels = parseCursorPricing(results[1].value, cursorModels);
-  else errors.push(results[1].reason?.message || "Cursor 价目表更新失败");
+  for (const [index, parser, label] of [[0, parseOpenAiPricing, "OpenAI"], [1, parseCursorPricing, "Cursor"]]) {
+    try {
+      if (results[index].status === "rejected") throw results[index].reason;
+      const parsed = parser(results[index].value, {});
+      if (!Object.keys(parsed).length) throw new Error(`${label} 价目表未解析到价格`);
+      if (index === 0) codexModels = { ...codexModels, ...parsed };
+      else cursorModels = { ...cursorModels, ...parsed };
+    } catch (error) { errors.push(error?.message || `${label} 价目表更新失败`); }
+  }
   const snapshot = {
     fetchedAt: now,
     status: errors.length ? (errors.length === 2 ? "built-in" : "remote-partial") : "remote",
@@ -270,7 +324,7 @@ async function refreshPricing(history, { force = false, now = Date.now() } = {})
   if (snapshot.status !== "built-in" || !latest) snapshot.id = history.savePricingSnapshot(snapshot);
   else snapshot.id = latest?.id || history.savePricingSnapshot(snapshot);
   const selected = snapshot.status === "built-in" && latest ? latest : snapshot;
-  return { snapshot: mergeFallbackCatalog(selected), updated: snapshot.status !== "built-in", nextCheckAt: now + DAY_MS };
+  return { snapshot: mergeFallbackCatalog(selected), updated: snapshot.status !== "built-in", errors, nextCheckAt: now + DAY_MS };
 }
 
 function modelKey(raw) {
@@ -314,6 +368,7 @@ function multiplyComponents(parts, multiplier) {
 function codexFastCreditMultiplier(event) {
   if (String(event?.source || "").toLowerCase() !== "codex") return 1;
   const key = modelKey(event?.model);
+  if (codexAccounting.RATES[key]) return codexAccounting.fastMultiplier(key);
   if (/^gpt-5\.4(?:-|$)/.test(key)) return 2;
   if (/^gpt-6(?:-|$)/.test(key) || /^gpt-5\.(?:5|6)(?:-|$)/.test(key)) return 2.5;
   return 1;
@@ -332,7 +387,7 @@ function scaleComponents(parts, total) {
   };
 }
 
-function priceEvent(event, snapshot, { authoritativeTotalCents = null, fallbackSnapshot = null } = {}) {
+function priceEvent(event, snapshot, { authoritativeTotalCents = null, authoritativeSource = "model-total", fallbackSnapshot = null } = {}) {
   const key = modelKey(event.model);
   const source = String(event.source || "").toLowerCase();
   // User-selected accounting assumption, not an official published rate.
@@ -352,6 +407,26 @@ function priceEvent(event, snapshot, { authoritativeTotalCents = null, fallbackS
     || catalogModel(fallbackSnapshot, source, key)
     || fallbackModel(source, key);
   if (!model?.standard) {
+    const authoritative = authoritativeTotalCents == null ? null : Number(authoritativeTotalCents);
+    if (source === "cursor" && Number.isFinite(authoritative) && authoritative >= 0) {
+      // Auto can be reported as "default" without the routed model. The
+      // server's model total is usable even though its parts cannot be priced.
+      return {
+        equivalentCostCents: authoritative,
+        equivalentCostLowCents: authoritative,
+        equivalentCostHighCents: authoritative,
+        quotaEquivalentCostCents: authoritative,
+        quotaEquivalentCostLowCents: authoritative,
+        quotaEquivalentCostHighCents: authoritative,
+        inputCostCents: null,
+        cacheReadCostCents: null,
+        cacheWriteCostCents: null,
+        cacheCostCents: null,
+        outputCostCents: null,
+        pricingSnapshotId: snapshot?.id || null,
+        pricingStatus: authoritativeSource === "charged-total" ? "charged-total-unallocated" : "api-total-unallocated",
+      };
+    }
     return {
       equivalentCostCents: null,
       equivalentCostLowCents: null,

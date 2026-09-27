@@ -895,6 +895,7 @@ function costPartsHtml(costs) {
     <span>写缓存 ${formatUsd(value.cacheWriteCostCents)}</span>
     <span>读缓存 ${formatUsd(value.cacheReadCostCents)}</span>
     <span>输出 ${formatUsd(value.outputCostCents)}</span>
+    ${value.unallocatedCostCents ? `<span>未拆分 ${formatUsd(value.unallocatedCostCents)}</span>` : ""}
     ${value.reviewCostCents ? `<span>自动审批 ${formatUsd(value.reviewCostCents)}</span>` : ""}
   </div>`;
 }
@@ -954,8 +955,8 @@ function renderOverview(d) {
     || (d.quotaInsights || []).find((item) => item.id === "cursor");
   $("heroGrid").innerHTML = `
     <div class="hero-metric primary"><span>今日总 Token（含缓存）</span><strong>${formatTokens(combined.tokens?.today?.total)}</strong><small>有效 ${formatTokens(combined.tokens?.today?.effective)} · 写缓存 ${formatTokens(combined.tokens?.today?.cacheWrite)} · 读缓存 ${formatTokens(combined.tokens?.today?.cacheRead)} · 近 1 小时总 ${formatTokens(combined.tokens?.h1?.total)}</small></div>
-    <div class="hero-metric"><span>Cursor 模型池</span><strong>${formatUsd(cursorPoolQuota.usedCents)}</strong><small>${cursorPoolQuota.inferredTotalCents == null ? "池总额待确认" : `套餐额度 ${formatUsd(cursorPoolQuota.inferredTotalCents)}`}</small></div>
-    <div class="hero-metric"><span>其他 API 模型池</span><strong>${formatUsd(otherPoolQuota.usedCents)}</strong><small>套餐总额 ${formatUsd(otherPoolQuota.packageTotalCents)} · 官方已计 ${formatUsd(cursorIncluded.used)}</small></div>
+    <div class="hero-metric"><span>Cursor 模型 · 已用</span><strong>${formatUsd(cursorPoolQuota.usedCents)}</strong><small>${cursorPoolQuota.inferredTotalCents == null ? "池总额待确认" : `套餐额度 ${formatUsd(cursorPoolQuota.inferredTotalCents)}`}</small></div>
+    <div class="hero-metric"><span>三方模型 · 已用</span><strong>${formatUsd(otherPoolQuota.usedCents)}</strong><small>套餐总额 ${formatUsd(otherPoolQuota.packageTotalCents)} · 官方已计 ${formatUsd(cursorIncluded.used)}</small></div>
   `;
 
   if (d.cursorModels) {
@@ -1140,6 +1141,7 @@ function renderModels(d) {
             <span><small>输出 · ${formatUsd(row.outputCostCents)}</small><b>${formatTokens(row.output)}</b></span>
             <span><small>推理 Token</small><b>${formatTokens(row.reasoning)}</b></span>
             <span><small>API 等效合计</small><b>${formatUsd(row.costCents)}</b></span>
+            ${row.unallocatedCostCents ? `<span><small>未拆分费用</small><b>${formatUsd(row.unallocatedCostCents)}</b></span>` : ""}
           </div>
         </div>
       </article>`;
@@ -1220,6 +1222,7 @@ function compositionSegmentDefinitions(metric) {
       { key: "cacheWriteCostCents", label: "缓存写入", className: "cache-write" },
       { key: "cacheReadCostCents", label: "缓存读取", className: "cache-read" },
       { key: "outputCostCents", label: "输出", className: "output" },
+      { key: "unallocatedCostCents", label: "未拆分", className: "other" },
     ];
   }
   if (metric === "effective") {
@@ -1786,7 +1789,7 @@ function renderActiveView(d) {
 }
 
 function setActiveTab(tab, persist = false) {
-  const valid = ["overview", "models", "trends", "levels", "events", "pricing"].includes(tab) ? tab : "overview";
+  const valid = ["overview", "models", "trends", "levels", "events", "pricing", "receipt"].includes(tab) ? tab : "overview";
   settings.activeTab = valid;
   const visible = settings.compact && !windowState.fullscreen && !settings.orbMode ? "overview" : valid;
   if (valid !== "trends" && valid !== "levels") hideChartTooltip();
@@ -1876,7 +1879,7 @@ function render() {
   $("orbBtn").classList.toggle("active", orbMode);
   $("orbBtn").disabled = Boolean(windowState.fullscreen);
   $("fullscreenBtn").classList.toggle("active", Boolean(windowState.fullscreen));
-  $("fullscreenBtn").textContent = windowState.fullscreen ? "↙" : "⛶";
+  $("fullscreenBtn").classList.toggle("is-fullscreen", windowState.fullscreen);
   $("fullscreenBtn").title = windowState.fullscreen ? "退出全屏（Esc / F11）" : "全屏仪表盘（F11）";
   $("smartBtn").classList.toggle("active", smartPanelOpen || settings.privacyMode);
   $("smartPanel").hidden = !smartPanelOpen || orbMode;
@@ -2241,7 +2244,26 @@ $("modelBreakdownBtn").addEventListener("click", () => {
 });
 
 $("refreshBtn").addEventListener("click", () => window.widget.refresh());
-$("priceBtn").addEventListener("click", () => window.widget.refreshPricing());
+async function refreshPriceCatalog() {
+  const buttons = [$("priceBtn"), $("priceQuickBtn")];
+  if (buttons.some((button) => button.disabled)) return;
+  buttons.forEach((button) => { button.disabled = true; });
+  $("priceBtn").textContent = "更新中…";
+  try {
+    const result = await window.widget.refreshPricing();
+    if (!result?.ok) throw new Error(result?.error || "价目表更新失败");
+    await loadPricingCatalog();
+    const errors = result.data?.pricing?.refreshErrors || [];
+    showToast(errors.length ? `价格更新未全部成功，保留可用价格：${errors.join("；")}` : "价目表已更新", errors.length > 0);
+  } catch (error) {
+    showToast(error.message || "价目表更新失败", true);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+    $("priceBtn").textContent = "更新价格 ↻";
+  }
+}
+$("priceBtn").addEventListener("click", refreshPriceCatalog);
+$("priceQuickBtn").addEventListener("click", refreshPriceCatalog);
 $("fullscreenBtn").addEventListener("click", () => setFullscreen());
 let titlebarPointer = null;
 const titlebarControls = ".window-actions, button, input, select, a";
@@ -2391,7 +2413,7 @@ window.widget.onFullscreenRequest?.(setFullscreen);
 
 window.addEventListener("keydown", (event) => {
   if (event.key === "Tab" && smartPanelOpen) {
-    const items = [...$("smartPanel").querySelectorAll("button, select, input")].filter((item) => !item.disabled && item.getClientRects().length);
+    const items = [...$("smartPanel").querySelectorAll("button, select, input, summary")].filter((item) => !item.disabled && item.getClientRects().length);
     const first = items[0];
     const last = items[items.length - 1];
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }

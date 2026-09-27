@@ -23,6 +23,8 @@ parentPort.on("message", async ({ id, task, payload } = {}) => {
       } else data=v.status();
     } else if (task === "fetch-snapshot") {
       data = await fetchSnapshot(payload || {});
+    } else if (task === "get-receipt") {
+      data = require("./receipt.cjs").getReceipt(getHistory(), payload);
     } else if (task === "get-model-usage") {
       data = getModelUsage(payload?.range);
     } else if (task === "get-trend-usage") {

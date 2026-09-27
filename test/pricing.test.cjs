@@ -8,7 +8,7 @@ test("Codex review token updates carry no fee; completed turn carries the flat f
   for (const [key, value] of Object.entries(priced)) {
     if (key.endsWith("Cents")) assert.equal(value, 0, key);
   }
-  assert.equal(priced.pricingStatus, "codex-hypothesis-2026-09-18-v1-review-token-only");
+  assert.equal(priced.pricingStatus, "codex-hypothesis-2026-09-27-v2-review-token-only");
   assert.equal(event.input, 10000);
   assert.equal(priceEvent({ ...event, source: "cursor" }, null).pricingStatus, "unavailable");
   assert.equal(priceEvent({ ...event, model: "another-unknown-model" }, null).pricingStatus, "unavailable");
@@ -33,16 +33,16 @@ test("prices cache/input/output separately and treats unknown Fast as non-fast",
     cacheWrite: 50_000, output: 100_000, fast: false, fastKnown: false,
   };
   const priced = priceEvent(event, snapshot);
-  assert.equal(priced.inputCostCents, 40);
-  assert.equal(priced.cacheReadCostCents, 4);
-  assert.equal(priced.cacheWriteCostCents, 25);
-  assert.equal(priced.cacheCostCents, 29);
-  assert.equal(priced.outputCostCents, 200);
-  assert.equal(priced.equivalentCostLowCents, 269);
-  assert.equal(priced.equivalentCostHighCents, 269);
-  assert.equal(priced.quotaEquivalentCostLowCents, 269);
-  assert.equal(priced.quotaEquivalentCostHighCents, 269);
-  assert.equal(priced.pricingStatus, "codex-hypothesis-2026-09-18-v1-tier-unknown");
+  assert.ok(Math.abs(priced.inputCostCents - 44) < 1e-10);
+  assert.equal(priced.cacheReadCostCents, 4.4);
+  assert.equal(priced.cacheWriteCostCents, 27.5);
+  assert.equal(priced.cacheCostCents, 31.9);
+  assert.equal(priced.outputCostCents, 220);
+  assert.equal(priced.equivalentCostLowCents, 295.9);
+  assert.equal(priced.equivalentCostHighCents, 295.9);
+  assert.equal(priced.quotaEquivalentCostLowCents, 295.9);
+  assert.equal(priced.quotaEquivalentCostHighCents, 295.9);
+  assert.equal(priced.pricingStatus, "codex-hypothesis-2026-09-27-v2-tier-unknown");
 });
 
 test("uses Cursor official cache-write rows only for Cursor events", () => {
@@ -79,8 +79,8 @@ test("uses one 2.5x dollar-equivalent and credit basis for GPT-5.6 Fast", () => 
     source: "codex", model: "gpt-5.6-sol", input: 100_000, cacheRead: 100_000,
     output: 100_000, fast: true, fastKnown: true,
   }, snapshot);
-  assert.equal(priced.equivalentCostCents, 610);
-  assert.equal(priced.quotaEquivalentCostCents, 610);
+  assert.equal(priced.equivalentCostCents, 671);
+  assert.equal(priced.quotaEquivalentCostCents, 671);
 });
 
 test("parses GPT-6 Astra Standard and Fast OpenAI pricing tables", () => {
@@ -129,7 +129,7 @@ test("uses 2.5x Codex credit for GPT-6 Astra Fast and skips long-context surchar
     source: "codex", model: "gpt-5.6-sol", input: 300_000, output: 0,
     cacheRead: 0, cacheWrite: 0, fast: false, fastKnown: true,
   }, snapshot);
-  assert.equal(longSol.inputCostCents, 120);
+  assert.equal(longSol.inputCostCents, 132);
 });
 
 test("fills GPT-6 Astra into a cached catalog that predates the model", () => {
@@ -140,4 +140,95 @@ test("fills GPT-6 Astra into a cached catalog that predates the model", () => {
   });
   assert.equal(merged.modelsBySource.codex["gpt-6-astra"].standard.short.input, 10);
   assert.equal(merged.modelsBySource.cursor["gpt-6-astra"].standard.short.output, 50);
+});
+
+test('discovers new models and matches exact IDs without confusing Batch with Fast', () => {
+  const models = parseOpenAiPricing(`
+gpt-6-future | $2 | $0.2 | $2.5 | $10 | $4 | $0.4 | $5 | $15
+gpt-6-future-pro | $99 | $9 | $100 | $100 | $99 | $9 | $100 | $100
+gpt-6-future | $1 | $0.1 | $1.25 | $5 | $2 | $0.2 | $2.5 | $7.5
+`, {});
+  assert.equal(models['gpt-6-future'].standard.short.output, 10);
+  assert.equal(models['gpt-6-future'].fast, undefined);
+  assert.equal(models['gpt-6-future-pro'].standard.short.input, 99);
+});
+
+test("keeps Grok 4.7 standard, Fast, and 500k rates separate", () => {
+  const models = parseCursorPricing(`
+Grok 4.7 | $2 | - | $0.5 | $6
+Grok 4.7 (Fast) | $4 | - | $1 | $12
+Grok 4.7 500k | $4 | - | $1 | $12
+Grok 4.7 500k (Fast) | $6 | - | $1.5 | $18
+`, {});
+  assert.equal(models["grok-4.7"].standard.short.input, 2);
+  assert.equal(models["grok-4.7"].fast.short.output, 12);
+  assert.equal(models["grok-4.7-500k"].standard.short.input, 4);
+  assert.equal(models["grok-4.7-500k"].fast.short.output, 18);
+  assert.equal(modelKey("grok-4.7-high-fast"), "grok-4.7");
+});
+
+test("backfills an unavailable Cursor price without increasing its token count", () => {
+  const { UsageHistory } = require("../src/history.cjs");
+  class Fixture extends UsageHistory { migrateLegacyHistory() {} }
+  const history = new Fixture(":memory:");
+  try {
+    const event = { source: "cursor", eventKey: "grok-test", timestamp: 1000,
+      model: "grok-4.7-high-fast", pool: "cursor-models", input: 1000,
+      output: 100, costCents: 25, pricingStatus: "unavailable" };
+    history.upsertEvents([event]);
+    const priced = priceEvent(event, builtInSnapshot(1), { authoritativeTotalCents: 25 });
+    history.upsertEvents([{ ...event, ...priced }]);
+    assert.equal(history.getEvent("cursor", "grok-test").equivalentCostCents, 25);
+    assert.equal(history.getUnpricedEvents().length, 0);
+  } finally { history.close(); }
+});
+
+test("uses Cursor's authoritative total when Auto hides the routed model", () => {
+  const priced = priceEvent({ source: "cursor", model: "default", input: 1000, output: 200 },
+    builtInSnapshot(1), { authoritativeTotalCents: 37.25 });
+  assert.equal(priced.equivalentCostCents, 37.25);
+  assert.equal(priced.quotaEquivalentCostCents, 37.25);
+  assert.equal(priced.inputCostCents, null);
+  assert.equal(priced.pricingStatus, "api-total-unallocated");
+  assert.equal(priceEvent({ source: "cursor", model: "default" }, builtInSnapshot(1),
+    { authoritativeTotalCents: 30, authoritativeSource: "charged-total" }).pricingStatus, "charged-total-unallocated");
+  assert.equal(priceEvent({ source: "cursor", model: "default" }, builtInSnapshot(1)).pricingStatus, "unavailable");
+});
+
+test('GPT-6 Sol and Luna fill old catalogs and backfill missing costs without rewriting locked costs', () => {
+  const { UsageHistory } = require('../src/history.cjs');
+  class Fixture extends UsageHistory { migrateLegacyHistory() {} }
+  const h = new Fixture(':memory:');
+  try {
+    const old = { models: {}, modelsBySource: { codex: {}, cursor: {} } };
+    const snapshot = mergeFallbackCatalog(old);
+    for (const [model, expected] of [['gpt-6-sol', 1830], ['gpt-6-luna', 152.5]]) {
+      const event = { source: 'codex', eventKey: model, timestamp: 1000, model,
+        input: 1e6, cacheRead: 1e6, output: 1e6, fastKnown: false, pricingStatus: 'unavailable' };
+      h.upsertEvents([event]);
+      const p = priceEvent(h.getEvent('codex', model), old, { fallbackSnapshot: snapshot });
+      assert.ok(Math.abs(p.equivalentCostCents - expected) < 1e-8);
+      h.upsertEvents([{ ...event, ...p }]);
+      h.upsertEvents([{ ...event, ...p, equivalentCostCents: 99999 }]);
+      assert.ok(Math.abs(h.getEvent('codex', model).equivalentCostCents - expected) < 1e-8);
+      const fast = priceEvent({ ...event, fastKnown: true, fast: true }, snapshot);
+      assert.ok(Math.abs(fast.equivalentCostCents - expected * 2.5) < 1e-8);
+    }
+    assert.equal(h.getUnpricedEvents().length, 0);
+  } finally { h.close(); }
+});
+
+test('refresh rejects unreadable price pages and retains previous source prices', async () => {
+  const { refreshPricing } = require('../src/pricing.cjs');
+  const original = global.fetch;
+  const prior = builtInSnapshot(1);
+  prior.modelsBySource.codex['gpt-6-sol'].standard.short.input = 3;
+  global.fetch = async () => ({ ok: true, text: async () => '<html>temporarily unavailable</html>' });
+  try {
+    const result = await refreshPricing({ latestPricingSnapshot: () => prior,
+      loadCache: () => null, saveCache() {}, savePricingSnapshot: () => 1 }, { force: true });
+    assert.equal(result.updated, false);
+    assert.equal(result.errors.length, 2);
+    assert.equal(result.snapshot.modelsBySource.codex['gpt-6-sol'].standard.short.input, 3);
+  } finally { global.fetch = original; }
 });

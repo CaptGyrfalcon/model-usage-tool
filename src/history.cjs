@@ -222,7 +222,8 @@ class UsageHistory {
     `);
     this.cursorEventProgress = this.db.prepare(`
       SELECT input_tokens + output_tokens + cache_read_tokens + cache_write_tokens AS total_tokens,
-             COALESCE(cost_cents, equivalent_cost_cents, 0) AS total_cost
+             COALESCE(cost_cents, equivalent_cost_cents, 0) AS total_cost,
+             pricing_status
       FROM usage_events WHERE source = 'cursor' AND event_key = ?
     `);
     this.deleteCursorEvent = this.db.prepare("DELETE FROM usage_events WHERE source = 'cursor' AND event_key = ?");
@@ -431,7 +432,8 @@ class UsageHistory {
             const incomingCost = finite(event.costCents ?? event.equivalentCostCents);
             const hasMoreProgress = incomingTokens > finite(existing.total_tokens)
               || (incomingTokens === finite(existing.total_tokens) && incomingCost > finite(existing.total_cost) + 1e-9);
-            if (!hasMoreProgress) continue;
+            const newlyPriced = existing.pricing_status === "unavailable" && event.equivalentCostCents != null;
+            if (!hasMoreProgress && !newlyPriced) continue;
             this.deleteCursorEvent.run(String(event.eventKey));
           }
         }

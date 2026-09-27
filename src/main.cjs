@@ -724,7 +724,11 @@ function applySettings(partial) {
 }
 
 async function pull(forcePricing = false) {
-  if (activePull) return activePull;
+  if (activePull) {
+    if (!forcePricing) return activePull;
+    await activePull;
+    return pull(true);
+  }
   latest = { ...latest, loading: true };
   if (win) win.webContents.send("snapshot", latest);
   activePull = (async () => {
@@ -820,6 +824,23 @@ ipcMain.handle("codex-verification", async (_event, action) => {
 });
 ipcMain.handle("get-window-state", () => windowState());
 ipcMain.handle("get-model-usage", (_event, range) => runDataTask("get-model-usage", { range }));
+ipcMain.handle("get-receipt", (_event, payload) => runDataTask("get-receipt", payload));
+ipcMain.handle("save-receipt", async (_event, payload) => {
+  if (!/^data:image\/png;base64,/.test(payload?.image || "") || payload.image.length > 40_000_000) throw new Error("小票图片无效或过大");
+  const result = await dialog.showSaveDialog(win, {
+    title: "保存账单小票", defaultPath: `AI-账单-${String(payload.date).replace(/[^0-9-]/g, "")}.png`,
+    filters: [{ name: "PNG 图片", extensions: ["png"] }],
+  });
+  if (result.canceled || !result.filePath) return { canceled: true };
+  const bytes = Buffer.from(payload.image.slice("data:image/png;base64,".length), "base64");
+  if (nativeImage.createFromBuffer(bytes).isEmpty()) throw new Error("无法读取小票图片");
+  const temporary = `${result.filePath}.${require("node:crypto").randomUUID()}.tmp`;
+  try {
+    await fs.promises.writeFile(temporary, bytes, { flag: "wx" });
+    await fs.promises.rename(temporary, result.filePath);
+  } finally { await fs.promises.rm(temporary, { force: true }); }
+  return { ok: true, path: result.filePath };
+});
 ipcMain.handle("get-trend-usage", (_event, payload) => runDataTask("get-trend-usage", payload));
 ipcMain.handle("get-quota-timeline", (_event, payload) => runDataTask("get-quota-timeline", payload || {}));
 ipcMain.handle("query-usage-events", (_event, payload) => runDataTask("query-usage-events", payload || {}));

@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { normalizeModelDescriptor, buildModelBreakdowns, buildTrendSeries, collapseCursorSnapshots, costSummary, currentCodexRateWindow, inferPoolQuota, isCursorModel, pickUsagePercent, speedUsageSummary, buildModelUsage } = require("../src/lib.cjs");
+const { normalizeModelDescriptor, buildModelBreakdowns, buildTrendSeries, collapseCursorSnapshots, costSummary, currentCodexRateWindow, cursorEventToHistory, cursorModelQuota, inferPoolQuota, isCursorModel, pickUsagePercent, speedUsageSummary, buildModelUsage } = require("../src/lib.cjs");
+const { builtInSnapshot } = require("../src/pricing.cjs");
 
 function event(timestamp, model, input = 0, output = 0, cacheRead = 0, chargedCents = 0) {
   return {
@@ -51,6 +52,34 @@ test("classifies Grok and Composer in Cursor Models and infers pools independent
   assert.equal(estimate.packageTotalSource, "usage-percent");
 });
 
+test("counts a server-priced Auto event in its pool without inventing a token cost split", () => {
+  const now = new Date(2026, 8, 25, 12).getTime();
+  const row = { source: "cursor", model: "default", pool: "cursor-models", timestamp: now,
+    equivalentCostCents: 37.25, inputCostCents: null, outputCostCents: null };
+  assert.equal(isCursorModel(row.model, ["default"]), true);
+  const summary = costSummary([row]);
+  assert.equal(summary.equivalentCostCents, 37.25);
+  assert.equal(summary.unallocatedCostCents, 37.25);
+  assert.equal(summary.coveragePercent, 100);
+  assert.equal(buildModelBreakdowns([row]).coarse[0].unallocatedCostCents, 37.25);
+  assert.equal(buildTrendSeries([row], "day", now)[12].unallocatedCostCents, 37.25);
+});
+
+test("imports a Cursor Auto response with its model total into the Cursor pool", () => {
+  const imported = cursorEventToHistory({ timestamp: "2026-09-25T04:00:00.000Z",
+    model: "default", tokenUsage: { inputTokens: 1000, outputTokens: 200, totalCents: 37.25 },
+    chargedCents: 30 }, builtInSnapshot(1), ["default"]);
+  assert.equal(imported.pool, "cursor-models");
+  assert.equal(imported.fastKnown, false);
+  assert.equal(imported.costCents, 30);
+  assert.equal(imported.equivalentCostCents, 37.25);
+  assert.equal(imported.pricingStatus, "api-total-unallocated");
+  const chargedOnly = cursorEventToHistory({ timestamp: "2026-09-25T04:00:00.000Z",
+    model: "default", tokenUsage: { inputTokens: 1000 }, chargedCents: 30 }, builtInSnapshot(1), ["default"]);
+  assert.equal(chargedOnly.equivalentCostCents, 30);
+  assert.equal(chargedOnly.pricingStatus, "charged-total-unallocated");
+});
+
 test("uses the higher-precision Cursor usage percent to infer pool capacity", () => {
   assert.equal(pickUsagePercent(98.1, 98.109), 98.109);
   assert.equal(pickUsagePercent(3.64, 3.64123), 3.64123);
@@ -60,6 +89,22 @@ test("uses the higher-precision Cursor usage percent to infer pool capacity", ()
   const fine = inferPoolQuota({ equivalentCostCents: 4_367.78 }, 3.64123);
   assert.notEqual(coarse.inferredTotalCents, fine.inferredTotalCents);
   assert.ok(Math.abs(fine.inferredTotalCents - 4_367.78 / 0.0364123) < 1e-6);
+});
+
+test("Cursor pool remaining follows the official percentage while preserving API-equivalent cost", () => {
+  const events = [
+    { costCents: 6000, equivalentCostCents: 8200 },
+    { costCents: 900, equivalentCostCents: null },
+  ];
+  const quota = cursorModelQuota(120000, 57.25, events, costSummary(events));
+  assert.equal(quota.percentUsed, 57.25);
+  assert.equal(quota.percentRemaining, 42.75);
+  assert.equal(quota.usedCents, 68700);
+  assert.equal(quota.inferredRemainingCents, 51300);
+  assert.equal(quota.chargedCents, 6900);
+  assert.equal(quota.estimateStatus, "cursor-api-percent");
+  const fallback = cursorModelQuota(120000, null, events, costSummary(events));
+  assert.equal(fallback.usedCents, 6900);
 });
 
 test("builds the three requested model precision levels", () => {
