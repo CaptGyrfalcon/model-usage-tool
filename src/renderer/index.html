@@ -55,13 +55,20 @@
 
       <main class="content">
         <section class="view" id="receiptView">
-          <div class="section-heading"><div><h2>账单小票</h2><p>把一天的 AI 用量，留在一张小票里。</p></div></div>
+          <div class="section-heading"><div><h2>账单小票</h2><p>把一段时间的 AI 用量，留在一张小票里。</p></div></div>
           <div class="receipt-controls">
+            <label>账单周期 <select id="receiptPeriod"><option value="day">日账单</option><option value="week">周账单</option><option value="month">月账单</option><option value="year">年账单</option></select></label>
             <label>日期 <input id="receiptDate" type="date" aria-label="小票日期"></label>
             <label>来源 <select id="receiptSource"><option value="all">全部</option><option value="cursor">Cursor</option><option value="codex">Codex</option></select></label>
+            <label>排序 <select id="receiptSort" title="模型顺序：供应商名称 A–Z → 版本从新到旧 → 同代档位从强到弱 → Fast 优先 → 思考强度从高到低"><option value="cost">费用从高到低</option><option value="model">供应商 / 模型顺序</option></select></label>
             <button type="button" id="receiptRefresh">生成小票</button>
             <button type="button" id="receiptSave" disabled>保存 PNG</button>
           </div>
+          <div class="receipt-options">
+            <label><input id="receiptEffort" type="checkbox" role="switch" checked>区分思考程度</label>
+            <label><input id="receiptSpeed" type="checkbox" role="switch" checked>区分 Fast / non-fast</label>
+          </div>
+          <p id="receiptRangeHint">按本机自然日统计；日期可选择对应周期内的任意一天。</p>
           <p id="receiptStatus" role="status" aria-live="polite"></p>
           <canvas id="receiptCanvas" role="img" aria-label="每日 AI 对账单" hidden></canvas>
           <details class="receipt-details"><summary>查看小票文字明细</summary><pre id="receiptText"></pre></details>
@@ -403,6 +410,7 @@
     </div>
     <script src="codex-monthly.js"></script>
     <script src="model-display.js"></script>
+    <script src="receipt-model.js"></script>
     <script src="trend-range.js"></script>
     <script src="preview.js?v=10"></script>
     <script src="liquid-pool.js?v=6"></script>

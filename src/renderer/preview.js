@@ -217,7 +217,7 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     getSettings: async () => previewSettings,
     getWindowState: async () => previewWindowState,
     getModelUsage: async (range) => previewModelUsage(range),
-    getReceipt: async ({ date, source = "all" }) => {
+    getReceipt: async ({ date, source = "all", period = "day", ...options }) => {
       const today = new Date(now);
       const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
       const rows = [
@@ -225,7 +225,10 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
         { source: "cursor", model: "grok-4.6", costCents: 176, input: 100000, cacheRead: 6000000, cacheWrite: 0, output: 62800, count: 12, unpriced: 0 },
         { source: "codex", model: "gpt-5.6", costCents: 62, input: 100000, cacheRead: 12931400, cacheWrite: 0, output: 50000, count: 13, unpriced: 0 },
       ].filter((r) => source === "all" || r.source === source);
-      return { date, source, generatedAt: Date.now(), rows: date === todayKey ? rows : [] };
+      rows.forEach((row) => { row.effort = row.source === "codex" ? "high" : "medium"; row.fast = row.source === "codex"; });
+      const bounds = window.ReceiptModel.range(date, period);
+      const sampleTime = +new Date(`${todayKey}T12:00:00`);
+      return window.ReceiptModel.build(sampleTime >= bounds.start && sampleTime < bounds.end ? rows : [], { date, source, period, ...options });
     },
     getTrendUsage: async (payload) => {
       const range = window.TrendRange.spec(payload);

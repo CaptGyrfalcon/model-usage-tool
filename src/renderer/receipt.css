@@ -12,3 +12,7 @@
 #receiptCanvas[hidden] { display: none; }
 .receipt-details { max-width: 780px; margin: 15px auto; color: var(--muted); font-size: 11px; }
 .receipt-details pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+.receipt-options { display: flex; flex-wrap: wrap; gap: 12px 20px; margin-top: 15px; font-size: 12px; }
+.receipt-options label { display: flex; gap: 7px; align-items: center; cursor: pointer; }
+.receipt-options input { accent-color: var(--mint); width: 16px; height: 16px; }
+#receiptRangeHint { color: var(--muted); font-size: 11px; line-height: 1.6; }

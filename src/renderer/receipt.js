@@ -9,21 +9,7 @@
   let requestId = 0, ready = null, saving = false;
   const money = (cents) => cents == null ? "未计价" : `US$${(cents / 100).toFixed(2)}`;
   const tokens = (n) => n >= 10000 ? `${(n / 10000).toFixed(2)}万` : n.toLocaleString("zh-CN");
-  const provider = (model) => {
-    const m = model.toLowerCase();
-    if (/claude/.test(m)) return "anthropic";
-    if (/grok/.test(m)) return "grok";
-    if (/gpt|^o[134](?:-|$)|codex/.test(m)) return "openai";
-    if (/gemini/.test(m)) return "gemini";
-    if (/deepseek/.test(m)) return "deepseek";
-    if (/qwen/.test(m)) return "qwen";
-    if (/mistral|codestral/.test(m)) return "mistral";
-    if (/llama/.test(m)) return "meta";
-    if (/minimax/.test(m)) return "minimax";
-    if (/kimi|moonshot/.test(m)) return "moonshot";
-    if (/composer|^auto$|^default$/.test(m)) return "cursor";
-    return null;
-  };
+  const provider = window.ReceiptModel.provider;
   const images = Promise.all(Object.entries(window.ReceiptBrandIcons || {}).map(([name, src]) => new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve([name, img]);
@@ -34,8 +20,9 @@
   async function draw(data) {
     const logos = await images;
     await document.fonts.ready;
-    const groups = [...new Set(data.rows.map((r) => r.source))].map((source) => ({
-      source, rows: data.rows.filter((r) => r.source === source),
+    const details = window.ReceiptModel.detailRows(data.rows);
+    const groups = [...new Set(details.map((r) => r.source))].map((source) => ({
+      source, rows: details.filter((r) => r.source === source),
     }));
     const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, count: 0, unpriced: 0, cost: 0, priced: false };
     for (const row of data.rows) {
@@ -59,7 +46,7 @@
     let rowHeight = 0;
     for (const group of groups) {
       rowHeight += 74;
-      for (const row of group.rows) { row.lines = wrap(row.model.toUpperCase(), 620); rowHeight += Math.max(68, row.lines.length * 42 + 20); }
+      for (const row of group.rows) { row.lines = wrap(row.label, 620); rowHeight += Math.max(68, row.lines.length * 42 + 20); }
     }
     if (!groups.length) rowHeight = 130;
     c.height = 1520 + rowHeight;
@@ -95,11 +82,10 @@
       else { g.strokeStyle = "#85837a"; g.lineWidth = 2; g.strokeRect(x + 5, y + 5, size - 10, size - 10); }
     }
     const printed = new Date(data.generatedAt);
-    const [year, month, day] = data.date.split("-").map(Number);
-    const dateLabel = `${year}年${month}月${day}日`;
-    text("每日 AI 对账单", center, 244, 72, true, "center");
+    const dateLabel = data.range.label;
+    text(data.range.title, center, 244, 72, true, "center");
     text("Vibe something wonderful.", center, 315, 29, false, "center");
-    text("日期", left, 386, 32, true); text(dateLabel, right, 386, 32, true, "right");
+    text(data.period === "day" ? "日期" : "账单周期", left, 386, 32, true); text(dateLabel, right, 386, data.period === "week" ? 29 : 32, true, "right");
     text("出单时间", left, 443, 32, true); text(printed.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }), right, 443, 32, true, "right");
     divider(482);
     text("A P I  总费用", center, 548, 32, true, "center");
@@ -125,7 +111,7 @@
         y += Math.max(0, row.lines.length * 42 + 20 - 68);
       }
     }
-    if (!groups.length) { y += 90; text("这一天暂无用量记录", center, y, 32, false, "center", "#85837a"); y += 40; }
+    if (!groups.length) { y += 90; text(data.rows.length ? "暂无可展示的模型明细" : "所选周期暂无用量记录", center, y, 32, false, "center", "#85837a"); y += 40; }
     divider(y + 40); y += 105;
     const input = total.input + total.cacheRead + total.cacheWrite;
     const stats = [
@@ -137,7 +123,7 @@
     divider(y - 15);
     text(total.unpriced ? `* ${total.unpriced} 次请求未计价，仅合计已知费用` : "AI 用量 · 每一份灵感，都有迹可循", center, y + 43, 27, false, "center");
     text("本机历史记录 · Cursor / Codex", center, y + 95, 27, false, "center");
-    const plain = [`每日 AI 对账单 · ${dateLabel}`, `API 等值估算 · 非实际账单：${amount}`, ...groups.flatMap((group) => [group.source.toUpperCase(), ...group.rows.map((r) => `${r.model}  ${money(r.costCents)}${r.unpriced ? "（含未计价请求）" : ""}`)]), ...stats.map((s) => s.join("：")), total.unpriced ? `${total.unpriced} 次请求未计价，仅合计已知费用` : "本机历史记录"].join("\n");
+    const plain = [`${data.range.title} · ${dateLabel}`, `API 等值估算 · 非实际账单：${amount}`, ...groups.flatMap((group) => [group.source.toUpperCase(), ...group.rows.map((r) => `${r.label}  ${money(r.costCents)}${r.unpriced ? "（含未计价请求）" : ""}`)]), ...stats.map((s) => s.join("：")), total.unpriced ? `${total.unpriced} 次请求未计价，仅合计已知费用` : "本机历史记录"].join("\n");
     return { canvas: c, plain };
   }
 
@@ -147,7 +133,10 @@
     status.textContent = "正在生成小票…";
     try {
       if (!dateInput.value || !dateInput.validity.valid) throw new Error("请选择有效日期");
-      const payload = { date: dateInput.value, source: $("receiptSource").value };
+      const payload = { date: dateInput.value, source: $("receiptSource").value, period: $("receiptPeriod").value,
+        splitEffort: $("receiptEffort").checked, splitSpeed: $("receiptSpeed").checked, sort: $("receiptSort").value };
+      const bounds = window.ReceiptModel.range(payload.date, payload.period);
+      $("receiptRangeHint").textContent = `${bounds.label} · ${payload.period === "week" ? "周一至周日" : "本机自然周期"} · 日期可选周期内任一天`;
       const data = await window.widget.getReceipt(payload);
       const rendered = await draw(data);
       if (id !== requestId) return;
@@ -156,11 +145,20 @@
       canvas.hidden = false; canvas.setAttribute("aria-label", rendered.plain);
       $("receiptText").textContent = rendered.plain;
       ready = data; save.disabled = saving;
-      status.textContent = `${data.rows.length ? "小票已生成" : "当天暂无记录，已生成空白小票"} · 本机自然日 · 可保存高清 PNG`;
+      status.textContent = `${data.rows.length ? "小票已生成" : "所选周期暂无记录，已生成空白小票"} · 可保存高清 PNG`;
     } catch (error) { if (id === requestId) status.textContent = `生成失败：${error.message || error}`; }
   }
   dateInput.addEventListener("change", generate);
+  $("receiptPeriod").addEventListener("change", () => {
+    const flags = window.ReceiptModel.defaults($("receiptPeriod").value);
+    $("receiptEffort").checked = flags.splitEffort;
+    $("receiptSpeed").checked = flags.splitSpeed;
+    generate();
+  });
+  $("receiptEffort").addEventListener("change", generate);
+  $("receiptSpeed").addEventListener("change", generate);
   $("receiptSource").addEventListener("change", generate);
+  $("receiptSort").addEventListener("change", generate);
   $("receiptRefresh").addEventListener("click", generate);
   document.querySelector('[data-tab="receipt"]').addEventListener("click", generate);
   save.addEventListener("click", async () => {
@@ -169,12 +167,13 @@
     const id = requestId;
     try {
       const image = canvas.toDataURL("image/png");
-      const date = ready.date;
+      const date = ready.range.key;
+      const period = ready.period;
       if (window.widget.saveReceipt) {
-        const result = await window.widget.saveReceipt({ date, image });
+        const result = await window.widget.saveReceipt({ date, period, image });
         if (id === requestId) status.textContent = result.canceled ? "已取消保存" : `已保存：${result.path}`;
       } else {
-        const a = document.createElement("a"); a.href = image; a.download = `AI-账单-${date}.png`; a.click();
+        const a = document.createElement("a"); a.href = image; a.download = `AI-${period}-账单-${date}.png`; a.click();
         if (id === requestId) status.textContent = "小票 PNG 已下载";
       }
     } catch (error) { if (id === requestId) status.textContent = `保存失败：${error.message || error}`; }

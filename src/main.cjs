@@ -828,7 +828,7 @@ ipcMain.handle("get-receipt", (_event, payload) => runDataTask("get-receipt", pa
 ipcMain.handle("save-receipt", async (_event, payload) => {
   if (!/^data:image\/png;base64,/.test(payload?.image || "") || payload.image.length > 40_000_000) throw new Error("小票图片无效或过大");
   const result = await dialog.showSaveDialog(win, {
-    title: "保存账单小票", defaultPath: `AI-账单-${String(payload.date).replace(/[^0-9-]/g, "")}.png`,
+    title: "保存账单小票", defaultPath: `AI-${({ day: "日", week: "周", month: "月", year: "年" })[payload.period] || "日"}账单-${String(payload.date).replace(/[^0-9-]/g, "")}.png`,
     filters: [{ name: "PNG 图片", extensions: ["png"] }],
   });
   if (result.canceled || !result.filePath) return { canceled: true };
