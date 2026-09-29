@@ -7,8 +7,8 @@
     <title>AI 用量</title>
     <link rel="stylesheet" href="styles.css?v=20" />
     <link rel="stylesheet" href="orb.css" />
-    <link rel="stylesheet" href="modern.css" />
     <link rel="stylesheet" href="receipt.css" />
+    <link rel="stylesheet" href="theme.css" />
   </head>
   <body>
     <div class="shell">
@@ -25,7 +25,6 @@
           <div class="subtitle" id="planLine">正在读取本机登录态</div>
         </div>
         <div class="window-actions">
-          <button type="button" id="priceQuickBtn" class="icon-btn price-btn" title="手动更新官方价目表" aria-label="手动更新官方价目表">$</button>
           <button type="button" id="refreshBtn" class="icon-btn" title="立即刷新" aria-label="立即刷新"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 18 17"/></svg></button>
           <button type="button" id="exitFullscreenBtn" class="exit-fullscreen-btn" title="退出全屏（Esc）" aria-label="退出全屏">退出全屏 <kbd>Esc</kbd></button>
           <button type="button" id="fullscreenBtn" class="icon-btn fullscreen-btn" title="全屏仪表盘（F11）" aria-label="切换全屏仪表盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg></button>
@@ -44,13 +43,13 @@
       </div>
 
       <nav class="tabs" aria-label="数据视图">
-        <button class="tab active" data-tab="overview" type="button">总览</button>
-        <button class="tab" data-tab="models" type="button">模型明细</button>
-        <button class="tab" data-tab="trends" type="button">消耗趋势</button>
-        <button class="tab" data-tab="levels" type="button">额度水位</button>
-        <button class="tab" data-tab="events" type="button">请求明细</button>
-        <button class="tab" data-tab="pricing" type="button">价目表</button>
-        <button class="tab" data-tab="receipt" type="button">账单小票</button>
+        <button class="tab active" data-tab="overview" type="button" title="总览"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/></svg><span>总览</span></button>
+        <button class="tab" data-tab="models" type="button" title="模型明细"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 3.5 8 12 12.5 20.5 8z"/><path d="m3.5 12 8.5 4.5 8.5-4.5"/><path d="m3.5 16 8.5 4.5 8.5-4.5"/></svg><span>模型</span></button>
+        <button class="tab" data-tab="trends" type="button" title="消耗趋势"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16"/><path d="M7 16v-5M12 16V5M17 16V9"/></svg><span>趋势</span></button>
+        <button class="tab" data-tab="levels" type="button" title="额度水位"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5s6 6.2 6 10.5a6 6 0 0 1-12 0c0-4.3 6-10.5 6-10.5z"/><path d="M8.5 14.5c1.2.8 2.3.8 3.5 0s2.3-.8 3.5 0"/></svg><span>水位</span></button>
+        <button class="tab" data-tab="events" type="button" title="请求明细"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></svg><span>请求</span></button>
+        <button class="tab" data-tab="pricing" type="button" title="价目表"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12.2V4.5a1 1 0 0 1 1-1h7.7l8.3 8.3a1.5 1.5 0 0 1 0 2.1l-6.1 6.1a1.5 1.5 0 0 1-2.1 0z"/><circle cx="8" cy="8" r="1.4"/></svg><span>价目</span></button>
+        <button class="tab" data-tab="receipt" type="button" title="账单小票"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg><span>小票</span></button>
       </nav>
 
       <main class="content">
@@ -75,7 +74,7 @@
         </section>
         <div id="bootstrapState" class="bootstrap-state" role="status" hidden></div>
         <section class="view active" id="overviewView">
-          <div class="overview-heading"><div><span class="eyebrow">OVERVIEW</span><h2>用量概览</h2></div><span class="local-badge">本地记录 · 自动同步</span></div>
+          <div class="overview-section-label">剩余额度 <span>点击查看详情</span></div>
           <div id="quotaGlance" class="quota-glance" aria-label="各池剩余额度"></div>
           <div class="hero-grid" id="heroGrid"></div>
           <div class="overview-section-label">额度详情 <span>当前周期</span></div>
@@ -96,11 +95,19 @@
             </div>
             <span class="count-pill" id="modelCount">0 次</span>
           </div>
+          <div class="control-row">
           <div class="segmented source-switch" aria-label="模型数据来源">
             <button type="button" data-source="all" class="active">全部</button>
             <button type="button" data-source="cursor">Cursor</button>
             <button type="button" data-source="codex">Codex</button>
           </div>
+          <div class="segmented precision-switch" aria-label="模型统计精度">
+            <button type="button" data-precision="coarse" class="active">笼统</button>
+            <button type="button" data-precision="speed">速度</button>
+            <button type="button" data-precision="exact">精确</button>
+          </div>
+          </div>
+          <div class="control-row">
           <label class="model-range-control">
             <span>统计范围</span>
             <select id="modelRangeSelect" aria-label="模型用量统计范围">
@@ -122,16 +129,12 @@
               </optgroup>
             </select>
           </label>
-          <div class="segmented precision-switch" aria-label="模型统计精度">
-            <button type="button" data-precision="coarse" class="active">笼统</button>
-            <button type="button" data-precision="speed">速度</button>
-            <button type="button" data-precision="exact">精确</button>
-          </div>
-          <div class="precision-note" id="precisionNote"></div>
           <div class="segmented model-view-switch" aria-label="模型展示方式">
             <button type="button" data-model-view="list" class="active" aria-pressed="true">文字明细</button>
             <button type="button" data-model-view="donut" aria-pressed="false">环状图</button>
           </div>
+          </div>
+          <div class="precision-note" id="precisionNote"></div>
           <div id="modelDonutPanel" class="model-donut-panel" hidden>
             <label class="model-range-control"><span>占比指标</span><select id="modelMetricSelect" aria-label="环状图占比指标"><option value="total">总 Token（含缓存）</option><option value="effective">有效 Token</option><option value="costCents">美元等效</option></select></label>
             <div id="modelDonutContent" class="model-donut-content"></div>
@@ -148,6 +151,7 @@
             </div>
             <div class="trend-total" id="trendTotal">—</div>
           </div>
+          <div class="control-row trend-control-row">
           <div class="segmented source-switch" aria-label="趋势数据来源">
             <button type="button" data-source="all" class="active">全部</button>
             <button type="button" data-source="cursor">Cursor</button>
@@ -158,6 +162,7 @@
             <button type="button" data-range="week">周</button>
             <button type="button" data-range="month">月</button>
             <button type="button" data-range="custom">近 N…</button>
+          </div>
           </div>
           <form id="trendCustomForm" class="trend-custom-range" hidden>
             <label for="trendCustomCount">近</label>
@@ -178,17 +183,17 @@
             <button type="button" data-metric="equivalentCostCents">美元等效</button>
           </div>
           <div class="breakdown-toggles">
-            <button type="button" id="breakdownBtn" class="breakdown-btn" aria-pressed="false">
+            <button type="button" id="breakdownBtn" class="breakdown-btn" aria-pressed="false" title="柱内显示输入 / 缓存 / 输出构成" aria-label="柱内显示输入构成">
               <span class="toggle-track"><i></i></span>
-              柱内显示输入构成
+              输入构成
             </button>
-            <button type="button" id="speedBreakdownBtn" class="breakdown-btn speed-breakdown-btn" aria-pressed="false">
+            <button type="button" id="speedBreakdownBtn" class="breakdown-btn speed-breakdown-btn" aria-pressed="false" title="柱内显示 Fast / 非 Fast 比例" aria-label="柱内显示 Fast 比例">
               <span class="toggle-track"><i></i></span>
-              柱内显示 Fast 比例
+              Fast 比例
             </button>
-            <button type="button" id="modelBreakdownBtn" class="breakdown-btn" aria-pressed="false">
+            <button type="button" id="modelBreakdownBtn" class="breakdown-btn" aria-pressed="false" title="柱内按模型分类堆叠" aria-label="柱内按模型分类">
               <span class="toggle-track"><i></i></span>
-              柱内按模型分类
+              按模型
             </button>
           </div>
           <article class="chart-card">
@@ -257,23 +262,35 @@
             </div>
             <div class="pricing-heading-actions"><span class="count-pill" id="pricingCount">0 档</span><button type="button" id="priceBtn" class="text-btn" title="手动更新官方价目表" aria-label="手动更新官方价目表">更新价格 ↻</button></div>
           </div>
-          <label class="model-range-control">
-            <span>版本</span>
-            <select id="pricingSnapshotSelect" aria-label="价目表版本"></select>
-          </label>
+          <div class="control-row pricing-control-row">
           <div class="segmented" id="pricingSourceSwitch" aria-label="价目表目录">
             <button type="button" data-pricing-source="all" class="active">全部</button>
             <button type="button" data-pricing-source="cursor">Cursor</button>
             <button type="button" data-pricing-source="codex">Codex</button>
+          </div>
+          <label class="model-range-control">
+            <span>版本</span>
+            <select id="pricingSnapshotSelect" aria-label="价目表版本"></select>
+          </label>
           </div>
           <div class="pricing-note" id="pricingNote"></div>
           <div class="pricing-list" id="pricingList"></div>
         </section>
       </main>
 
-      <footer>
-        <label class="setting-control">
-          <span>刷新</span>
+      <aside id="smartPanel" class="smart-panel" hidden role="dialog" aria-modal="true" aria-label="应用设置" tabindex="-1">
+        <div class="smart-panel-head">
+          <div><b>应用设置</b><span>刷新、外观与系统集成</span></div>
+          <button type="button" id="smartCloseBtn" class="icon-btn close" aria-label="关闭设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+        </div>
+        <div id="sourceHealth" class="source-health"></div>
+        <div class="settings-actions">
+          <button type="button" id="priceQuickBtn" class="text-btn" title="手动更新官方价目表">更新官方价目表</button>
+          <button type="button" id="dashBtn" class="text-btn" title="在浏览器中打开 Cursor 账单页">打开 Cursor 账单 ↗</button>
+        </div>
+        <h3 class="settings-group">显示</h3>
+        <label class="smart-setting-row">
+          <span><b>自动刷新</b><small>定时同步 Cursor 云端与 Codex 本机用量</small></span>
           <select id="intervalSelect" aria-label="自动刷新间隔">
             <option value="15000">15 秒</option>
             <option value="30000">30 秒</option>
@@ -282,22 +299,15 @@
             <option value="120000">2 分钟</option>
           </select>
         </label>
-        <label class="opacity setting-control">
-          <span>透明度</span>
+        <label class="smart-setting-row">
+          <span><b>窗口透明度</b><small>拖动即时预览，松开后保存</small></span>
           <input id="opacity" type="range" min="65" max="100" value="96" aria-label="窗口透明度" />
         </label>
-        <button type="button" id="dashBtn" class="dashboard-btn">账单 ↗</button>
-      </footer>
-      <aside id="smartPanel" class="smart-panel" hidden role="dialog" aria-modal="true" aria-label="应用设置" tabindex="-1">
-        <div class="smart-panel-head">
-          <div><b>应用设置</b><span>更安静地关注用量，更清楚地掌握状态</span></div>
-          <button type="button" id="smartCloseBtn" class="icon-btn close" aria-label="关闭设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
-        </div>
-        <div id="sourceHealth" class="source-health"></div>
         <label class="smart-setting-row">
           <span><b>动态效果</b><small>减少动态效果会关闭水波与装饰动画</small></span>
           <select id="motionSelect" aria-label="动态效果"><option value="system">跟随系统</option><option value="reduce">减少动态效果</option></select>
         </label>
+        <h3 class="settings-group">系统</h3>
         <label class="smart-setting-row">
           <span><b>开机启动</b><small>登录 Windows 后自动启动挂件</small></span>
           <input id="startupToggle" type="checkbox" role="switch" />
@@ -315,6 +325,7 @@
           <span><b>智能贴边</b><small>鼠标离开后收进最近的屏幕边缘</small></span>
           <input id="smartDockToggle" type="checkbox" role="switch" />
         </label>
+        <h3 class="settings-group">隐私与高级</h3>
         <label class="smart-setting-row">
           <span><b>隐私模式</b><small>只把邮箱显示成 ****，套餐名称正常显示</small></span>
           <input id="privacyToggle" type="checkbox" role="switch" />

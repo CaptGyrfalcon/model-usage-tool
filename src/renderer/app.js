@@ -939,7 +939,10 @@ function renderOverview(d) {
   const names = { "cursor-models": "Cursor 模型", "cursor-api": "三方模型", "codex-window-300": "Codex 5h", "codex-window-10080": "Codex 7d" };
   $("quotaGlance").innerHTML = quotaPools(d).map((pool) => {
     const target = pool.source === "codex" ? "codexPool" : pool.id === "cursor-models" ? "cursorPool" : "otherPool";
-    return `<button type="button" data-quota-target="${target}" title="${escapeHtml(pool.name)} · 点击查看详情"><span>${escapeHtml(names[pool.id] || pool.name)}</span><b class="${toneClass(pool.used)}">${pool.precision === 2 ? formatCursorPct(pool.remaining) : formatPct(pool.remaining)}</b><small>剩余</small></button>`;
+    const remaining = Math.min(100, Math.max(0, Number(pool.remaining) || 0));
+    // Presentation attributes rather than inline styles: the CSP forbids style attributes.
+    const ring = `<svg class="glance-ring" viewBox="0 0 40 40" aria-hidden="true"><circle class="glance-track" cx="20" cy="20" r="17" pathLength="100"/><circle class="glance-value" cx="20" cy="20" r="17" pathLength="100" stroke-dasharray="${remaining.toFixed(2)} 100" transform="rotate(-90 20 20)"/></svg>`;
+    return `<button type="button" class="${toneClass(pool.used)}" data-quota-target="${target}" title="${escapeHtml(pool.name)} · 点击查看详情">${ring}<b>${pool.precision === 2 ? formatCursorPct(pool.remaining) : formatPct(pool.remaining)}</b><span>${escapeHtml(names[pool.id] || pool.name)}</span><small>剩余</small></button>`;
   }).join("");
   const combined = d.combined || {};
   const codex = d.codex;
@@ -1762,14 +1765,14 @@ function renderPricing() {
       <tbody>
         ${catalog.rows.map((row) => `
           <tr>
-            <td>${row.source === "codex" ? "Codex" : "Cursor"}</td>
-            <td>${escapeHtml(window.ModelDisplay.format(row.model, { precision: "coarse" }))}</td>
-            <td><span class="speed-pill ${row.speed === "fast" ? "fast" : "normal"}">${escapeHtml(row.speedLabel)}</span></td>
-            <td>${escapeHtml(row.contextLabel)}</td>
-            <td>${escapeHtml(formatRate(row.input))}</td>
-            <td>${escapeHtml(formatRate(row.output))}</td>
-            <td>${escapeHtml(formatRate(row.cacheWrite))}</td>
-            <td>${escapeHtml(formatRate(row.cacheRead))}</td>
+            <td class="pricing-source">${row.source === "codex" ? "Codex" : "Cursor"}</td>
+            <td class="pricing-model">${escapeHtml(window.ModelDisplay.format(row.model, { precision: "coarse" }))}</td>
+            <td class="pricing-speed"><span class="speed-pill ${row.speed === "fast" ? "fast" : "normal"}">${escapeHtml(row.speedLabel)}</span></td>
+            <td class="pricing-context">${escapeHtml(row.contextLabel)}</td>
+            <td class="pricing-rate" data-label="输入">${escapeHtml(formatRate(row.input))}</td>
+            <td class="pricing-rate" data-label="输出">${escapeHtml(formatRate(row.output))}</td>
+            <td class="pricing-rate" data-label="写缓存">${escapeHtml(formatRate(row.cacheWrite))}</td>
+            <td class="pricing-rate" data-label="读缓存">${escapeHtml(formatRate(row.cacheRead))}</td>
           </tr>
         `).join("")}
       </tbody>
