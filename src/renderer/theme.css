@@ -124,6 +124,12 @@ input[type="range"] { accent-color: var(--mint-strong); }
 .control-row > .model-range-control span { flex-shrink: 0; }
 .control-row > .model-range-control select { min-width: 0; flex: 1; max-width: 132px; }
 .pricing-control-row > .model-range-control select { max-width: none; }
+.source-switch { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.control-row:has(.source-switch) { grid-template-columns: 1fr; }
+#balanceRangeSwitch { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 8px; }
+#balanceRangeSwitch[hidden] { display: none; }
+.deepseek-card { border-color: rgba(88, 132, 255, .28); }
+.quota-icon.deepseek { background: rgba(88, 132, 255, .12); color: #81a5ff; }
 .control-row .segmented button { padding: 0 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #modelsView .model-view-switch { margin-top: 0; }
 .metric-switch { margin-top: 0; }
@@ -182,6 +188,7 @@ input[type="range"] { accent-color: var(--mint-strong); }
 .quota-icon.cursor { color: var(--mint); background: var(--accent-bg); border: 0; }
 .quota-icon.other { color: var(--violet); background: rgba(163, 171, 255, .13); border: 0; }
 .quota-icon.codex { color: var(--amber); background: rgba(243, 194, 119, .13); border: 0; }
+.quota-icon.claude { color: #f0a488; background: rgba(217, 119, 87, .14); border: 0; }
 .quota-title { min-width: 0; }
 .quota-title h3 { font-size: 13px; font-weight: 650; }
 .quota-title span { margin-top: 1px; color: var(--soft); font-size: 10px; line-height: 1.5; }
@@ -194,6 +201,7 @@ progress, progress::-webkit-progress-bar { background: rgba(255, 255, 255, .06);
 .quota-progress.cursor::-webkit-progress-value { background: var(--mint); }
 .quota-progress.other::-webkit-progress-value { background: var(--violet); }
 .quota-progress.codex::-webkit-progress-value { background: var(--amber); }
+.quota-progress.claude::-webkit-progress-value { background: #e08a6b; }
 .quota-stats, .quota-credit { font-size: 10.5px; }
 .quota-stats b, .quota-credit b, .codex-window-stats b { color: var(--text); }
 .quota-credit { margin-top: 10px; padding-top: 10px; }

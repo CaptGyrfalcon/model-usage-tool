@@ -270,3 +270,49 @@ test("adding a cycle reference leaves the chart's actual curve and horizontal la
   assert.deepEqual(labels(result.plain), labels(result.reference));
   assert.match(result.reference, /class="uniform-line" points="42.0,47.6 388.0,81.2"/);
 });
+
+test("DeepSeek water level renders currency, top-ups and negative balances without subscription percentages", () => {
+  const app = runtime();
+  app.run(`const start = Date.now() - 3600000;
+    quotaTimeline = { kind: 'balance', pool: 'deepseek-balance-CNY', currency: 'CNY', change: 8,
+      pools: [{id:'deepseek-balance-CNY',label:'DeepSeek CNY 余额',hasData:true}],
+      cycle: {key:'today',label:'今日',startAt:start,endAt:Date.now()+1000,startRemaining:-2,endRemaining:6},
+      cycles: [{key:'today',label:'今日'}],
+      series: [{at:start+1000,balance:-2,toppedUp:-2,granted:0},{at:start+2000,balance:6,toppedUp:0,granted:6}] };
+    renderLevels();`);
+  assert.equal(app.document.getElementById("balanceRangeSwitch").hidden, false);
+  assert.equal(app.document.getElementById("levelTotal").textContent, "¥-2.00 → ¥6.00");
+  assert.equal(app.document.getElementById("uniformLegend").hidden, true);
+  const svg = app.document.getElementById("levelChart").innerHTML;
+  assert.match(svg, /DeepSeek 余额变化趋势/);
+  assert.doesNotMatch(svg, /NaN|uniform-line|\d+%/);
+  assert.match(app.document.getElementById("uniformNote").textContent, /净变化 \+¥8.00/);
+  app.document.getElementById("chartTooltip").getBoundingClientRect = () => ({ width: 150, height: 50 });
+  app.context.window.innerWidth = 800;
+  app.context.window.innerHeight = 600;
+  app.run(`handleLevelPointerMove({target:{closest:()=>({dataset:{levelIndex:'1'}})},clientX:10,clientY:20});`);
+  assert.equal(app.document.getElementById("chartTooltipTotal").textContent, "余额 ¥6.00");
+  assert.match(app.document.getElementById("chartTooltipRows").innerHTML, /赠送余额 ¥6.00/);
+});
+test("DeepSeek request dollars retain sub-cent precision without implying an actual bill", () => {
+  const app=runtime();
+  assert.equal(app.run(`formatRequestUsd({source:'deepseek'},0.001)`),'$0.000010');
+  assert.equal(app.run(`formatRequestUsd({source:'deepseek'},0.000001)`),'<$0.000001');
+  assert.equal(app.run(`formatRequestUsd({source:'deepseek'},null)`),'—');
+  assert.equal(app.run(`formatRequestUsd({source:'cursor'},0.001)`),'$0.00');
+});
+
+test("balance range selection persists and requests calendar ranges without an old cycle selection", async () => {
+  const app = runtime();
+  const saved = [], requests = [];
+  app.context.window.widget.saveSettings = (value) => saved.push(value);
+  app.context.window.widget.getQuotaTimeline = (payload) => { requests.push(payload); return new Promise(() => {}); };
+  app.run(`settings.quotaLevelPool='deepseek-balance-CNY'; selectedCycleKey='old-day';`);
+  for (const range of ["day", "week", "month", "year"]) {
+    app.document.getElementById("balanceRangeSwitch").listeners.click({ target: { closest: () => ({ dataset: { balanceRange: range } }) } });
+    assert.equal(saved.at(-1).balanceRange, range);
+    assert.equal(requests.at(-1).range, range);
+    assert.equal(requests.at(-1).cycleKey, null);
+    assert.equal(requests.at(-1).pool, "deepseek-balance-CNY");
+  }
+});

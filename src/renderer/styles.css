@@ -495,6 +495,12 @@ body:not(.fullscreen) .chart-card:hover {
   border: 1px solid rgba(241, 189, 108, 0.13);
 }
 
+.quota-icon.claude {
+  color: #ffc9b3;
+  background: rgba(217, 119, 87, 0.12);
+  border: 1px solid rgba(217, 119, 87, 0.14);
+}
+
 .quota-title {
   flex: 1;
 }
@@ -565,6 +571,11 @@ progress::-webkit-progress-bar {
 .quota-progress.codex::-webkit-progress-value {
   background: linear-gradient(90deg, #e4a955, #f4ce8d);
   box-shadow: 0 0 10px rgba(241, 189, 108, 0.18);
+}
+
+.quota-progress.claude::-webkit-progress-value {
+  background: linear-gradient(90deg, #c96442, #e59a7c);
+  box-shadow: 0 0 10px rgba(217, 119, 87, 0.18);
 }
 
 .codex-window-count b {
@@ -853,6 +864,12 @@ progress::-webkit-progress-bar {
 
 .source-switch {
   margin-bottom: 7px;
+}
+
+.source-switch,
+#pricingSourceSwitch,
+#eventSourceSwitch {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .model-range-control {
@@ -2885,7 +2902,9 @@ button:active:not(:disabled) { transform: scale(0.97); }
   width: 100%;
   height: 312px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* One row for however many pools are present (Cursor, Codex, Claude). */
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   align-items: stretch;
   gap: 10px;
   padding: 4px 2px 0;

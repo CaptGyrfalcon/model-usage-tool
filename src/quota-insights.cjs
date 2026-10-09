@@ -101,8 +101,22 @@ function buildQuotaInsights(data, now = Date.now()) {
       pending: true,
     });
   }
+  for (const window of data.claude?.quota?.windows || []) {
+    const windowMinutes = finite(window.windowMinutes);
+    const resetsAt = finite(window.resetsAt);
+    const usedPercent = clampPercent(window.usedPercent);
+    insights.push({
+      id: `claude-${windowMinutes}`,
+      label: windowMinutes <= 360 ? "Claude 5 小时" : "Claude 每周",
+      usedPercent,
+      remainingPercent: usedPercent == null ? null : 100 - usedPercent,
+      resetsAt,
+      resetEstimated: true,
+      forecast: forecastQuota({ usedPercent, startAt: finite(window.startsAt), resetsAt }, now),
+    });
+  }
   insights.sort((a, b) => {
-    const order = { "cursor-models": 0, "cursor-api": 1, cursor: 1, "codex-300": 2, "codex-10080": 3 };
+    const order = { "cursor-models": 0, "cursor-api": 1, cursor: 1, "codex-300": 2, "codex-10080": 3, "claude-300": 4, "claude-10080": 5 };
     return (order[a.id] ?? 10) - (order[b.id] ?? 10);
   });
   return insights;

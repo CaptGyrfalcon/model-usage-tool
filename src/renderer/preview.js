@@ -54,10 +54,12 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
   const modelRows = [
     { label: "gpt-5.6-sol · Fast", name: "gpt-5.6-sol", fast: true, fastKnown: true, count: 42, input: 11_800_000, cacheRead: 36_800_000, cacheWrite: 0, output: 2_400_000, reasoning: 740_000, effective: 14_200_000, total: 51_000_000, costCents: 8_430 },
     { label: "grok-4.6 · 标准", name: "grok-4.6", fast: false, fastKnown: true, count: 35, input: 7_700_000, cacheRead: 23_900_000, cacheWrite: 0, output: 1_400_000, reasoning: 310_000, effective: 9_100_000, total: 33_000_000, costCents: 2_150 },
+    { label: "claude-opus-5-5 · 标准", name: "claude-opus-5-5", effort: "medium", fast: false, fastKnown: true, count: 232, input: 464, cacheRead: 30_240_000, cacheWrite: 660_000, output: 212_000, reasoning: 0, effective: 212_464, total: 31_112_000, costCents: 1_558 },
     { label: "gpt-5.6-terra · 速度未知", name: "gpt-5.6-terra", fast: false, fastKnown: false, count: 18, input: 4_050_000, cacheRead: 12_200_000, cacheWrite: 0, output: 750_000, reasoning: 180_000, effective: 4_800_000, total: 17_000_000, costCents: 990 },
   ];
   const source = (label) => {
-    const rows = modelRows.filter((row) => label === "全部" || (label === "Cursor") === row.name.startsWith("grok"));
+    const origin = (row) => row.name.startsWith("grok") ? "Cursor" : row.name.startsWith("claude") ? "Claude Code" : "Codex";
+    const rows = modelRows.filter((row) => label === "全部" || origin(row) === label);
     return { label, periodLabel: "最近 30 天", eventCount: rows.reduce((sum, row) => sum + row.count, 0), costAvailable: true, costCoveragePercent: 93.4, modelBreakdowns: { coarse: rows, speed: rows, exact: rows }, trends };
   };
   const modelRangeLabels = { all: "全部历史", months6: "近 6 个月", months3: "近 3 个月", month1: "近 1 个月", days14: "近 14 天", days7: "近 7 天", day1: "近 1 天", hours12: "近 12 小时", hours6: "近 6 小时", hour1: "近 1 小时" };
@@ -68,6 +70,7 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
       all: { ...source("全部"), periodLabel: modelRangeLabels[key] || modelRangeLabels.month1 },
       cursor: { ...source("Cursor"), periodLabel: modelRangeLabels[key] || modelRangeLabels.month1 },
       codex: { ...source("Codex"), periodLabel: modelRangeLabels[key] || modelRangeLabels.month1 },
+      claude: { ...source("Claude Code"), periodLabel: modelRangeLabels[key] || modelRangeLabels.month1 },
     },
   });
   const data = {
@@ -93,18 +96,51 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     },
     combined: { tokens: { today: { effective: 8_700_000, total: 29_400_000 }, h1: { effective: 1_420_000, total: 5_160_000 } }, eventCount: 95, lastEvent: { source: "codex", model: "gpt-5.6-sol", effort: "high", at: now - 90_000, equivalentCostCents: 86, cacheWriteCostCents: 18, cacheReadCostCents: 12, tokens: { input: 120_000, output: 24_000, cacheRead: 410_000, cacheWrite: 36_000 } } },
     persistence: { count: 6_148, earliest: now - 45 * 86_400_000 },
-    sources: { all: source("全部"), cursor: source("Cursor"), codex: source("Codex") },
-    sourceStatus: { cursor: { ok: true }, codex: { ok: true } },
+    claude: {
+      planName: "Claude Code", files: 4, periodLabel: "最近 30 天", eventCount: 232,
+      tokens: { today: { effective: 212_464, total: 31_112_000 }, h5: { effective: 98_000, total: 12_400_000 }, d7: { total: 31_112_000 }, d30: { total: 31_112_000 } },
+      requests: { today: 232, h5: 96, d7: 232, d30: 232 },
+      costs: {
+        today: { equivalentCostCents: 1_558, coveragePercent: 100 },
+        h5: { equivalentCostCents: 612, coveragePercent: 100 },
+        d7: { equivalentCostCents: 1_558, inputCostCents: 0.2, cacheWriteCostCents: 528, cacheReadCostCents: 605, outputCostCents: 425, coveragePercent: 100 },
+        d30: { equivalentCostCents: 1_558, coveragePercent: 100 },
+      },
+      quota: {
+        sampledAt: now - 4 * 60_000, stale: false,
+        fit: { lookbackDays: 30, intervals: 15, excludedIntervals: 3 },
+        windows: [
+          { slot: "primary", pool: "claude-300", name: "5 小时额度", windowMinutes: 300, usedPercent: 65, officialUsedPercent: 65, percentRemaining: 35,
+            sampledAt: now - 4 * 60_000, startsAt: now - 4.7 * 3_600_000, resetsAt: now + 18 * 60_000, resetsLow: now + 11 * 60_000, resetsHigh: now + 26 * 60_000,
+            speedUsage: { normal: 1_853, fast: 0, unknown: 0, total: 1_853, basis: "equivalent-cost" },
+            quotaEstimate: { estimateStatus: "fitted", inferredTotalCents: 4_712, inferredTotalLowCents: 4_588, inferredTotalHighCents: 4_843, usedCents: 3_063, inferredRemainingCents: 1_649, localCents: 1_853, localPercent: 39.3, otherPercent: 25.7 } },
+          { slot: "secondary", pool: "claude-10080", name: "7 天额度", windowMinutes: 10_080, usedPercent: 15, officialUsedPercent: 15, percentRemaining: 85,
+            sampledAt: now - 4 * 60_000, startsAt: now - 4.7 * 3_600_000, resetsAt: now + 6.8 * 86_400_000, resetsLow: now + 6.79 * 86_400_000, resetsHigh: now + 6.81 * 86_400_000,
+            speedUsage: { normal: 1_853, fast: 0, unknown: 0, total: 1_853, basis: "equivalent-cost" },
+            quotaEstimate: { estimateStatus: "fitted", inferredTotalCents: 21_791, inferredTotalLowCents: 19_370, inferredTotalHighCents: 24_904, usedCents: 3_269, inferredRemainingCents: 18_523, localCents: 1_853, localPercent: 8.5, otherPercent: 6.5 } },
+        ],
+      },
+    },
+    sources: { all: source("全部"), cursor: source("Cursor"), codex: source("Codex"), claude: source("Claude Code") },
+    sourceStatus: { cursor: { ok: true }, codex: { ok: true }, claude: { ok: true } },
     pricing: { fetchedAt: now, status: "remote", note: "已从官方文档更新" },
     modelUsage: previewModelUsage("month1"),
   };
   data.codex.quota.windows = [data.codex.quota.primary, data.codex.quota.secondary];
+  data.deepseek = { files: 8, tokens: { today: { total: 1248000 }, month: { total: 24880000 } }, requests: { today: 18 },
+    balance: { ok: true, sampledAt: now, balances: [{ currency: "CNY", total: 42.36, toppedUp: 36.36, granted: 6 }] } };
+  data.sourceStatus.deepseek = { ok: true };
+  data.sources.deepseek = { ...source("DeepSeek Harness"), costAvailable: false };
   data.quotaInsights = [
     { id: "cursor-models", label: "Cursor 模型池", usedPercent: 91.24, remainingPercent: 8.76, resetsAt: data.billingCycleEnd, forecast: { status: "exhaust", exhaustionAt: now + 26 * 3_600_000 } },
     { id: "cursor-api", label: "Cursor API 池", usedPercent: 34.5, remainingPercent: 65.5, resetsAt: data.billingCycleEnd, forecast: { status: "safe", exhaustionAt: now + 35 * 86_400_000 } },
     { id: "codex-300", label: "Codex 5 小时", usedPercent: 64, remainingPercent: 36, resetsAt: data.codex.quota.primary.resetsAt, forecast: { status: "exhaust", exhaustionAt: now + 70 * 60_000 } },
     { id: "codex-10080", label: "Codex 每周", usedPercent: 27, remainingPercent: 73, resetsAt: data.codex.quota.secondary.resetsAt, forecast: { status: "safe", exhaustionAt: now + 11 * 86_400_000 } },
+    { id: "claude-300", label: "Claude 5 小时", usedPercent: 65, remainingPercent: 35, resetsAt: now + 18 * 60_000, forecast: { status: "safe", exhaustionAt: now + 2.5 * 3_600_000 } },
+    { id: "claude-10080", label: "Claude 每周", usedPercent: 15, remainingPercent: 85, resetsAt: now + 6.8 * 86_400_000, forecast: { status: "safe", exhaustionAt: now + 26 * 86_400_000 } },
   ];
+  data.claude.quota.primary = data.claude.quota.windows[0];
+  data.claude.quota.secondary = data.claude.quota.windows[1];
   const previewQuery = new URLSearchParams(location.search);
   const previewSettings = { opacity: 0.96, compact: false, orbMode: previewQuery.get("orb") === "1", orbPool: previewQuery.get("orbPool") || "cursor-models", orbDisplayMode: previewQuery.get("orbDisplay") || "quota", orbPoolShape: previewQuery.get("shape") || "sphere", orbPoolCombined: previewQuery.get("combined") === "1", intervalMs: 30_000, activeTab: previewQuery.get("tab") || "models", modelRange: "month1", modelPrecision: "speed", trendRange: "day", trendMetric: "total", trendBreakdown: true, trendSpeedBreakdown: previewQuery.get("speed") === "1", dataSource: "all", quotaLevelPool: previewQuery.get("pool") || "cursor-models", eventSource: "all", pricingSource: "all", tokenDisplayVersion: 2, smartDock: false, privacyMode: previewQuery.get("privacy") === "1", quotaAlerts: false, alertThreshold: 20, taskbarMeters: true, taskbarMetersSecondary: true };
   const previewEvents = [
@@ -185,6 +221,9 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
       { id: "other-models", label: "Cursor 三方模型池", hasData: true },
       { id: "codex-300", label: "Codex 5 小时", hasData: true },
       { id: "codex-10080", label: "Codex 每周", hasData: true },
+      { id: "claude-300", label: "Claude 5 小时", hasData: true },
+      { id: "claude-10080", label: "Claude 每周", hasData: true },
+      { id: "deepseek-balance-CNY", label: "DeepSeek CNY 余额", hasData: true },
     ],
     pool,
     cycles: previewCycles,
@@ -237,9 +276,22 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
         ...window.TrendRange.labels(range.boundaries[index], range.boundaries[index + 1], range.bucket),
       }));
       const source = (label) => ({ label, costAvailable: true, costCoveragePercent: 100, trends: { custom: series } });
-      return { range, sources: { all: source("全部"), cursor: source("Cursor"), codex: source("Codex") } };
+      return { range, sources: { all: source("全部"), cursor: source("Cursor"), codex: source("Codex"), claude: source("Claude Code") } };
     },
-    getQuotaTimeline: async (payload = {}) => previewTimeline(payload.pool || previewSettings.quotaLevelPool, payload.cycleKey || "reset:current"),
+    getQuotaTimeline: async (payload = {}) => {
+      const pool = payload.pool || previewSettings.quotaLevelPool;
+      const result = previewTimeline(pool, payload.cycleKey || "reset:current");
+      if (!pool.startsWith("deepseek-balance-")) return result;
+      const range = payload.range || "day";
+      const bounds = window.ReceiptModel.range(new Date(now).toLocaleDateString("en-CA"), range);
+      const endAt = Math.min(now, bounds.end);
+      const series = Array.from({ length: 32 }, (_, i) => ({ at: bounds.start + i / 31 * (endAt - bounds.start),
+        balance: 40 - i * .18 + (i > 16 ? 8 : 0), toppedUp: 34 - i * .18 + (i > 16 ? 8 : 0), granted: 6 }));
+      const cycle = { key: "preview-balance", startAt: bounds.start, endAt: bounds.end, label: bounds.label || "当前自然周期",
+        startRemaining: series[0].balance, endRemaining: series.at(-1).balance };
+      return { ...result, kind: "balance", currency: "CNY", range, cycle, cycles: [cycle], series,
+        change: series.at(-1).balance - series[0].balance };
+    },
     queryUsageEvents: async (payload = {}) => {
       const source = payload.source && payload.source !== "all" ? payload.source : null;
       const query = String(payload.query || "").trim().toLowerCase();

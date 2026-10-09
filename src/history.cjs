@@ -15,6 +15,7 @@ function finite(value, fallback = 0) {
 
 function upsertCost(column) {
   return `CASE
+    WHEN usage_events.billing_kind = 'estimated' AND excluded.billing_kind = 'estimated' THEN excluded.${column}
     WHEN usage_events.pricing_status = 'unavailable' THEN excluded.${column}
     WHEN excluded.tier_source = 'response' AND COALESCE(usage_events.tier_source, '') != 'response' THEN COALESCE(excluded.${column}, usage_events.${column})
     ELSE COALESCE(usage_events.${column}, excluded.${column})
@@ -55,10 +56,22 @@ function eventFromRow(row) {
     cacheWrite: Number(row.cache_write_tokens) || 0,
     reasoning: Number(row.reasoning_tokens) || 0,
     equivalentCostCents: row.equivalent_cost_cents,
+    equivalentCostLowCents: row.equivalent_cost_low_cents,
+    equivalentCostHighCents: row.equivalent_cost_high_cents,
     inputCostCents: row.input_cost_cents,
     cacheReadCostCents: row.cache_read_cost_cents,
     cacheWriteCostCents: row.cache_write_cost_cents,
     outputCostCents: row.output_cost_cents,
+    billingCurrency: row.billing_currency,
+    billingAmount: row.billing_amount,
+    billingDate: row.billing_date,
+    billingKind: row.billing_kind,
+    billingBasis: row.billing_basis ? JSON.parse(row.billing_basis) : null,
+    fxRate: row.fx_rate,
+    fxDate: row.fx_date,
+    fxSource: row.fx_source,
+    pricingStatus: row.pricing_status,
+    count: row.request_count,
   };
 }
 
@@ -116,6 +129,11 @@ class UsageHistory {
         PRIMARY KEY (source, pool, bucket)
       );
       CREATE INDEX IF NOT EXISTS idx_quota_samples_time ON quota_samples(source, timestamp);
+      CREATE TABLE IF NOT EXISTS balance_samples (
+        source TEXT NOT NULL, account_key TEXT NOT NULL, currency TEXT NOT NULL,
+        timestamp INTEGER NOT NULL, total REAL NOT NULL, topped_up REAL NOT NULL, granted REAL NOT NULL,
+        PRIMARY KEY (source, account_key, currency, timestamp)
+      );
       CREATE TABLE IF NOT EXISTS codex_quota_observations (
         sample_key TEXT PRIMARY KEY, pool TEXT NOT NULL, timestamp INTEGER NOT NULL,
         used_percent REAL, window_minutes INTEGER, resets_at INTEGER, plan_type TEXT,
@@ -138,6 +156,9 @@ class UsageHistory {
       );
     `);
     this.ensureUsageColumns();
+    if (!this.db.prepare("PRAGMA table_info(balance_samples)").all().some((column) => column.name === "origin")) {
+      this.db.exec("ALTER TABLE balance_samples ADD COLUMN origin TEXT NOT NULL DEFAULT 'observed'");
+    }
     if (!this.db.prepare("PRAGMA table_info(quota_samples)").all().some((column) => column.name === "starts_at")) {
       this.db.exec("ALTER TABLE quota_samples ADD COLUMN starts_at INTEGER");
     }
@@ -154,8 +175,9 @@ class UsageHistory {
         output_cost_cents, equivalent_cost_cents, equivalent_cost_low_cents,
         equivalent_cost_high_cents, quota_equivalent_cost_cents,
         quota_equivalent_cost_low_cents, quota_equivalent_cost_high_cents,
-        pricing_snapshot_id, pricing_status, request_count
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        pricing_snapshot_id, pricing_status, request_count, cache_write_1h_tokens,
+        billing_currency, billing_amount, billing_date, fx_rate, fx_date, fx_source, billing_kind, billing_basis
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(source, event_key) DO UPDATE SET
         timestamp = CASE
           WHEN excluded.source = 'codex' THEN MIN(usage_events.timestamp, excluded.timestamp)
@@ -206,7 +228,17 @@ class UsageHistory {
             THEN excluded.pricing_status
           ELSE COALESCE(usage_events.pricing_status, excluded.pricing_status)
         END,
-        request_count = excluded.request_count
+        request_count = excluded.request_count,
+        cache_write_1h_tokens = COALESCE(excluded.cache_write_1h_tokens, usage_events.cache_write_1h_tokens),
+        billing_currency = COALESCE(usage_events.billing_currency, excluded.billing_currency),
+        billing_amount = CASE WHEN usage_events.billing_kind = 'estimated' AND excluded.billing_kind = 'estimated'
+          THEN excluded.billing_amount ELSE COALESCE(usage_events.billing_amount, excluded.billing_amount) END,
+        billing_date = COALESCE(usage_events.billing_date, excluded.billing_date),
+        fx_rate = COALESCE(usage_events.fx_rate, excluded.fx_rate),
+        fx_date = COALESCE(usage_events.fx_date, excluded.fx_date),
+        fx_source = COALESCE(usage_events.fx_source, excluded.fx_source),
+        billing_kind = COALESCE(usage_events.billing_kind, excluded.billing_kind),
+        billing_basis = COALESCE(usage_events.billing_basis, excluded.billing_basis)
     `);
     this.insertQuota = this.db.prepare(`
       INSERT INTO quota_samples (source, pool, bucket, timestamp, used_percent, window_minutes, resets_at, starts_at, plan_type)
@@ -252,6 +284,14 @@ class UsageHistory {
     const existing = new Set(this.db.prepare("PRAGMA table_info(usage_events)").all().map((row) => row.name));
     const columns = {
       input_cost_cents: "REAL",
+      billing_currency: "TEXT",
+      billing_amount: "TEXT",
+      billing_date: "TEXT",
+      billing_kind: "TEXT",
+      billing_basis: "TEXT",
+      fx_rate: "REAL",
+      fx_date: "TEXT",
+      fx_source: "TEXT",
       cache_read_cost_cents: "REAL",
       cache_write_cost_cents: "REAL",
       cache_cost_cents: "REAL",
@@ -267,6 +307,7 @@ class UsageHistory {
       quota_equivalent_cost_cents: "REAL",
       quota_equivalent_cost_low_cents: "REAL",
       quota_equivalent_cost_high_cents: "REAL",
+      cache_write_1h_tokens: "INTEGER",
     };
     for (const [name, type] of Object.entries(columns)) {
       if (!existing.has(name)) this.db.exec(`ALTER TABLE usage_events ADD COLUMN ${name} ${type}`);
@@ -274,6 +315,7 @@ class UsageHistory {
     this.db.exec(`
       UPDATE usage_events SET pool = CASE
         WHEN source = 'codex' THEN 'codex'
+        WHEN source = 'claude' THEN 'claude'
         WHEN lower(model) LIKE 'cursor-grok%' OR lower(model) LIKE 'grok-4%'
           OR lower(model) LIKE 'composer%' OR lower(model) LIKE 'vega%'
           OR lower(model) LIKE 'default%' THEN 'cursor-models'
@@ -418,10 +460,10 @@ class UsageHistory {
     return { migrated, removed, duplicateGroups, backupPath };
   }
 
-  upsertEvents(events) {
+  upsertEvents(events, { transaction = true } = {}) {
     if (!Array.isArray(events) || !events.length) return 0;
     let count = 0;
-    this.db.exec("BEGIN IMMEDIATE");
+    if (transaction) this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const event of events) {
         if (!event?.source || !event?.eventKey || !Number.isFinite(Number(event.timestamp))) continue;
@@ -466,23 +508,31 @@ class UsageHistory {
           event.quotaEquivalentCostHighCents == null ? null : finite(event.quotaEquivalentCostHighCents),
           event.pricingSnapshotId == null ? null : Math.trunc(finite(event.pricingSnapshotId)),
           event.pricingStatus == null ? null : String(event.pricingStatus),
-          String(event.eventKey).startsWith("codex:review-turn:") ? 0 : Math.max(1, Math.trunc(finite(event.count, 1)))
+          String(event.eventKey).startsWith("codex:review-turn:") ? 0 : Math.max(1, Math.trunc(finite(event.count, 1))),
+          event.cacheWrite1h == null ? null : Math.max(0, Math.trunc(finite(event.cacheWrite1h))),
+          event.billingCurrency || null,
+          event.billingAmount == null ? null : String(event.billingAmount),
+          event.billingDate || null,
+          event.fxRate == null ? null : Number(event.fxRate),
+          event.fxDate || null,
+          event.fxSource || null,
+          event.billingKind || (event.billingAmount != null ? 'official' : null),
+          event.billingBasis ? JSON.stringify(event.billingBasis) : null
         );
         count += 1;
       }
-      this.db.exec("COMMIT");
+      if (transaction) this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      if (transaction) this.db.exec("ROLLBACK");
       throw error;
     }
     return count;
   }
 
-  applyCodexAccounting(snapshot) {
-    const { VERSION } = require("./codex-accounting.cjs");
-    if (this.loadCache(VERSION)) return;
-    const { priceEvent } = require("./pricing.cjs");
-    const backupPath = this.dbPath === ":memory:" ? null : `${this.dbPath}.before-${VERSION}-${Date.now()}.sqlite`;
+  applyCodexAccounting(snapshot, { version = require("./codex-accounting.cjs").VERSION, model = null } = {}) {
+    if (this.loadCache(version)) return { updated: 0, alreadyApplied: true };
+    const { priceEvent, modelKey } = require("./pricing.cjs");
+    const backupPath = this.dbPath === ":memory:" ? null : `${this.dbPath}.before-${version}-${Date.now()}.sqlite`;
     if (backupPath) this.db.exec(`VACUUM INTO '${backupPath.replaceAll("'", "''")}'`);
     const columns = ["input_cost_cents", "cache_read_cost_cents", "cache_write_cost_cents", "cache_cost_cents", "output_cost_cents",
       "equivalent_cost_cents", "equivalent_cost_low_cents", "equivalent_cost_high_cents", "quota_equivalent_cost_cents",
@@ -492,13 +542,17 @@ class UsageHistory {
       "quotaEquivalentCostLowCents","quotaEquivalentCostHighCents","pricingStatus"];
     const update = this.db.prepare(`UPDATE usage_events SET ${columns.map(c=>`${c}=?`).join(",")} WHERE source='codex' AND event_key=?`);
     this.db.exec("BEGIN IMMEDIATE");
+    let updated = 0;
     try {
-      for (const event of this.getEvents({sources:"codex"})) {
+      for (const event of this.getEvents({sources:"codex", end: Number.MAX_SAFE_INTEGER})) {
+        if (model && modelKey(event.model) !== model) continue;
         const p = priceEvent(event,snapshot);
         update.run(...keys.map(k=>p[k] ?? null),event.eventKey);
+        updated += 1;
       }
-      this.saveCache(VERSION,{at:Date.now(),backupPath});this.db.exec("COMMIT");
+      this.saveCache(version,{at:Date.now(),backupPath,model,updated});this.db.exec("COMMIT");
     } catch(e) {this.db.exec("ROLLBACK");throw e;}
+    return { updated, backupPath };
   }
 
   getEvents({ sources, start = 0, end = Date.now() + 60_000 } = {}) {
@@ -508,6 +562,7 @@ class UsageHistory {
       .prepare(`SELECT * FROM usage_events WHERE timestamp >= ? AND timestamp < ?${whereSource} ORDER BY timestamp ASC`)
       .all(Math.trunc(start), Math.trunc(end), ...sourceList);
     return rows.map((row) => ({
+      ...eventFromRow(row),
       source: row.source,
       eventKey: row.event_key,
       timestamp: row.timestamp,
@@ -522,6 +577,7 @@ class UsageHistory {
       output: row.output_tokens,
       cacheRead: row.cache_read_tokens,
       cacheWrite: row.cache_write_tokens,
+      cacheWrite1h: row.cache_write_1h_tokens,
       reasoning: row.reasoning_tokens,
       costCents: row.cost_cents,
       inputCostCents: row.input_cost_cents,
@@ -550,6 +606,7 @@ class UsageHistory {
       ORDER BY timestamp ASC LIMIT ?
     `).all(Math.max(1, Math.trunc(finite(limit, 20_000))));
     return rows.map((row) => ({
+      ...eventFromRow(row),
       source: row.source,
       eventKey: row.event_key,
       timestamp: row.timestamp,
@@ -564,6 +621,7 @@ class UsageHistory {
       output: row.output_tokens,
       cacheRead: row.cache_read_tokens,
       cacheWrite: row.cache_write_tokens,
+      cacheWrite1h: row.cache_write_1h_tokens,
       reasoning: row.reasoning_tokens,
       costCents: row.cost_cents,
       cacheCostCents: row.cache_cost_cents,
@@ -596,6 +654,7 @@ class UsageHistory {
       output: row.output_tokens,
       cacheRead: row.cache_read_tokens,
       cacheWrite: row.cache_write_tokens,
+      cacheWrite1h: row.cache_write_1h_tokens,
       reasoning: row.reasoning_tokens,
       costCents: row.cost_cents,
       cacheCostCents: row.cache_cost_cents,
@@ -835,7 +894,7 @@ class UsageHistory {
     }
     const timestamp = Math.trunc(Number(sample.timestamp));
     // Keep reset boundaries even when both observations fall in one five-minute bucket.
-    const bucket = sample.source === "codex" ? timestamp : Math.floor(timestamp / 300_000) * 300_000;
+    const bucket = sample.source === "codex" || sample.source === "claude" ? timestamp : Math.floor(timestamp / 300_000) * 300_000;
     this.insertQuota.run(
       String(sample.source),
       String(sample.pool),
@@ -847,6 +906,24 @@ class UsageHistory {
       sample.startsAt == null ? null : Math.trunc(finite(sample.startsAt)),
       sample.planType || null,
     );
+  }
+
+  saveBalanceSample(sample) {
+    const values = [sample.timestamp, sample.total, sample.toppedUp, sample.granted];
+    if (!sample.accountKey || !["CNY", "USD"].includes(sample.currency)
+      || values.some((value) => value == null || !Number.isFinite(Number(value)))) throw new Error("余额采样无效");
+    this.db.prepare(`INSERT INTO balance_samples (source, account_key, currency, timestamp, total, topped_up, granted, origin)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, account_key, currency, timestamp)
+      DO UPDATE SET total=excluded.total, topped_up=excluded.topped_up, granted=excluded.granted, origin=excluded.origin
+      WHERE balance_samples.origin != 'observed' OR excluded.origin = 'observed'`)
+      .run(sample.source, sample.accountKey, sample.currency, sample.timestamp, sample.total, sample.toppedUp, sample.granted, sample.origin || "observed");
+  }
+
+  getBalanceSamples({ source = "deepseek", accountKey, currency, start = 0, end = Date.now() + 1 } = {}) {
+    if (!accountKey) return [];
+    return this.db.prepare(`SELECT timestamp AS at, currency, total AS balance, topped_up AS toppedUp, granted, origin
+      FROM balance_samples WHERE source = ? AND account_key = ? AND currency = ? AND timestamp >= ? AND timestamp < ?
+      ORDER BY timestamp`).all(source, accountKey, currency, start, end).map((row) => ({ ...row }));
   }
 
   saveCache(key, value) {

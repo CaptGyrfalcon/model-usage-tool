@@ -58,7 +58,7 @@
           <div class="receipt-controls">
             <label>账单周期 <select id="receiptPeriod"><option value="day">日账单</option><option value="week">周账单</option><option value="month">月账单</option><option value="year">年账单</option></select></label>
             <label>日期 <input id="receiptDate" type="date" aria-label="小票日期"></label>
-            <label>来源 <select id="receiptSource"><option value="all">全部</option><option value="cursor">Cursor</option><option value="codex">Codex</option></select></label>
+            <label>来源 <select id="receiptSource"><option value="all">全部</option><option value="cursor">Cursor</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="deepseek">DeepSeek Harness</option></select></label>
             <label>排序 <select id="receiptSort" title="模型顺序：供应商名称 A–Z → 版本从新到旧 → 同代档位从强到弱 → Fast 优先 → 思考强度从高到低"><option value="cost">费用从高到低</option><option value="model">供应商 / 模型顺序</option></select></label>
             <button type="button" id="receiptRefresh">生成小票</button>
             <button type="button" id="receiptSave" disabled>保存 PNG</button>
@@ -82,6 +82,8 @@
             <article class="quota-card cursor-card" id="cursorPool"></article>
             <article class="quota-card other-card" id="otherPool"></article>
             <article class="quota-card codex-card" id="codexPool"></article>
+            <article class="quota-card claude-card" id="claudePool"></article>
+            <article class="quota-card deepseek-card" id="deepseekPool"></article>
           </div>
           <article class="detail-card" id="recentPanel"></article>
 
@@ -100,6 +102,8 @@
             <button type="button" data-source="all" class="active">全部</button>
             <button type="button" data-source="cursor">Cursor</button>
             <button type="button" data-source="codex">Codex</button>
+            <button type="button" data-source="claude">Claude</button>
+            <button type="button" data-source="deepseek">DeepSeek</button>
           </div>
           <div class="segmented precision-switch" aria-label="模型统计精度">
             <button type="button" data-precision="coarse" class="active">笼统</button>
@@ -156,6 +160,8 @@
             <button type="button" data-source="all" class="active">全部</button>
             <button type="button" data-source="cursor">Cursor</button>
             <button type="button" data-source="codex">Codex</button>
+            <button type="button" data-source="claude">Claude</button>
+            <button type="button" data-source="deepseek">DeepSeek</button>
           </div>
           <div class="segmented trend-range-switch" aria-label="趋势范围">
             <button type="button" data-range="day" class="active">日</button>
@@ -215,6 +221,12 @@
             <div class="trend-total" id="levelTotal">—</div>
           </div>
           <div class="segmented" id="levelPoolSwitch" aria-label="额度池"></div>
+          <div class="segmented" id="balanceRangeSwitch" aria-label="余额趋势范围" hidden>
+            <button type="button" data-balance-range="day">日</button>
+            <button type="button" data-balance-range="week">周</button>
+            <button type="button" data-balance-range="month">月</button>
+            <button type="button" data-balance-range="year">年</button>
+          </div>
           <label class="model-range-control">
             <span>周期</span>
             <select id="levelCycleSelect" aria-label="额度周期"></select>
@@ -222,12 +234,12 @@
           <article class="chart-card">
             <div class="chart-wrap" id="levelChart"></div>
             <div class="chart-legend">
-              <span class="legend-items"><i class="level-swatch"></i><b>剩余额度</b></span>
+              <span class="legend-items"><i class="level-swatch"></i><b id="levelLegendText">剩余额度</b></span>
               <span class="legend-items" id="uniformLegend"><i class="uniform-swatch"></i><b>匀速使用</b></span>
               <span id="levelPeak">—</span>
             </div>
           </article>
-          <div class="trend-footnote">曲线来自每次刷新写入的额度采样；当前点会叠加上一次同步结果。</div>
+          <div class="trend-footnote" id="levelFootnote">曲线来自每次刷新写入的额度采样；当前点会叠加上一次同步结果。</div>
           <div class="trend-footnote" id="uniformNote"></div>
         </section>
 
@@ -243,6 +255,8 @@
             <button type="button" data-event-source="all" class="active">全部</button>
             <button type="button" data-event-source="cursor">Cursor</button>
             <button type="button" data-event-source="codex">Codex</button>
+            <button type="button" data-event-source="claude">Claude</button>
+            <button type="button" data-event-source="deepseek">DeepSeek</button>
           </div>
           <div class="event-toolbar">
             <input id="eventSearch" type="search" placeholder="搜索模型或 effort" aria-label="搜索请求" />
@@ -267,6 +281,7 @@
             <button type="button" data-pricing-source="all" class="active">全部</button>
             <button type="button" data-pricing-source="cursor">Cursor</button>
             <button type="button" data-pricing-source="codex">Codex</button>
+            <button type="button" data-pricing-source="claude">Claude</button>
           </div>
           <label class="model-range-control">
             <span>版本</span>

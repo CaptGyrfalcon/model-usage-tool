@@ -77,6 +77,7 @@ let settings = {
   trendModelBreakdown: false,
   dataSource: "all",
   quotaLevelPool: "cursor-models",
+  balanceRange: "day",
   eventSource: "all",
   pricingSource: "all",
   smartDock: false, // WIP: 智能贴边有严重 bug，入口已关闭。
@@ -119,6 +120,20 @@ function formatUsd(cents) {
   if (absolute >= 10_000_000) return `$${(dollars / 1_000_000).toFixed(3)}M`;
   if (absolute >= 10_000) return `$${(dollars / 1_000).toFixed(3)}K`;
   return `$${dollars.toFixed(2)}`;
+}
+function formatRequestUsd(event, cents) {
+  if (event.source !== "deepseek" || cents == null) return formatUsd(cents);
+  const dollars = Number(cents)/100;
+  if (!Number.isFinite(dollars) || Math.abs(dollars)>=0.01 || dollars===0) return formatUsd(cents);
+  return Math.abs(dollars)<0.000001 ? "<$0.000001" : `$${dollars.toFixed(6)}`;
+}
+
+const SOURCE_NAMES = { cursor: "Cursor", codex: "Codex", claude: "Claude Code", deepseek: "DeepSeek Harness" };
+function formatBalance(value, currency = "CNY") {
+  return value == null || !Number.isFinite(Number(value)) ? "—" : `${currency === "CNY" ? "¥" : "$"}${Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4, useGrouping: false })}`;
+}
+function sourceName(source) {
+  return SOURCE_NAMES[source] || "Cursor";
 }
 
 function formatUsdRange(low, high) {
@@ -182,6 +197,49 @@ function forecastText(insight) {
   if (insight.forecast.status === "safe") return "按当前速度可撑到重置";
   if (Number(insight.remainingPercent) <= 0 || Number(insight.forecast.exhaustionAt) <= Date.now()) return "额度已耗尽，等待重置";
   return `预计 ${formatUntil(insight.forecast.exhaustionAt)}后耗尽`;
+}
+
+function claudeQuotaWindowsHtml(claude) {
+  const quota = claude?.quota;
+  const windows = claudeQuotaWindows(claude);
+  if (!windows.length) {
+    const reason = quota?.readError ? `读取失败：${quota.readError}` : "等待 Claude Code 状态栏返回额度，或 Claude 桌面版写入采样";
+    return `<div class="empty-state codex-window-empty" title="${escapeHtml(quota?.file || "")}">尚无 Claude 额度采样；${escapeHtml(reason)}</div>`;
+  }
+  const insights = quotaInsightsForDisplay(snapshot.data);
+  const rows = windows.map((window) => {
+    const used = Math.min(100, Math.max(0, Number(window.usedPercent) || 0));
+    const remaining = Math.max(0, 100 - used);
+    const estimate = window.quotaEstimate || {};
+    const reset = window.expired
+      ? "已重置 · 等待新采样"
+      : window.resetsAt ? `${window.resetEstimated === false ? "" : "约 "}${formatQuotaReset(window.resetsAt)}` : "重置时间待推算";
+    const resetRange = window.resetEstimated !== false && window.resetsLow && window.resetsHigh
+      ? `推算重置区间 ${formatQuotaReset(window.resetsLow).replace(/ 重置$/, "")} – ${formatQuotaReset(window.resetsHigh)}` : "";
+    const capacity = estimate.inferredTotalCents
+      ? `<div class="quota-credit" title="按本机 Claude Code 花费与额度变化拟合，已剔除混入其他来源用量的时段"><span>剩余 / 容量（拟合）</span><b>≈${formatUsd(estimate.inferredRemainingCents)} <em>/ ${formatUsd(estimate.inferredTotalCents)}（${formatUsd(estimate.inferredTotalLowCents)}–${formatUsd(estimate.inferredTotalHighCents)}）</em></b></div>`
+      : `<div class="quota-credit"><span>美元容量</span><b><em>数据不足，继续采样中</em></b></div>`;
+    const split = estimate.localPercent != null && estimate.otherPercent != null && !window.expired
+      ? `<div class="quota-credit" title="其他来源：Cowork、claude.ai 网页、其他设备等；按拟合容量推算"><span>本机 Claude Code / 其他来源</span><b>≈${formatPct(Math.min(used, estimate.localPercent))} <em>/ ≈${formatPct(estimate.otherPercent)}</em></b></div>` : "";
+    return `<section class="codex-window-row" aria-label="Claude ${escapeHtml(window.name)}">
+      <div class="codex-window-head">
+        <span><b>${escapeHtml(window.name)}</b><small title="${escapeHtml(resetRange)}">${escapeHtml(reset)}</small></span>
+        <strong class="${toneClass(used)}">${formatPct(remaining)} <em>剩余</em></strong>
+      </div>
+      <progress class="quota-progress claude" max="100" value="${used}" aria-label="Claude ${escapeHtml(window.name)}已用比例">${used}%</progress>
+      <div class="codex-window-stats"><span>已用 <b>${formatPct(used)}</b></span><span>剩余 <b>${formatPct(remaining)}</b></span></div>
+      <small>${window.source === "statusline" ? "Claude Code 状态栏" : "桌面版采样"} · ${escapeHtml(timeAgo(window.sampledAt))}${window.stale ? " · 数据可能滞后" : ""}</small>
+      ${capacity}
+      ${split}
+      ${forecastHtml(insights.find((item) => item.id === `claude-${Number(window.windowMinutes)}`))}
+    </section>`;
+  }).join("");
+  const fit = quota.fit || {};
+  const sampled = quota.stale
+    ? `最近采样 ${timeAgo(quota.sampledAt)}，等待来源更新`
+    : `最近采样 ${timeAgo(quota.sampledAt)}`;
+  return `<div class="codex-window-list">${rows}</div>
+    <div class="quota-message">额度为整个账号的用量（含 Cowork、网页、其他设备），按各窗口最新观测显示。Claude Code 状态栏随会话返回额度及官方重置时间；桌面版每 15 分钟采样，重置时间为推算。空闲或未触发状态栏时不会获得新的状态栏观测。美元容量为拟合：近 ${formatInteger(fit.lookbackDays)} 天、${formatInteger(fit.intervals)} 个采样区间，剔除 ${formatInteger(fit.excludedIntervals)} 个混入其他来源的区间。${escapeHtml(sampled)}。</div>`;
 }
 
 function forecastHtml(insight) {
@@ -261,11 +319,26 @@ function quotaPools(d) {
   };
   codexQuotaWindows(d.codex)
     .forEach((quota, index) => addCodexPool(quota, `slot-${index}`));
+  for (const quota of claudeQuotaWindows(d.claude)) {
+    const reset = quota.expired ? "已重置 · 等待新采样" : quota.resetsAt ? `${quota.resetEstimated === false ? "" : "约 "}${formatQuotaReset(quota.resetsAt)}` : "重置时间待推算";
+    addPool(`claude-window-${quota.windowMinutes}`, `Claude · ${quota.name}`, quota.usedPercent, quota.percentRemaining, reset, 0, quota.speedUsage, {
+      source: "claude",
+      windowMinutes: quota.windowMinutes,
+      quotaEstimate: quota.quotaEstimate || null,
+      capacityCents: window.LiquidPool.capacityOf(quota),
+      capacityEstimated: true,
+    });
+  }
   return pools;
 }
 
+function claudeQuotaWindows(claude) {
+  return (claude?.quota?.windows || []).slice()
+    .sort((a, b) => Number(a.windowMinutes) - Number(b.windowMinutes));
+}
+
 function usagePools(d) {
-  const regular = quotaPools(d).filter((pool) => pool.source !== "codex");
+  const regular = quotaPools(d).filter((pool) => pool.source !== "codex" && pool.source !== "claude");
   const thirdParty = regular.find((pool) => pool.id === "cursor-api");
   if (thirdParty) {
     thirdParty.name = "Cursor 三方模型池";
@@ -279,6 +352,11 @@ function usagePools(d) {
     d?.codex?.quota?.shortLimit
   );
   if (codex) regular.push(codex);
+  const claudeWindows = claudeQuotaWindows(d?.claude);
+  const claude = window.LiquidPool.codexPool(claudeWindows, null, null,
+    claudeWindows.some((quota) => quota.windowMinutes === 300) ? "present" : "unknown",
+    { id: "claude-combined", source: "claude", label: "Claude" });
+  if (claude) regular.push(claude);
   const scales = window.LiquidPool.sizeScales(regular);
   return regular.map((pool, index) => ({ ...pool, sizeScale: scales[index] }));
 }
@@ -333,7 +411,7 @@ function quotaInsightsForDisplay(d) {
     .filter((insight) => !(d?.codex?.quota?.shortLimit === "absent" && String(insight.id) === "codex-300"))
     .filter((insight) => !insight.pending || !actualCodexIds.has(String(insight.id)))
     .sort((a, b) => {
-      const order = { "cursor-models": 0, "cursor-api": 1, cursor: 1, "codex-300": 2, "codex-10080": 3 };
+      const order = { "cursor-models": 0, "cursor-api": 1, cursor: 1, "codex-300": 2, "codex-10080": 3, "claude-300": 4, "claude-10080": 5 };
       return (order[a.id] ?? 10) - (order[b.id] ?? 10);
     });
 }
@@ -341,6 +419,7 @@ function quotaInsightsForDisplay(d) {
 function selectedQuotaPool(pools) {
   return pools.find((pool) => pool.id === settings.orbPool)
     || (String(settings.orbPool).startsWith("codex-") ? pools.find((pool) => pool.source === "codex") : null)
+    || (String(settings.orbPool).startsWith("claude-") ? pools.find((pool) => pool.source === "claude") : null)
     || pools[0];
 }
 
@@ -420,7 +499,7 @@ function drawLiquidCanvas(canvas, config, levels, time) {
       });
     }
   } else {
-    if (config.source === "codex") {
+    if (config.windowed) {
       liquidFill(ctx, rect.width, rect.height, levels.weeklyLevel, time, {
         top: "rgba(122, 137, 255, 0.92)", bottom: "rgba(58, 75, 176, 0.96)", phase: 1.8, amplitude: 0.75,
       });
@@ -691,7 +770,7 @@ function renderUsagePoolGallery(pools) {
 }
 
 function renderUsagePoolCard(pool, shape) {
-  const displayedRemaining = pool.monthly ? pool.monthlyRemaining : pool.source === "codex" ? pool.shortRemaining : pool.remaining;
+  const displayedRemaining = pool.monthly ? pool.monthlyRemaining : pool.windowed ? pool.shortRemaining : pool.remaining;
   const pct = pool.precision === 2 ? formatCursorPct(displayedRemaining) : formatPct(displayedRemaining);
   const scale = Number(pool.sizeScale) > 0 ? Number(pool.sizeScale) : 1;
   const month = pool.monthly;
@@ -715,17 +794,17 @@ function renderUsagePoolCard(pool, shape) {
   const monthlyNote = month ? `自然月，计入 ${month.cycleCount} 个相交周周期；后续 ${month.futureResetCount} 次周重置。${carryNote}${resetNote}\n当前可用：${month.immediateKnown ? formatUsd(month.immediateCents) : "待估算"}；本周剩余 ${formatPct(pool.weeklyRemaining)}。${month.shortLimit === "absent" ? "当前服务端未设置 5h 窗口，按周额度判断可用量。" : month.shortLimit === "present" ? `5h 剩余 ${formatCursorPct(pool.shortRemaining)}。` : "5h 限制信息尚不完整。"}\n月总量和历史用量均为估算。紫色为过期或提前重置时未用；灰色为缺少可覆盖的额度快照或后续记录未计价，无法区分已用和未用，不计入可用额度。${monthlyHistory ? `\n${monthlyHistory}` : ""}` : "";
   const codexLegend = month
     ? ""
-    : pool.source === "codex" && pool.shortLimit !== "absent"
+    : pool.windowed && pool.shortLimit !== "absent"
     ? `<div class="usage-pool-legend"><span><i class="immediate"></i>5 小时可用 ${escapeHtml(formatCursorPct(pool.shortRemaining))}</span><span><i class="weekly"></i>仅周池可用 ${escapeHtml(formatPct(pool.weeklyOnlyRemaining))}</span></div>`
     : "";
   const capacity = month
     ? `${new Date(month.startAt).getMonth() + 1}月总容量 ≈${formatUsd(month.capacityCents)} ⓘ`
-    : pool.source === "codex" && pool.shortLimit !== "absent"
-    ? `7天 ${formatUsd(pool.capacityCents)} · 5小时 ${formatUsd(pool.shortCapacityCents)}`
+    : pool.windowed && pool.shortLimit !== "absent"
+    ? `7天 ${pool.source === "claude" ? "≈" : ""}${formatUsd(pool.capacityCents)} · 5小时 ${pool.source === "claude" ? "≈" : ""}${formatUsd(pool.shortCapacityCents)}`
     : liquidCapacityText(pool);
   return `<article class="usage-pool-card${month ? " has-monthly" : ""}" data-usage-pool="${escapeHtml(pool.id)}">
     <div class="usage-pool-slot">
-      <div class="usage-pool-tank${pool.source === "codex" ? " codex" : ""}" data-tank-shape="${escapeHtml(shape)}" data-tank-scale="${scale.toFixed(4)}" role="meter" aria-label="${escapeHtml(pool.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(displayedRemaining).toFixed(2)}">
+      <div class="usage-pool-tank${pool.windowed ? " codex" : ""}" data-tank-shape="${escapeHtml(shape)}" data-tank-scale="${scale.toFixed(4)}" role="meter" aria-label="${escapeHtml(pool.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(displayedRemaining).toFixed(2)}">
         <span class="usage-pool-glass" aria-hidden="true"></span>
         <canvas class="usage-liquid" data-pool-id="${escapeHtml(pool.id)}" aria-hidden="true"></canvas>
         <i class="orb-drain" aria-hidden="true"></i>
@@ -734,7 +813,7 @@ function renderUsagePoolCard(pool, shape) {
     </div>
     <div class="usage-pool-info">
       <b>${escapeHtml(pool.name)}</b>
-      <strong>${escapeHtml(month ? formatCursorPct(pool.monthlyRemaining) : pct)}<small>${month ? " 月内待用" : pool.source === "codex" ? pool.shortLimit === "absent" ? " 本周可用" : " 5小时可用" : " 可用"}</small></strong>
+      <strong>${escapeHtml(month ? formatCursorPct(pool.monthlyRemaining) : pct)}<small>${month ? " 月内待用" : pool.windowed ? pool.shortLimit === "absent" ? " 本周可用" : " 5小时可用" : " 可用"}</small></strong>
       ${month ? `<span class="pool-current-availability" title="${escapeHtml(month.shortLimit === "absent" ? "当前周周期剩余可用额度占本周总容量的比例" : "当前可用额度占 5h 总容量的比例，同时受本周剩余额度限制；不含未来周期")}"><i aria-hidden="true"></i><span>${currentLabel}</span><b>${escapeHtml(currentValue)}</b></span>` : ""}
       <span class="pool-detail-hint" title="${escapeHtml(monthlyNote || capacity)}">${escapeHtml(capacity)}</span>
       ${codexLegend}
@@ -825,7 +904,7 @@ function renderOrb(d) {
   ring.style.setProperty("--orb-normal-end", `${normalEnd.toFixed(3)}%`);
   ring.style.setProperty("--orb-fast-end", `${fastEnd.toFixed(3)}%`);
   ring.style.setProperty("--orb-used-end", `${selected.used.toFixed(3)}%`);
-  ring.className = `orb-ring ${displayMode}-mode${displayMode === "speed" && fastPoints > 0.001 ? " has-fast" : ""}${displayMode === "pool" && selected.source === "codex" ? " codex-pool" : ""}`;
+  ring.className = `orb-ring ${displayMode}-mode${displayMode === "speed" && fastPoints > 0.001 ? " has-fast" : ""}${displayMode === "pool" && selected.windowed ? " codex-pool" : ""}`;
   const meterValue = displayMode === "pool" ? selected.remaining : selected.used;
   ring.setAttribute("aria-valuenow", Number(meterValue).toFixed(1));
   ring.setAttribute("aria-valuetext", `${selected.name}${displayMode === "pool" ? "可用" : "已用"}${formatPct(meterValue)}`);
@@ -836,7 +915,7 @@ function renderOrb(d) {
   $("orbPoolDetail").textContent = displayMode === "speed"
     ? `${unknownPoints > 0.01 ? `未知 ${pct(unknownPoints)} · ` : ""}普通 ${pct(normalPoints)} · Fast ${pct(fastPoints)}`
     : displayMode === "pool"
-      ? selected.source === "codex"
+      ? selected.windowed
         ? `青色 5 小时可用 ${pct(selected.remaining)} · 蓝色仅周池 ${pct(selected.weeklyOnlyRemaining)}`
         : `水位 ${pct(selected.remaining)} · ${liquidCapacityText(selected)}`
       : `剩余 ${pct(selected.remaining)} · ${selected.detail}`;
@@ -936,9 +1015,11 @@ function codexQuotaWindowsHtml(codex) {
 
 function renderOverview(d) {
   renderVerification(d?.verification);
-  const names = { "cursor-models": "Cursor 模型", "cursor-api": "三方模型", "codex-window-300": "Codex 5h", "codex-window-10080": "Codex 7d" };
+  const names = { "cursor-models": "Cursor 模型", "cursor-api": "三方模型", "codex-window-300": "Codex 5h", "codex-window-10080": "Codex 7d",
+    "claude-window-300": "Claude 5h", "claude-window-10080": "Claude 7d" };
   $("quotaGlance").innerHTML = quotaPools(d).map((pool) => {
-    const target = pool.source === "codex" ? "codexPool" : pool.id === "cursor-models" ? "cursorPool" : "otherPool";
+    const target = pool.source === "codex" ? "codexPool" : pool.source === "claude" ? "claudePool"
+      : pool.id === "cursor-models" ? "cursorPool" : "otherPool";
     const remaining = Math.min(100, Math.max(0, Number(pool.remaining) || 0));
     // Presentation attributes rather than inline styles: the CSP forbids style attributes.
     const ring = `<svg class="glance-ring" viewBox="0 0 40 40" aria-hidden="true"><circle class="glance-track" cx="20" cy="20" r="17" pathLength="100"/><circle class="glance-value" cx="20" cy="20" r="17" pathLength="100" stroke-dasharray="${remaining.toFixed(2)} 100" transform="rotate(-90 20 20)"/></svg>`;
@@ -1000,6 +1081,56 @@ function renderOverview(d) {
     $("otherPool").innerHTML = `<div class="empty-state">Cursor 其他模型额度暂不可用</div>`;
   }
 
+  const claude = d.claude;
+  if (claude) {
+    const today = claude.costs?.today || {};
+    const week = claude.costs?.d7 || {};
+    const short = claude.quota?.primary;
+    $("claudePool").innerHTML = `
+      <div class="quota-head">
+        <div class="quota-icon claude" aria-hidden="true">CC</div>
+        <div class="quota-title"><h3>Claude Code</h3><span>本机会话 · 按 Anthropic 官方标价估算</span></div>
+        ${short
+          ? `<div class="quota-remain ${toneClass(short.usedPercent)}"><b>${formatPct(short.percentRemaining)}</b><span>5 小时剩余</span></div>`
+          : `<div class="quota-remain"><b>${formatUsd(today.equivalentCostCents)}</b><span>今日</span></div>`}
+      </div>
+      ${claudeQuotaWindowsHtml(claude)}
+      <div class="quota-credit"><span>今日</span><b>${formatUsd(today.equivalentCostCents)}</b></div>
+      <div class="quota-stats"><span>今日总 Token <b>${formatTokens(claude.tokens?.today?.total)}</b></span><span class="token-pair">有效 <b>${formatTokens(claude.tokens?.today?.effective)}</b><small>${formatInteger(claude.requests?.today)} 次</small></span></div>
+      <div class="quota-credit"><span>近 5 小时</span><b>${formatUsd(claude.costs?.h5?.equivalentCostCents)} <em>· ${formatTokens(claude.tokens?.h5?.total)} Token</em></b></div>
+      <div class="quota-credit"><span>近 7 天</span><b>${formatUsd(week.equivalentCostCents)} <em>· ${formatInteger(claude.requests?.d7)} 次</em></b></div>
+      ${costPartsHtml(week)}
+      <div class="quota-credit"><span>近 30 天</span><b>${formatUsd(claude.costs?.d30?.equivalentCostCents)}</b></div>
+      <div class="quota-message">金额为 API 标价等效；Pro／Max 订阅不按此扣费，仅用于和额度百分比对照拟合。</div>
+      <div class="quota-message">${formatInteger(claude.files)} 个本地会话文件（含子代理） · 计价覆盖 ${formatPct(claude.costs?.d30?.coveragePercent ?? 100)}</div>
+    `;
+  } else {
+    $("claudePool").innerHTML = `<div class="empty-state">未找到可读取的 Claude Code 本机会话</div>`;
+  }
+
+  const deepseek = d.deepseek;
+  const wallet = deepseek?.balance;
+  $("deepseekPool").innerHTML = deepseek ? `
+    <div class="quota-head"><div class="quota-icon deepseek" aria-hidden="true">DS</div>
+      <div class="quota-title"><h3>DeepSeek Harness</h3><span>API 按量计费 · 账户余额</span></div></div>
+    ${(wallet?.balances || []).map((balance) => `<div class="quota-credit"><span>${escapeHtml(balance.currency)} 余额${wallet.cached ? " · 缓存" : ""}</span><b>${formatBalance(balance.total, balance.currency)}</b></div>
+      <div class="quota-stats"><span>充值 ${formatBalance(balance.toppedUp, balance.currency)}</span><span>赠送 ${formatBalance(balance.granted, balance.currency)}</span></div>`).join("")}
+    <div class="quota-stats"><span>今日总 Token <b>${formatTokens(deepseek.tokens?.today?.total)}</b></span><span>${formatInteger(deepseek.requests?.today)} 次</span></div>
+    <div class="quota-credit"><span>近 30 天 Token</span><b>${formatTokens(deepseek.tokens?.month?.total)}</b></div>
+    ${deepseek.historyImport ? `<div class="quota-message">已补官方历史：${formatInteger(deepseek.historyImport.requests)} 次请求 · ${formatTokens(deepseek.historyImport.tokens)} Token${(deepseek.historyImport.costs || []).map((cost) => ` · 实际消费 ${formatBalance(cost.amount, cost.currency)}`).join("")}</div>` : ""}
+    <div class="quota-message">${wallet?.sampledAt ? `余额采样 ${escapeHtml(formatDateTime(wallet.sampledAt))} · ` : ""}${formatInteger(deepseek.files)} 个本机会话文件</div>
+    ${wallet?.error ? `<div class="quota-message">${escapeHtml(wallet.error)}</div>` : ""}
+    ${deepseek.scanErrors?.length ? `<div class="quota-message">${escapeHtml(deepseek.scanErrors[0])}</div>` : ""}
+    <div class="quota-message">${deepseek.historyImport ? "历史 Token 来自官方账户日汇总，包含其他客户端调用；已覆盖日期不重复累计本机 Harness 记录。" : "Token 来自本机 Harness；余额包含整个账户的消费与充值。"}水位页可按日、周、月、年查看余额变化。</div>
+    <button type="button" id="deepseekBalanceBtn" class="text-btn">查看余额趋势</button>`
+    : `<div class="empty-state">未找到 DeepSeek Harness 数据。默认读取 ~/.dsh；支持 DSH_HOME、DSH_SESSIONS_DIR 与 DEEPSEEK_API_KEY。</div>`;
+  $("deepseekBalanceBtn")?.addEventListener("click", () => {
+    settings.quotaLevelPool = `deepseek-balance-${wallet?.balances?.[0]?.currency || "CNY"}`;
+    selectedCycleKey = null;
+    window.widget.saveSettings({ quotaLevelPool: settings.quotaLevelPool });
+    setActiveTab("levels", true);
+  });
+
   if (codex) {
     const codexWindows = codexQuotaWindows(codex);
     $("codexPool").innerHTML = `
@@ -1024,7 +1155,7 @@ function renderOverview(d) {
   const lastTotal = lastEffective + (last?.tokens?.cacheRead || 0) + (last?.tokens?.cacheWrite || 0);
   const lastCost = last?.equivalentCostCents == null ? "价格不可用" : `${formatUsd(last.equivalentCostCents)} 美元等效`;
   $("recentPanel").innerHTML = last
-    ? `<div class="recent-icon">↗</div><div class="recent-copy"><span>最近一次调用 · ${last.source === "codex" ? "Codex" : "Cursor"}</span><b>${escapeHtml(window.ModelDisplay.format(last))}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>${recentDonutHtml(last)}`
+    ? `<div class="recent-icon">↗</div><div class="recent-copy"><span>最近一次调用 · ${sourceName(last.source)}</span><b>${escapeHtml(window.ModelDisplay.format(last))}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>${recentDonutHtml(last)}`
     : `<div class="empty-state">本周期还没有可显示的用量事件</div>`;
 }
 
@@ -1113,7 +1244,7 @@ function renderModels(d) {
   const rows = view.modelBreakdowns?.[precision] || [];
   $("modelCount").textContent = `${formatInteger(view.eventCount)} 次`;
   $("modelSubtitle").textContent = `${view.label || "全部"} · ${view.periodLabel || "当前周期"} · 按总 Token（含缓存）排序`;
-  const unknownSpeed = source !== "cursor" ? donut ? " 环状图中 Codex 速度未知的请求并入非 Fast；原始记录不变。" : " Codex 优先持久化服务端响应 service_tier；抓不到响应时回退到本地请求记录，旧记录可能显示速度未知。" : "";
+  const unknownSpeed = ["all", "codex"].includes(source) ? donut ? " 环状图中 Codex 速度未知的请求并入非 Fast；原始记录不变。" : " Codex 优先持久化服务端响应 service_tier；抓不到响应时回退到本地请求记录，旧记录可能显示速度未知。" : "";
   $("precisionNote").textContent = precisionNotes[precision] + unknownSpeed;
   document.querySelectorAll("[data-precision]").forEach((button) => {
     button.classList.toggle("active", button.dataset.precision === precision);
@@ -1167,7 +1298,7 @@ function renderModelDonut(usage, view) {
   $("modelMetricSelect").value = metric;
   $("modelSubtitle").textContent = `${view.label || "全部"} · ${view.periodLabel || "当前周期"} · ${label}占比`;
   const coverage = Number(view.costCoveragePercent);
-  $("modelDonutNote").textContent = `占比按${label}计算，所有模型均保留；悬停或聚焦图例查看详情。${metric === "costCents" ? ` 仅统计已知价格，计价覆盖 ${Number.isFinite(coverage) ? formatPct(coverage) : "未知"}；未计价用量不代表免费。` : ""}`;
+  $("modelDonutNote").textContent = `占比按${label}计算，所有模型均保留；悬停或聚焦图例查看详情。${metric === "costCents" ? ` 仅统计已知价格，计价覆盖 ${Number.isFinite(coverage) ? formatPct(coverage) : "未知"}；未计价用量不代表免费。DeepSeek 官方日账单按消费日汇率换算，本机会话为官方单价估算。` : ""}`;
   if (!result.rows.length) {
     $("modelDonutContent").innerHTML = `<div class="empty-state">所选范围暂无模型用量</div>`;
     return;
@@ -1406,7 +1537,7 @@ function renderTrends(d) {
   if (custom && customTrendKey !== JSON.stringify(customTrendPayload())) loadCustomTrends();
   const source = settings.dataSource || "all";
   const view = custom
-    ? customTrendUsage?.sources?.[source] || { label: { all: "全部", cursor: "Cursor", codex: "Codex" }[source], trends: {}, costAvailable: true }
+    ? customTrendUsage?.sources?.[source] || { label: source === "all" ? "全部" : sourceName(source), trends: {}, costAvailable: true }
     : d.sources?.[source] || d.sources?.all || { trends: d.trends, costAvailable: true, label: "Cursor" };
   let metric = settings.trendMetric || "total";
   if (metric === "costCents") metric = "equivalentCostCents";
@@ -1449,7 +1580,7 @@ function renderTrends(d) {
   $("modelBreakdownBtn").setAttribute("aria-pressed", String(modelBreakdown));
   const coverage = Number(view.costCoveragePercent);
   const priceDate = d.pricing?.fetchedAt ? formatDate(d.pricing.fetchedAt) : "内置";
-  $("trendFootnote").textContent = `覆盖 ${Number.isFinite(coverage) ? formatPct(coverage) : "—"} · 价表 ${priceDate} · Codex 使用 9/18 假设计价并按 Fast 2.5×，自动审批每完整 turn $0.01；Cursor 使用官方价。`;
+  $("trendFootnote").textContent = `覆盖 ${Number.isFinite(coverage) ? formatPct(coverage) : "—"} · 价表 ${priceDate} · Codex 使用 9/18 假设计价并按 Fast 2.5×，自动审批每完整 turn $0.01；Cursor 使用官方价。DeepSeek 官方日账单按消费日汇率换算，本机会话为官方单价估算。`;
 }
 
 function chartTooltipTarget(clientX, clientY) {
@@ -1593,6 +1724,14 @@ function liveQuotaPoints(d) {
       windowMinutes: window.windowMinutes,
       resetsAt: window.resetsAt,
     })),
+    ...claudeQuotaWindows(d.claude).filter((window) => !window.expired).map((window) => ({
+      source: "claude",
+      pool: window.pool,
+      timestamp: window.sampledAt ?? at,
+      usedPercent: window.officialUsedPercent ?? window.usedPercent,
+      windowMinutes: window.windowMinutes,
+      resetsAt: window.resetsAt,
+    })),
   ].filter(Boolean);
 }
 
@@ -1607,34 +1746,38 @@ function speedLabel(event) {
   return event?.fast ? { text: "Fast", className: "fast" } : { text: "非 Fast", className: "normal" };
 }
 
-function levelChartSvg(series, cycle) {
-  if (!series?.length) return `<div class="empty-state">这个周期还没有水位采样</div>`;
+function levelChartSvg(series, cycle, timeline = {}) {
+  const balanceMode = timeline.kind === "balance";
+  if (!series?.length) return `<div class="empty-state">${balanceMode ? "这个周期还没有余额采样；成功刷新后开始记录" : "这个周期还没有水位采样"}</div>`;
   const fullscreen = Boolean(windowState.fullscreen);
   const width = fullscreen ? 1400 : 400;
   const height = fullscreen ? 420 : 232;
-  const left = fullscreen ? 76 : 42;
+  const left = fullscreen ? (balanceMode ? 96 : 76) : balanceMode ? 78 : 42;
   const top = fullscreen ? 24 : 14;
-  const plotWidth = fullscreen ? width - left - 28 : 346;
+  const plotWidth = fullscreen ? width - left - 28 : width - left - 12;
   const plotHeight = fullscreen ? height - top - 64 : 168;
   const baseY = top + plotHeight;
-  const values = series.map((item) => Number(item.remainingPercent) || 0);
-  const maxValue = 100;
-  const minAt = series[0].at;
-  const maxAt = series[series.length - 1].at;
+  const valueOf = (item) => Number(balanceMode ? item.balance : item.remainingPercent) || 0;
+  const values = series.map(valueOf);
+  const padding = Math.max(0.01, (Math.max(...values) - Math.min(...values)) * 0.1);
+  const minValue = balanceMode ? Math.min(...values) - padding : 0;
+  const maxValue = balanceMode ? Math.max(...values) + padding : 100;
+  const minAt = balanceMode ? cycle.startAt : series[0].at;
+  const maxAt = balanceMode ? Math.min(cycle.endAt, Date.now()) : series[series.length - 1].at;
   const span = Math.max(1, maxAt - minAt);
   const xOf = (at) => left + ((at - minAt) / span) * plotWidth;
-  const yOf = (value) => baseY - (value / maxValue) * plotHeight;
-  const points = series.map((item) => `${xOf(item.at).toFixed(1)},${yOf(Number(item.remainingPercent) || 0).toFixed(1)}`);
-  const area = `${left.toFixed(1)},${baseY.toFixed(1)} ${points.join(" ")} ${xOf(maxAt).toFixed(1)},${baseY.toFixed(1)}`;
-  const ticks = [0, 50, 100].map((value) => {
+  const yOf = (value) => baseY - ((value - minValue) / (maxValue - minValue)) * plotHeight;
+  const points = series.map((item) => `${xOf(item.at).toFixed(1)},${yOf(valueOf(item)).toFixed(1)}`);
+  const area = `${xOf(series[0].at).toFixed(1)},${baseY.toFixed(1)} ${points.join(" ")} ${xOf(series.at(-1).at).toFixed(1)},${baseY.toFixed(1)}`;
+  const ticks = (balanceMode ? [minValue, (minValue + maxValue) / 2, maxValue] : [0, 50, 100]).map((value) => {
     const y = yOf(value);
-    return `<line class="chart-grid" x1="${left}" y1="${y}" x2="${left + plotWidth}" y2="${y}"/><text class="axis-y" x="${left - 7}" y="${y + 4}" text-anchor="end">${value}%</text>`;
+    return `<line class="chart-grid" x1="${left}" y1="${y}" x2="${left + plotWidth}" y2="${y}"/><text class="axis-y" x="${left - 7}" y="${y + 4}" text-anchor="end">${balanceMode ? formatBalance(value, timeline.currency) : `${value}%`}</text>`;
   }).join("");
   const labels = [series[0], series[Math.floor(series.length / 2)], series[series.length - 1]]
     .filter((item, index, list) => list.findIndex((entry) => entry.at === item.at) === index)
     .map((item) => `<text class="axis-x" x="${xOf(item.at).toFixed(1)}" y="${baseY + 22}" text-anchor="middle">${escapeHtml(formatDateTime(item.at))}</text>`)
     .join("");
-  const dots = series.map((item, index) => item.projected ? "" : `<circle class="level-dot" data-level-index="${index}" cx="${xOf(item.at).toFixed(1)}" cy="${yOf(Number(item.remainingPercent) || 0).toFixed(1)}" r="2.4"></circle>`).join("");
+  const dots = series.map((item, index) => item.projected ? "" : `<circle class="level-dot" data-level-index="${index}" cx="${xOf(item.at).toFixed(1)}" cy="${yOf(valueOf(item)).toFixed(1)}" r="2.4"></circle>`).join("");
   const hits = series.map((item, index) => {
     if (item.projected) return "";
     const x = xOf(item.at);
@@ -1644,12 +1787,21 @@ function levelChartSvg(series, cycle) {
   // Clip the reference to the existing data domain; never add its end to series.
   const reference = window.UsageCharts.uniformSegment(cycle, minAt, maxAt);
   const uniform = reference.length ? `<polyline class="uniform-line" points="${reference.map((point) => `${xOf(point.at).toFixed(1)},${yOf(point.remainingPercent).toFixed(1)}`).join(" ")}"><title>匀速使用：周期初 100%，周期末 0%</title></polyline>` : "";
-  return `<svg class="bar-chart level-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="额度水位与匀速使用参考线">${ticks}<polygon class="level-area" points="${area}"></polygon>${uniform}<polyline class="level-line" points="${points.join(" ")}"></polyline>${dots}${hits}${labels}</svg>`;
+  return `<svg class="bar-chart level-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${balanceMode ? "DeepSeek 余额变化趋势" : "额度水位与匀速使用参考线"}">${ticks}<polygon class="level-area" points="${area}"></polygon>${uniform}<polyline class="level-line" points="${points.join(" ")}"></polyline>${dots}${hits}${labels}</svg>`;
 }
 
 function renderLevels() {
   const timeline = quotaTimeline || snapshot.data?.quotaTimeline;
   const pools = timeline?.pools || [];
+  const balanceMode = timeline?.kind === "balance";
+  $("balanceRangeSwitch").hidden = !balanceMode;
+  $("balanceRangeSwitch").querySelectorAll("[data-balance-range]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.balanceRange === (settings.balanceRange || "day"));
+  });
+  $("levelLegendText").textContent = balanceMode ? `${timeline.currency} 余额` : "剩余额度";
+  $("levelFootnote").textContent = balanceMode ? (timeline.reconstructedCount
+    ? "历史每日余额按官方充值、赠送与扣款账单回算，并与当前钱包核对；日内曲线不代表实际扣款时间。后续数据来自实时查询，余额包含整个账户的消费。"
+    : "余额从首次成功查询开始记录，未采集的时间没有历史数据。余额变化含充值、赠送及其他设备消费，不等同于本机消费。") : "曲线来自每次刷新写入的额度采样；当前点会叠加上一次同步结果。";
   $("levelPoolSwitch").innerHTML = pools.map((pool) => (
     `<button type="button" data-level-pool="${escapeHtml(pool.id)}" class="${pool.id === (timeline?.pool || settings.quotaLevelPool) ? "active" : ""}"${pool.hasData ? "" : " disabled"}>${escapeHtml(pool.label.replace("Cursor ", "").replace("Codex ", "Codex "))}</button>`
   )).join("");
@@ -1662,17 +1814,18 @@ function renderLevels() {
     : "各账期内剩余额度变化";
   const start = timeline?.cycle?.startRemaining;
   const end = timeline?.cycle?.endRemaining;
-  $("levelTotal").textContent = start == null && end == null ? "—" : `${formatCursorPct(start)} → ${formatCursorPct(end)}`;
-  const sampleCount = timeline?.series?.filter((point) => !point.projected).length || 0;
+  $("levelTotal").textContent = start == null && end == null ? "—" : balanceMode
+    ? `${formatBalance(start, timeline.currency)} → ${formatBalance(end, timeline.currency)}` : `${formatCursorPct(start)} → ${formatCursorPct(end)}`;
+  const sampleCount = timeline?.sampleCount ?? (timeline?.series?.filter((point) => !point.projected).length || 0);
   $("levelPeak").textContent = sampleCount
-    ? `${sampleCount} 个采样点`
+    ? `${sampleCount} 个${balanceMode ? "数据" : "采样"}点`
     : "尚无采样";
-  $("levelChart").innerHTML = levelChartSvg(timeline?.series || [], timeline?.cycle);
+  $("levelChart").innerHTML = levelChartSvg(timeline?.series || [], timeline?.cycle, timeline || {});
   const reference = timeline?.cycle?.reference;
   $("uniformLegend").hidden = !reference;
   $("uniformNote").textContent = reference
     ? `${timeline.cycle.interrupted ? `本周期于 ${formatDateTime(timeline.cycle.endAt)} 提前重置，原定结束时间为 ${formatDateTime(timeline.cycle.scheduledEndAt)}。` : ""}虚线为匀速使用参考：${formatDateTime(reference.startAt)} 的 100% → ${formatDateTime(reference.endAt)} 的 0%。仅显示已有采样的时间范围。${reference.estimated ? " 周期起点按常规周期长度推算。" : ""}`
-    : "周期结束时间未知，暂不显示匀速参考线。";
+    : balanceMode ? `${timeline.change == null ? "至少两个采样点后显示变化额。" : `已采样期间净变化 ${timeline.change >= 0 ? "+" : ""}${formatBalance(timeline.change, timeline.currency)}。`} 日、周、月、年按本机自然周期统计，周一为每周起点。` : "周期结束时间未知，暂不显示匀速参考线。";
 }
 
 function eventCostCents(event) {
@@ -1691,20 +1844,21 @@ function renderEvents() {
     $("eventPager").innerHTML = "";
     return;
   }
-  $("eventCount").textContent = `${formatInteger(page.total)} 次`;
+  $("eventCount").textContent = `${formatInteger(page.total)} ${page.events.some((event) => event.pool === "deepseek-platform-daily") ? "条记录" : "次"}`;
   $("eventSubtitle").textContent = page.total ? `第 ${page.offset + 1}–${Math.min(page.offset + page.events.length, page.total)} 条` : "没有匹配的请求";
   $("eventList").innerHTML = page.events.length
     ? page.events.map((event) => {
       const speed = speedLabel(event);
       const model = window.ModelDisplay.format(event);
       return `<article class="event-row">
-        <div class="event-row-top"><b>${escapeHtml(model)}</b><em>${escapeHtml(formatUsd(eventCostCents(event)))}</em></div>
+        <div class="event-row-top"><b>${escapeHtml(model)}</b><em>${event.billingKind === "estimated" ? "估算 " : ""}${escapeHtml(event.equivalentCostHighCents > event.equivalentCostLowCents ? `${formatRequestUsd(event,event.equivalentCostLowCents)}–${formatRequestUsd(event,event.equivalentCostHighCents)}` : formatRequestUsd(event,eventCostCents(event)))}</em></div>
         <div class="event-meta">
-          <span>${escapeHtml(formatDateTime(event.timestamp))}</span>
-          <span>${event.source === "codex" ? "Codex" : "Cursor"}</span>
+          <span>${escapeHtml(formatDateTime(event.timestamp))}${event.pool === "deepseek-platform-daily" ? ` · 官方日汇总 · ${formatInteger(event.count)} 次请求` : ""}</span>
+          <span>${sourceName(event.source)}</span>
           <span class="speed-pill ${speed.className}">${speed.text}</span>
         </div>
         <small>输入 ${formatTokens(event.input)} · 写缓存 ${formatTokens(event.cacheWrite)} · 读缓存 ${formatTokens(event.cacheRead)} · 输出 ${formatTokens(event.output)}</small>
+        ${event.billingAmount != null ? `<small>${event.billingKind === "estimated" ? "估算" : "官方实收"} ${formatBalance(event.billingAmount, event.billingCurrency)}${event.billingBasis ? ` · 官方价格 ${escapeHtml(event.billingBasis.priceDate)} · ${event.billingBasis.period === "peak" ? "高峰" : event.billingBasis.period === "offpeak" ? "空闲" : "节假日未知，费用范围"}` : ""}${event.fxRate != null ? ` · 1 CNY = ${escapeHtml(event.fxRate)} USD · 汇率 ${escapeHtml(event.fxDate)} (${escapeHtml(event.fxSource)})${event.fxDate !== event.billingDate ? " · 最近已发布工作日" : ""}` : " · 美元汇率待获取"}</small>` : ""}
       </article>`;
     }).join("")
     : `<div class="empty-state">没有匹配的请求记录</div>`;
@@ -1765,7 +1919,7 @@ function renderPricing() {
       <tbody>
         ${catalog.rows.map((row) => `
           <tr>
-            <td class="pricing-source">${row.source === "codex" ? "Codex" : "Cursor"}</td>
+            <td class="pricing-source">${sourceName(row.source)}</td>
             <td class="pricing-model">${escapeHtml(window.ModelDisplay.format(row.model, { precision: "coarse" }))}</td>
             <td class="pricing-speed"><span class="speed-pill ${row.speed === "fast" ? "fast" : "normal"}">${escapeHtml(row.speedLabel)}</span></td>
             <td class="pricing-context">${escapeHtml(row.contextLabel)}</td>
@@ -1841,16 +1995,11 @@ function renderStatus() {
   dot.className = "live-dot";
   const cursorState = d?.sourceStatus?.cursor;
   const codexState = d?.sourceStatus?.codex;
+  const claudeState = d?.sourceStatus?.claude;
   if (cursorState?.ok === false || codexState?.ok === false) dot.className = "live-dot warning";
-  const sourceText = cursorState?.ok && codexState?.ok
-    ? "Cursor 云端 + Codex 本机"
-    : cursorState?.cached && codexState?.ok
-      ? "Cursor 本地缓存 + Codex 本机"
-      : cursorState?.ok
-        ? "Cursor 云端"
-        : codexState?.ok
-          ? "Codex 本机"
-          : "本地缓存";
+  const cursorText = cursorState?.ok ? "Cursor 云端" : cursorState?.cached ? "Cursor 本地缓存" : null;
+  const localText = [codexState?.ok && "Codex", claudeState?.ok && "Claude Code", d?.deepseek && "DeepSeek Harness"].filter(Boolean).join(" / ");
+  const sourceText = [cursorText, localText && `${localText} 本机`].filter(Boolean).join(" + ") || "本地缓存";
   $("statusText").textContent = `${sourceText} · ${timeAgo(d?.fetchedAt)}`;
   const seconds = Math.max(0, Math.ceil(((d?.fetchedAt || Date.now()) + Number(settings.intervalMs || 30_000) - Date.now()) / 1000));
   $("syncCountdown").textContent = seconds > 0 ? `${seconds}s 后刷新` : "等待同步";
@@ -1858,12 +2007,12 @@ function renderStatus() {
 
 function renderSourceHealth() {
   const status = snapshot.data?.sourceStatus || {};
-  $("sourceHealth").innerHTML = `<b>数据来源</b>${["cursor", "codex"].map((source) => {
+  $("sourceHealth").innerHTML = `<b>数据来源</b>${["cursor", "codex", "claude", "deepseek"].map((source) => {
     const state = status[source];
-    const label = source === "cursor" ? "Cursor 云端" : "Codex 本机";
+    const label = source === "cursor" ? "Cursor 云端" : `${sourceName(source)} 本机`;
     const healthy = snapshot.ok && state?.ok;
     const text = snapshot.loading ? "同步中" : healthy ? "已同步" : state?.cached ? "使用缓存" : "暂不可用";
-    return `<div><span>${label}</span><strong class="${healthy ? "healthy" : "warning"}">${text}</strong></div>`;
+    return `<div><span>${label}</span><strong class="${healthy ? "healthy" : "warning"}">${text}</strong>${source === "deepseek" && state?.error ? `<small>${escapeHtml(state.error)}</small>` : ""}</div>`;
   }).join("")}<small>${snapshot.data?.fetchedAt ? `最近采集 ${escapeHtml(formatDateTime(snapshot.data.fetchedAt))}` : "等待首次采集"} · 历史 ${formatInteger(snapshot.data?.persistence?.count || 0)} 条<br>缓存可能滞后；同步失败不会删除已保存的历史。可点顶栏刷新重试。</small>`;
 }
 
@@ -1906,11 +2055,14 @@ function render() {
   renderOrb(d);
   if (!d) return;
   if (d.modelUsage?.key === settings.modelRange && modelUsage?.key !== settings.modelRange) modelUsage = d.modelUsage;
-  $("planBadge").textContent = d.codex && d.cursorModels ? "双源" : d.codex ? "Codex" : d.planName || "Cursor";
+  const sourceCount = [d.cursorModels, d.codex, d.claude, d.deepseek].filter(Boolean).length;
+  $("planBadge").textContent = sourceCount > 1 ? `${sourceCount} 源` : d.codex ? "Codex" : d.claude ? "Claude Code" : d.deepseek ? "DeepSeek" : d.planName || "Cursor";
   const accountParts = [];
   if (d.email) accountParts.push(displayEmail(d.email));
   if (d.cursorModels) accountParts.push(`Cursor ${d.planName || ""}`.trim());
   if (d.codex) accountParts.push(`Codex ${d.codex.planName || ""}`.trim());
+  if (d.claude) accountParts.push("Claude Code");
+  if (d.deepseek) accountParts.push("DeepSeek Harness");
   $("planLine").textContent = accountParts.join(" · ") || "本机用量历史";
   $("priceBtn").title = d.pricing?.fetchedAt
     ? `手动更新官方价目表 · 当前 ${new Date(d.pricing.fetchedAt).toLocaleString("zh-CN")}`
@@ -1999,6 +2151,7 @@ async function loadQuotaTimeline() {
     const next = await window.widget.getQuotaTimeline({
       pool: settings.quotaLevelPool,
       cycleKey: selectedCycleKey,
+      range: settings.balanceRange || "day",
       now: Date.now(),
       live: liveQuotaPoints(snapshot.data),
     });
@@ -2105,6 +2258,11 @@ function handleLevelPointerMove(event) {
   $("chartTooltipLabel").textContent = formatDateTime(point.at);
   $("chartTooltipTotal").textContent = `剩余 ${formatCursorPct(point.remainingPercent)}`;
   $("chartTooltipRows").innerHTML = `<div>已用 ${formatCursorPct(point.usedPercent)}</div>`;
+  if (quotaTimeline?.kind === "balance") {
+    $("chartTooltipTotal").textContent = `余额 ${formatBalance(point.balance, quotaTimeline.currency)}`;
+    $("chartTooltipRows").innerHTML = `<div>充值余额 ${formatBalance(point.toppedUp, quotaTimeline.currency)}</div><div>赠送余额 ${formatBalance(point.granted, quotaTimeline.currency)}</div>`;
+    if (point.origin === "platform-ledger-daily") $("chartTooltipRows").innerHTML += "<div>官方日账单回算</div>";
+  }
   const uniform = window.UsageCharts.uniformRemaining(quotaTimeline?.cycle, point.at);
   if (uniform != null) $("chartTooltipRows").innerHTML += `<div>匀速参考剩余 ${formatCursorPct(uniform)}</div><div>实际水位${point.remainingPercent >= uniform ? "高于" : "低于"}参考 ${Math.abs(point.remainingPercent - uniform).toFixed(2)} 个百分点</div>`;
   $("chartTooltipMeta").textContent = quotaTimeline?.cycle?.label || "";
@@ -2132,6 +2290,14 @@ $("levelPoolSwitch").addEventListener("click", (event) => {
 });
 $("levelCycleSelect").addEventListener("change", (event) => {
   selectedCycleKey = event.target.value || null;
+  loadQuotaTimeline();
+});
+$("balanceRangeSwitch").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-balance-range]");
+  if (!button) return;
+  settings.balanceRange = button.dataset.balanceRange;
+  selectedCycleKey = null;
+  window.widget.saveSettings({ balanceRange: settings.balanceRange });
   loadQuotaTimeline();
 });
 $("eventSourceSwitch").addEventListener("click", (event) => {
@@ -2306,7 +2472,7 @@ $("healthBtn").addEventListener("click", () => setSmartPanel(true));
 $("smartCloseBtn").addEventListener("click", () => setSmartPanel(false));
 $("quotaGlance").addEventListener("click", (event) => {
   const target = event.target.closest("[data-quota-target]")?.dataset.quotaTarget;
-  if (["cursorPool", "otherPool", "codexPool"].includes(target)) {
+  if (["cursorPool", "otherPool", "codexPool", "claudePool"].includes(target)) {
     $(target).scrollIntoView({ behavior: reducedMotion() ? "instant" : "smooth", block: "start" });
   }
 });

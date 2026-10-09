@@ -16,7 +16,9 @@
     return value || null;
   }
 
-  function codexPool(windows, fallbackCapacity = null, monthly = null, shortLimit = "unknown") {
+  // A weekly allowance with a shorter five-hour window inside it.
+  function codexPool(windows, fallbackCapacity = null, monthly = null, shortLimit = "unknown",
+    { id = "codex-combined", source = "codex", label = "Codex" } = {}) {
     const listed = (Array.isArray(windows) ? windows : [])
       .filter((window) => window && !(shortLimit === "absent" && Number(window.windowMinutes) === 300))
       .slice()
@@ -38,9 +40,11 @@
       : Math.min(shortRemaining * share, weeklyRemaining);
     const weeklyOnlyRemaining = Math.max(0, weeklyRemaining - immediateRemaining);
     const pool = {
-      id: "codex-combined",
-      source: "codex",
-      name: listed.length > 1 ? "Codex 联合池" : `Codex · ${short.name || "额度池"}`,
+      id,
+      source,
+      label,
+      windowed: true,
+      name: listed.length > 1 ? `${label} 联合池` : `${label} · ${short.name || "额度池"}`,
       used: 100 - weeklyRemaining,
       remaining: immediateRemaining,
       weeklyRemaining,
@@ -254,7 +258,8 @@
       });
     };
     for (const pool of listed) {
-      if (pool.source === "codex") {
+      if (pool.windowed || pool.source === "codex") {
+        const label = pool.label || "Codex";
         if (pool.monthly && Array.isArray(pool.layers)) {
           for (const layer of pool.layers) {
             pushLayer(layer.id, `Codex ${layer.name}`, layer.tone, layer.remainingCents);
@@ -262,8 +267,8 @@
           }
           continue;
         }
-        pushLayer(`${pool.id}-weekly`, "Codex 周池", "codex-weekly", remainingCentsOf(pool, pool.weeklyOnlyRemaining));
-        pushLayer(`${pool.id}-immediate`, pool.shortLimit === "absent" ? "Codex 本周可用" : "Codex 5 小时", "codex-immediate", remainingCentsOf(pool, pool.remaining));
+        pushLayer(`${pool.id}-weekly`, `${label} 周池`, "codex-weekly", remainingCentsOf(pool, pool.weeklyOnlyRemaining));
+        pushLayer(`${pool.id}-immediate`, pool.shortLimit === "absent" ? `${label} 本周可用` : `${label} 5 小时`, "codex-immediate", remainingCentsOf(pool, pool.remaining));
         continue;
       }
       const tone = pool.id === "cursor-api" ? "cursor-api" : "cursor-models";

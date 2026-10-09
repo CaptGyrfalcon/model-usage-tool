@@ -15,6 +15,8 @@ function csvRow(event) {
     ModelDisplay.effort(event.effort || ModelDisplay.descriptor(event.model).effort), event.fastKnown === false ? "unknown" : event.fast ? "fast" : "standard",
     event.input, event.cacheWrite, event.cacheRead, event.output,
     event.equivalentCostCents == null ? "" : (Number(event.equivalentCostCents) / 100).toFixed(6),
+    event.billingCurrency, event.billingAmount, event.billingDate, event.fxRate, event.fxDate, event.fxSource,
+    event.billingKind, event.billingBasis ? JSON.stringify(event.billingBasis) : "",
   ].map(csvCell).join(",");
 }
 
@@ -28,7 +30,7 @@ function exportUsageEvents(history, { filePath, kind, source = "all", query = ""
   try {
     fd = fs.openSync(temp, "wx", 0o600);
     fs.writeFileSync(fd, kind === "csv"
-      ? "\uFEFF时间,来源,模型,effort,速度,输入,写缓存,读缓存,输出,美元等效\r\n" : "[\n");
+      ? "\uFEFF时间,来源,模型,effort,速度,输入,写缓存,读缓存,输出,美元等效,原币币种,原币金额,消费日期,美元汇率,汇率日期,汇率来源,费用性质,估算依据\r\n" : "[\n");
     let buffer = "";
     for (const event of history.iterateEvents({ sources: source === "all" ? undefined : source, query })) {
       buffer += kind === "csv" ? `${csvRow(event)}\r\n` : `${count ? ",\n" : ""}${JSON.stringify(event)}`;

@@ -4,6 +4,9 @@ const { Worker } = require("node:worker_threads");
 const { app, BrowserWindow, dialog, ipcMain, shell, Menu, screen, Tray, nativeImage, Notification, globalShortcut } = require("electron");
 const { loadSettings, saveSettings } = require("./lib.cjs");
 const { codexHomePath } = require("./codex.cjs");
+const { claudeProjectDirs } = require("./claude-code.cjs");
+const { claudeAppDataDir } = require("./claude-quota.cjs");
+const { statuslinePath } = require("./claude-statusline.cjs");
 const { smartDockBounds, windowMetrics, windowModeOptions } = require("./window-layout.cjs");
 const { alertLevel } = require("./quota-insights.cjs");
 const { createWindowDrag } = require("./window-drag.cjs");
@@ -21,6 +24,8 @@ let taskbarMeters;
 let pollTimer;
 let codexWatcher;
 let codexRefreshTimer;
+let claudeWatchers = [];
+let claudeRefreshTimer = null;
 let activePull;
 let isQuitting = false;
 let fullscreenRestore = null;
@@ -144,6 +149,8 @@ function rejectDataTasks(error, targetWorker = null) {
 
 function createDataWorker() {
   if (dataWorker) return dataWorker;
+  // Windows' own AppData location, independent of a launcher's APPDATA.
+  process.env.WIDGET_SYSTEM_APPDATA ||= app.getPath("appData");
   const worker = new Worker(path.join(__dirname, "data-worker.cjs"));
   dataWorker = worker;
   worker.on("message", ({ id, ok, data, error, stack }) => {
@@ -308,6 +315,11 @@ function updateTray() {
     if (d.cursorModels) parts.push(`Cursor ${Math.max(0, d.cursorModels.percentRemaining).toFixed(2)}%`);
     if (d.otherModels) parts.push(`其他模型 ${Math.max(0, d.otherModels.percentRemaining).toFixed(2)}%`);
     if (d.codex?.quota?.primary) parts.push(`Codex ${Math.max(0, d.codex.quota.primary.percentRemaining).toFixed(0)}%`);
+    const claudeShort = d.claude?.quota?.primary;
+    if (claudeShort) parts.push(`Claude ${Math.max(0, claudeShort.percentRemaining).toFixed(0)}%`);
+    else if (d.claude) parts.push(`Claude Code 今日 $${(Number(d.claude.costs?.today?.equivalentCostCents || 0) / 100).toFixed(2)}`);
+    const wallet = d.deepseek?.balance?.balances?.[0];
+    if (wallet) parts.push(`DeepSeek ${wallet.currency === "CNY" ? "¥" : "$"}${wallet.total.toFixed(2)}${d.deepseek.balance.cached ? "（缓存）" : ""}`);
     tray.setToolTip(parts.join(" · "));
   } else if (latest.error) {
     tray.setToolTip(`Cursor 额度 · ${latest.error}`);
@@ -774,6 +786,28 @@ function startCodexWatch() {
   }
 }
 
+function startClaudeWatch() {
+  for (const watcher of claudeWatchers) { try { watcher.close(); } catch {} }
+  claudeWatchers = [];
+  const watched = [
+    ...claudeProjectDirs().map((dir) => [dir, true, (name) => name.endsWith(".jsonl")]),
+    // The desktop app rewrites its plan usage samples every 15 minutes.
+    [claudeAppDataDir(), false, (name) => name === "plan-usage-history.json"],
+    [path.dirname(statuslinePath()), false, (name) => name === path.basename(statuslinePath())],
+  ];
+  for (const [dir, recursive, relevant] of watched) {
+    try {
+      claudeWatchers.push(fs.watch(dir, { persistent: false, recursive }, (_event, filename) => {
+        if (!relevant(String(filename || "")) || claudeRefreshTimer) return;
+        // Transcripts grow on every streamed message; throttle rather than debounce.
+        claudeRefreshTimer = setTimeout(() => { claudeRefreshTimer = null; pull(); }, 4000);
+      }));
+    } catch {
+      // The regular polling loop still picks up Claude Code transcripts.
+    }
+  }
+}
+
 app.whenReady().then(() => {
   app.setAppUserModelId("com.captgyrfalcon.cursor-usage-widget");
   createTray();
@@ -787,6 +821,7 @@ app.whenReady().then(() => {
   app.setLoginItemSettings({ openAtLogin: Boolean(loadSettings().openAtLogin) });
   startPoll();
   startCodexWatch();
+  startClaudeWatch();
   pull();
   screen.on("display-metrics-changed", () => applyWindowMode(loadSettings()));
 });
@@ -801,6 +836,8 @@ app.on("before-quit", () => {
   clearInterval(pollTimer);
   clearTimeout(codexRefreshTimer);
   try { codexWatcher?.close(); } catch {}
+  clearTimeout(claudeRefreshTimer);
+  for (const watcher of claudeWatchers) { try { watcher.close(); } catch {} }
   cancelSmartDockTimer();
   globalShortcut.unregisterAll();
   if (boundsSaveTimer) clearTimeout(boundsSaveTimer);
@@ -853,7 +890,7 @@ ipcMain.handle("export-usage-events", async (_event, payload) => {
   exporting = true;
   try {
     const kind = payload.kind;
-    const source = ["cursor", "codex"].includes(payload.source) ? payload.source : "all";
+    const source = ["cursor", "codex", "claude", "deepseek"].includes(payload.source) ? payload.source : "all";
     const query = String(payload.query || "");
     const stamp = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
     const result = await dialog.showSaveDialog(win, {

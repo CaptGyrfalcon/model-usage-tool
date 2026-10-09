@@ -91,15 +91,16 @@
     text("A P I  总费用", center, 548, 32, true, "center");
     const amount = total.priced || !total.count ? money(total.cost) : "未计价";
     text(amount, center, 692, amount.length > 12 ? 83 : amount.length > 9 ? 104 : 130, true, "center");
-    text("API 等值估算 · 非实际账单", center, 755, 28, false, "center");
+    const costNote = data.costNote || "API 等值估算 · 非实际账单";
+    text(costNote, center, 755, 28, false, "center");
     divider(795);
     text("客户端 / 模型", left, 858, 31, true, "left", "#85837a");
     text("费用", right, 858, 31, true, "right", "#85837a");
     let y = 858;
     for (const group of groups) {
       y += 74;
-      icon(group.source === "codex" ? "openai" : "cursor", left, y - 35, 43);
-      text(group.source === "codex" ? "CODEX" : group.source.toUpperCase(), left + 65, y, 38, true);
+      icon({ codex: "openai", claude: "anthropic", deepseek: "deepseek" }[group.source] || "cursor", left, y - 35, 43);
+      text({ codex: "CODEX", claude: "CLAUDE CODE" }[group.source] || group.source.toUpperCase(), left + 65, y, 38, true);
       const priced = group.rows.some((r) => r.costCents != null);
       const partial = group.rows.some((r) => r.unpriced > 0);
       text(money(priced ? group.rows.reduce((sum, r) => sum + (r.costCents || 0), 0) : null) + (partial ? " *" : ""), right, y, 37, true, "right");
@@ -123,7 +124,7 @@
     divider(y - 15);
     text(total.unpriced ? `* ${total.unpriced} 次请求未计价，仅合计已知费用` : "AI 用量 · 每一份灵感，都有迹可循", center, y + 43, 27, false, "center");
     text("本机历史记录 · Cursor / Codex", center, y + 95, 27, false, "center");
-    const plain = [`${data.range.title} · ${dateLabel}`, `API 等值估算 · 非实际账单：${amount}`, ...groups.flatMap((group) => [group.source.toUpperCase(), ...group.rows.map((r) => `${r.label}  ${money(r.costCents)}${r.unpriced ? "（含未计价请求）" : ""}`)]), ...stats.map((s) => s.join("：")), total.unpriced ? `${total.unpriced} 次请求未计价，仅合计已知费用` : "本机历史记录"].join("\n");
+    const plain = [`${data.range.title} · ${dateLabel}`, `${costNote}：${amount}`, ...groups.flatMap((group) => [group.source.toUpperCase(), ...group.rows.map((r) => `${r.label}  ${money(r.costCents)}${r.unpriced ? "（含未计价请求）" : ""}`)]), ...stats.map((s) => s.join("：")), total.unpriced ? `${total.unpriced} 次请求未计价，仅合计已知费用` : "本机历史记录"].join("\n");
     return { canvas: c, plain };
   }
 

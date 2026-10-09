@@ -6,6 +6,42 @@ const {UsageHistory}=require('../src/history.cjs');
 const accounting=require('../src/codex-accounting.cjs');
 const {Verification,queryAccount}=require('../src/codex-verification.cjs');
 
+test('GPT 6.1 migration prices existing unknown and Fast tiers, survives stale catalogs and preserves other history',()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'gpt61-accounting-test-'));let h;
+ try {
+  h=new UsageHistory(path.join(dir,'history.sqlite'));
+  const snapshot=builtInSnapshot();
+  snapshot.modelsBySource.codex['gpt-6.1-sol'].standard.short={input:99,cacheRead:99,cacheWrite:99,output:99};
+  const base={source:'codex',timestamp:1234,model:'gpt-6.1-sol',input:10000,cacheRead:20000,
+   cacheWrite:1000,output:1000,reasoning:200,effort:'high',pricingStatus:'unavailable'};
+  const events=[{...base,eventKey:'normal',fast:false,fastKnown:true},
+   {...base,eventKey:'fast',fast:true,fastKnown:true},
+   {...base,eventKey:'unknown',fast:true,fastKnown:false},
+   {...base,eventKey:'alias',model:'gpt-6.1-sol-high-fast',fast:true,fastKnown:true},
+   {...base,eventKey:'long',input:100000,cacheRead:200000,cacheWrite:10000,output:10000,fast:true,fastKnown:true},
+   {...base,eventKey:'cursor',source:'cursor',equivalentCostCents:777,pricingStatus:'old'},
+   {...base,eventKey:'other',model:'gpt-6-sol',equivalentCostCents:888,pricingStatus:'old'}];
+  h.upsertEvents(events);
+  h.saveCache(accounting.VERSION,{at:1});
+  const cursor=h.getEvent('cursor','cursor'),other=h.getEvent('codex','other');
+  const run=()=>h.applyCodexAccounting(snapshot,{version:accounting.GPT61_VERSION,model:'gpt-6.1-sol'});
+  const result=run();assert.equal(result.updated,5);assert.ok(fs.existsSync(result.backupPath));
+  for(const [key,cost] of [['normal',6.9],['fast',17.25],['unknown',6.9],['alias',17.25],['long',320]]){
+   const row=h.getEvent('codex',key);assert.ok(Math.abs(row.equivalentCostCents-cost)<1e-9,key);
+   assert.equal(row.quotaEquivalentCostCents,row.equivalentCostCents);
+   const original=events.find(e=>e.eventKey===key);
+   for(const field of ['timestamp','model','input','cacheRead','cacheWrite','output','reasoning','effort','fastKnown'])assert.equal(row[field],original[field],field);
+   assert.ok(row.pricingStatus.startsWith(accounting.GPT61_VERSION));
+  }
+  assert.deepEqual(h.getEvent('cursor','cursor'),cursor);
+  assert.deepEqual(h.getEvent('codex','other'),other);
+  assert.equal(run().alreadyApplied,true);assert.equal(fs.readdirSync(dir).filter(n=>n.includes('before-')).length,1);
+  const catalog=accounting.catalog(snapshot);
+  assert.deepEqual(catalog.modelsBySource.codex['gpt-6.1-sol'].fast.short,{input:10,cacheRead:.5,cacheWrite:12.5,output:50});
+  assert.deepEqual(catalog.modelsBySource.cursor,snapshot.modelsBySource.cursor);
+ } finally {h?.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 test('September 27 catalog and historical migration agree for all six models and both speeds',()=>{
  const expected=[['gpt-6-astra',15,1.5,75,2.5],['gpt-6-sol',3,.3,15,2.5],
   ['gpt-6-luna',.25,.025,1.25,2.5],['gpt-5.6-sol',4.4,.44,22,2.5],

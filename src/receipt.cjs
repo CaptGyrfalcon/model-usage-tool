@@ -10,7 +10,7 @@ function dayBounds(date) {
 
 function getReceipt(history, { date, source = "all", period = "day", ...options } = {}) {
   const { start, end } = ReceiptModel.range(date, period);
-  if (!["all", "cursor", "codex"].includes(source)) throw new Error("数据来源无效");
+  if (!["all", "cursor", "codex", "claude", "deepseek"].includes(source)) throw new Error("数据来源无效");
   const rows = history.db.prepare(`SELECT source, model, effort, fast,
     SUM(request_count) AS count, SUM(input_tokens) AS input, SUM(output_tokens) AS output,
     SUM(cache_read_tokens) AS cacheRead, SUM(cache_write_tokens) AS cacheWrite,
@@ -20,7 +20,17 @@ function getReceipt(history, { date, source = "all", period = "day", ...options 
     ${source === "all" ? "" : "AND source = ?"}
     GROUP BY source, model, effort, fast ORDER BY SUM(equivalent_cost_cents) DESC, source, model
   `).all(start, end, ...(source === "all" ? [] : [source]));
-  return ReceiptModel.build(rows, { date, source, period, ...options });
+  const result = ReceiptModel.build(rows, { date, source, period, ...options });
+  const deepseekCosts = rows.some(row=>row.source==='deepseek'&&row.costCents!=null);
+  const converted = deepseekCosts ? history.db.prepare(`SELECT COUNT(*) AS n FROM usage_events WHERE timestamp >= ? AND timestamp < ?
+    AND source = 'deepseek' AND pricing_status = 'official-billing-fx'`).get(start,end).n : 0;
+  const estimated = deepseekCosts ? history.db.prepare(`SELECT COUNT(*) AS n FROM usage_events WHERE timestamp >= ? AND timestamp < ?
+    AND source = 'deepseek' AND pricing_status = 'estimated-deepseek-cny-fx'`).get(start,end).n : 0;
+  if (converted && ["all","deepseek"].includes(source)) result.costNote = source === "deepseek"
+    ? "官方日账单实收 · 按历史汇率折算美元" : "API 等值费用 · 含 DeepSeek 官方账单美元换算";
+  if (estimated && ["all","deepseek"].includes(source)) result.costNote = converted
+    ? "含官方日账单实收及本机会话估算 · 按消费日汇率折算美元" : "含本机 DeepSeek 会话估算 · 按官方单价及消费日汇率计算";
+  return result;
 }
 
 module.exports = { dayBounds, getReceipt };

@@ -1,13 +1,26 @@
 const DAY_MS = 86_400_000;
 const codexAccounting = require("./codex-accounting.cjs");
+const { billingUsdPricing } = require("./deepseek-usd.cjs");
 const OPENAI_PRICING_URL = "https://developers.openai.com/api/docs/pricing.md";
 const CURSOR_PRICING_URL = "https://cursor.com/docs/models-and-pricing.md";
+const ANTHROPIC_PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing";
 
 function tier(short, long = short) {
   return { short, long };
 }
 
 const FALLBACK_MODELS = {
+  "gpt-6.1-sol": {
+    provider: "openai",
+    standard: tier(
+      { input: 2, cacheRead: 0.1, cacheWrite: 2.5, output: 10 },
+      { input: 4, cacheRead: 0.2, cacheWrite: 5, output: 15 },
+    ),
+    fast: tier(
+      { input: 4, cacheRead: 0.2, cacheWrite: 5, output: 20 },
+      { input: 8, cacheRead: 0.4, cacheWrite: 10, output: 30 },
+    ),
+  },
   "gpt-6-sol": {
     provider: "openai",
     standard: tier(
@@ -136,6 +149,34 @@ const FALLBACK_CURSOR_MODELS = {
   "gpt-5.6-luna": { provider: "cursor", standard: tier({ input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1.2 }) },
 };
 
+// Anthropic first-party list prices for Claude Code. Cache writes are 1.25x
+// input for the 5-minute TTL and 2x for the 1-hour TTL Claude Code uses.
+function anthropicRate(input, output, cacheRead = input / 10) {
+  return { input, cacheRead, cacheWrite: input * 1.25, cacheWrite1h: input * 2, output };
+}
+
+const FALLBACK_CLAUDE_MODELS = {
+  "claude-fable-5-1": { provider: "anthropic", standard: tier(anthropicRate(10, 50, 0.25)) },
+  "claude-fable-5": { provider: "anthropic", standard: tier(anthropicRate(10, 50)) },
+  "claude-opus-5-5": {
+    provider: "anthropic",
+    standard: tier(anthropicRate(4, 20, 0.2)),
+    fast: tier(anthropicRate(8, 40, 0.4)),
+  },
+  "claude-opus-5": {
+    provider: "anthropic",
+    standard: tier(anthropicRate(5, 25)),
+    fast: tier(anthropicRate(10, 50)),
+  },
+  "claude-opus-4-8": { provider: "anthropic", standard: tier(anthropicRate(5, 25)), fast: tier(anthropicRate(10, 50)) },
+  "claude-opus-4-7": { provider: "anthropic", standard: tier(anthropicRate(5, 25)) },
+  "claude-opus-4-6": { provider: "anthropic", standard: tier(anthropicRate(5, 25)) },
+  "claude-sonnet-5-5": { provider: "anthropic", standard: tier(anthropicRate(2, 10)) },
+  "claude-sonnet-5": { provider: "anthropic", standard: tier(anthropicRate(2, 10)) },
+  "claude-sonnet-4-6": { provider: "anthropic", standard: tier(anthropicRate(3, 15)) },
+  "claude-haiku-4-5": { provider: "anthropic", standard: tier(anthropicRate(1, 5)) },
+};
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -146,6 +187,7 @@ function mergeFallbackCatalog(snapshot, now = Date.now()) {
   base.modelsBySource = {
     codex: { ...clone(FALLBACK_CODEX_MODELS), ...(base.modelsBySource?.codex || {}) },
     cursor: { ...clone(FALLBACK_CURSOR_MODELS), ...(base.modelsBySource?.cursor || {}) },
+    claude: { ...clone(FALLBACK_CLAUDE_MODELS), ...(base.modelsBySource?.claude || {}) },
   };
   return base;
 }
@@ -155,6 +197,7 @@ function catalogModel(snapshot, source, key) {
 }
 
 function fallbackModel(source, key) {
+  if (source === "claude") return FALLBACK_CLAUDE_MODELS[key] || null;
   if (source === "codex") return FALLBACK_CODEX_MODELS[key] || FALLBACK_MODELS[key] || null;
   return FALLBACK_CURSOR_MODELS[key] || FALLBACK_MODELS[key] || null;
 }
@@ -167,8 +210,9 @@ function builtInSnapshot(now = Date.now()) {
     modelsBySource: {
       codex: clone(FALLBACK_CODEX_MODELS),
       cursor: clone(FALLBACK_CURSOR_MODELS),
+      claude: clone(FALLBACK_CLAUDE_MODELS),
     },
-    sourceUrls: [OPENAI_PRICING_URL.replace(/\.md$/, ""), CURSOR_PRICING_URL.replace(/\.md$/, "")],
+    sourceUrls: [OPENAI_PRICING_URL.replace(/\.md$/, ""), CURSOR_PRICING_URL.replace(/\.md$/, ""), ANTHROPIC_PRICING_URL],
     note: "内置的最近一次官方价目表；联网更新失败时使用。",
   };
 }
@@ -317,8 +361,8 @@ async function refreshPricing(history, { force = false, now = Date.now() } = {})
     fetchedAt: now,
     status: errors.length ? (errors.length === 2 ? "built-in" : "remote-partial") : "remote",
     models: { ...cursorModels, ...codexModels },
-    modelsBySource: { codex: codexModels, cursor: cursorModels },
-    sourceUrls: [OPENAI_PRICING_URL.replace(/\.md$/, ""), CURSOR_PRICING_URL.replace(/\.md$/, "")],
+    modelsBySource: { codex: codexModels, cursor: cursorModels, claude: clone(previous.modelsBySource.claude) },
+    sourceUrls: [OPENAI_PRICING_URL.replace(/\.md$/, ""), CURSOR_PRICING_URL.replace(/\.md$/, ""), ANTHROPIC_PRICING_URL],
     note: errors.length ? errors.join("；") : "已从 OpenAI 与 Cursor 官方文档更新。",
   };
   if (snapshot.status !== "built-in" || !latest) snapshot.id = history.savePricingSnapshot(snapshot);
@@ -338,10 +382,26 @@ function modelKey(raw) {
   return value;
 }
 
+// Claude Code model IDs keep their minor version (Opus 5.5 is not priced like
+// Opus 5), and may carry a date snapshot or a "[1m]" context suffix.
+function claudeModelKey(raw, catalog = FALLBACK_CLAUDE_MODELS) {
+  const value = String(raw || "unknown").toLowerCase()
+    .replace(/^(?:anthropic\.|us\.anthropic\.)/, "").replace(/\[[^\]]*\]$/, "")
+    .replace(/-(?:\d{8}|v\d+(?::\d+)?)$/, "").replace(/-fast$/, "");
+  if (catalog[value]) return value;
+  const prefix = Object.keys(catalog)
+    .filter((key) => value.startsWith(`${key}-`))
+    .sort((a, b) => b.length - a.length)[0];
+  return prefix || value;
+}
+
 function components(event, rate) {
   const factor = 100 / 1_000_000;
   const cacheReadCostCents = Math.max(0, Number(event.cacheRead) || 0) * rate.cacheRead * factor;
-  const cacheWriteCostCents = Math.max(0, Number(event.cacheWrite) || 0) * rate.cacheWrite * factor;
+  const cacheWrite = Math.max(0, Number(event.cacheWrite) || 0);
+  const cacheWrite1h = Math.min(cacheWrite, Math.max(0, Number(event.cacheWrite1h) || 0));
+  const cacheWriteCostCents = ((cacheWrite - cacheWrite1h) * rate.cacheWrite
+    + cacheWrite1h * (rate.cacheWrite1h ?? rate.cacheWrite)) * factor;
   return {
     inputCostCents: Math.max(0, Number(event.input) || 0) * rate.input * factor,
     cacheReadCostCents,
@@ -388,8 +448,14 @@ function scaleComponents(parts, total) {
 }
 
 function priceEvent(event, snapshot, { authoritativeTotalCents = null, authoritativeSource = "model-total", fallbackSnapshot = null } = {}) {
-  const key = modelKey(event.model);
   const source = String(event.source || "").toLowerCase();
+  if (source === "deepseek") {
+    const billing = billingUsdPricing(event);
+    if (billing) return billing;
+  }
+  const key = source === "claude"
+    ? claudeModelKey(event.model, { ...FALLBACK_CLAUDE_MODELS, ...(snapshot?.modelsBySource?.claude || {}) })
+    : modelKey(event.model);
   // User-selected accounting assumption, not an official published rate.
   // Token updates are retained; a separate, stable completed-turn event carries the fee.
   if (source === "codex" && String(event.model || "").toLowerCase() === "codex-auto-review") {
@@ -403,7 +469,8 @@ function priceEvent(event, snapshot, { authoritativeTotalCents = null, authorita
       pricingStatus: `${codexAccounting.VERSION}-${fee ? "review-turn" : "review-token-only"}`,
     };
   }
-  const model = (source === "codex" ? codexAccounting.model(key) : null) || catalogModel(snapshot, source, key)
+  // Without a matched bill, Harness Token usage does not identify actual fees.
+  const model = source === "deepseek" ? null : (source === "codex" ? codexAccounting.model(key) : null) || catalogModel(snapshot, source, key)
     || catalogModel(fallbackSnapshot, source, key)
     || fallbackModel(source, key);
   if (!model?.standard) {
@@ -483,7 +550,7 @@ function priceEvent(event, snapshot, { authoritativeTotalCents = null, authorita
     pricingStatus: Number.isFinite(authoritative)
       ? "api-total-allocated"
       : isCodex
-        ? `${codexAccounting.model(key) ? codexAccounting.VERSION : "official-standard-rate-credit-multiplier"}${knownFast ? "" : "-tier-unknown"}`
+        ? `${key === "gpt-6.1-sol" ? codexAccounting.GPT61_VERSION : codexAccounting.model(key) ? codexAccounting.VERSION : "official-standard-rate-credit-multiplier"}${knownFast ? "" : "-tier-unknown"}`
         : knownFast ? "official-rate" : "official-rate-tier-unknown",
   };
 }
@@ -491,13 +558,16 @@ function priceEvent(event, snapshot, { authoritativeTotalCents = null, authorita
 module.exports = {
   OPENAI_PRICING_URL,
   CURSOR_PRICING_URL,
+  ANTHROPIC_PRICING_URL,
   FALLBACK_MODELS,
+  FALLBACK_CLAUDE_MODELS,
   builtInSnapshot,
   parseOpenAiPricing,
   parseCursorPricing,
   refreshPricing,
   mergeFallbackCatalog,
   modelKey,
+  claudeModelKey,
   catalogModel,
   codexFastCreditMultiplier,
   priceEvent,

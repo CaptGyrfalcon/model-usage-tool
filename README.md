@@ -1,6 +1,6 @@
-# AI 用量挂件（Cursor + Codex）
+# AI 用量挂件（Cursor + Codex + Claude Code + DeepSeek Harness）
 
-> **非官方 / Unofficial.** 本项目与 Cursor、Anysphere、OpenAI 均无隶属关系，也不是它们的官方产品。程序会读取本机 Cursor 登录态并调用未公开文档的账单接口，同时解析本机 Codex 会话文件。接口随时可能失效；使用本工具可能违反相关服务条款，账号存在被限制的风险。请自行判断后再使用。
+> **非官方 / Unofficial.** 本项目与 Cursor、Anysphere、OpenAI 均无隶属关系，也不是它们的官方产品。程序会读取本机 Cursor 登录态并调用未公开文档的账单接口，同时解析本机 Codex 与 Claude Code 会话文件。接口随时可能失效；使用本工具可能违反相关服务条款，账号存在被限制的风险。请自行判断后再使用。
 >
 > MIT licensed Windows widget. Not affiliated with Cursor or OpenAI. It reads local session tokens and undocumented billing APIs. Use at your own risk.
 >
@@ -12,7 +12,7 @@
 
 - Windows 10 / 11 x64（目前不支持 macOS / Linux）
 - [Node.js 22](https://nodejs.org/) 或更高（`node:sqlite`）
-- 本机已登录 [Cursor](https://cursor.com)；Codex 用量需要本机有过 Codex 会话
+- 本机已登录 [Cursor](https://cursor.com)；Codex / Claude Code 用量需要本机有过对应会话
 
 ## 启动
 
@@ -29,17 +29,41 @@ npm start
 
 - **Cursor**：读取本机 `state.vscdb` 中的登录态，调用账单相关接口。刷新后的 access token 可能写入 `%APPDATA%\cursor-usage-widget\session.json`。
 - **Codex**：解析 `.codex/sessions` 与 `.codex/archived_sessions` 中的 token 计数、模型、effort 与额度窗口；不读取或保存对话正文。
+- **Claude Code**：与 ccusage 相同，只读本机 `~/.claude/projects` 与 `~/.config/claude/projects`（或 `CLAUDE_CONFIG_DIR` 中逗号分隔的目录）下的会话 JSONL，含子代理记录；不使用登录凭据，也不访问任何接口。
+- **DeepSeek Harness**：只读本机 `.dsh/sessions` 中的 Token 元数据，以及 `.dsh/.credentials.yaml` 中的余额查询凭据。API Key 或账号登录凭据仅在后台用于请求 DeepSeek 官方余额接口，不写入本工具设置、不传给界面，不保存对话正文。
 - **本地历史**：事件去重后写入 `%APPDATA%\cursor-usage-widget\usage-history.sqlite`，不会主动删除。
-- **网络**：仅请求 Cursor / OpenAI 的官方接口与价目表，不会把用量上传到其它服务器。
+- **网络**：请求 Cursor / OpenAI / Anthropic / DeepSeek 的官方接口与价目表；DeepSeek 美元换算另查询 Frankfurter 的 ECB 历史汇率，仅发送日期和币种，不发送凭据或用量。
 - 界面可开隐私模式，只把邮箱显示成 `****`，套餐名称仍会显示。删除 `%APPDATA%\cursor-usage-widget` 即可清除本应用保存的数据。
 
 漏洞报告方式见 [SECURITY.md](SECURITY.md)。请勿在 Issue 里粘贴 token 或账单截图。
 
 ## 数据来源
 
+- **DeepSeek Harness**：参考[官方 Token 累计实现](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/token-meter/src/usage-projection.ts)，读取 `assistant/message`、`assistant/attempt` 的最终 usage（含流式 usage），输入、读缓存、写缓存、输出分别累计；同一步的重复结算替换、重试另计。分叉继承的历史不重复计入。每个会话只扫描最新格式代际；支持普通 JSONL 和 Zstandard 压缩，未完成的尾帧等待下次刷新。无法读取的会话保留历史，并提示错误。
+- **DeepSeek 余额**：API Key 调用 `https://api.deepseek.com/user/balance`；账号登录沿用[Harness 官方钱包查询](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/credentials/deepseek-account-platform/src/details.ts)，调用 `https://platform.deepseek.com/api/v0/users/get_user_summary`，分别显示充值与赠送余额。失败保留最近成功余额及原采样时间，不写入虚假的零余额。余额按凭据指纹与 CNY / USD 隔离；更换凭据会开始一条独立历史，不混合不同账号或币种。
+
+### DeepSeek Harness 接入
+
+默认自动读取 `%USERPROFILE%\.dsh\sessions` 与 `%USERPROFILE%\.dsh\.credentials.yaml`，在 Harness 登录或设置 API Key 后刷新即可。自定义位置可设置 `DSH_HOME`；单独自定义会话目录可设置 `DSH_SESSIONS_DIR`。启动环境中的 `DEEPSEEK_API_KEY` 优先；否则优先读取官方平台账号登录记录，其次读取凭据文件中的 `DEEPSEEK_API_KEY` 和项目 / Harness 目录下 `.env`。只读原文件。
+
+总览显示余额、充值 / 赠送构成、今日与近 30 天 Token。点「查看余额趋势」，或在水位页选「DeepSeek CNY / USD 余额」，可切换日、周、月、年自然周期和历史周期，周从周一开始。实时余额从首次成功采样开始记录；变化包含充值、赠送及所有设备的账户消费，不能视作本机消费金额。
+
+历史补录使用开放平台用量页的 `GET /api/v0/usage/by_api_key/amount`、`cost`、`usage/export` 和交易页的 `GET /auth-api/v0/users/get_all_invoice`，以官方 Harness 账号 grant 查询，按本地整日边界及显式时区逐月读取。补录前先用 SQLite `VACUUM INTO` 做一致性备份并校验，再在副本演练，最后以事务导入。`scripts/import-deepseek-history.cjs` 默认演练，`--apply` 导入已放在 `work/deepseek-history` 的核对资料，要求存在经哈希验证的备份记录。
+
+平台记录是账户级模型 / API Key 日汇总，保留真实请求次数和 Token，界面明确标注“官方日汇总”；已覆盖历史日期不重复累计本机 Harness 请求，当前未结束的日期继续读取本机日志。只有日消费接口、按充值 / 赠送钱包拆分的导出账单、全部成功充值 / 赠送收入、当前两个钱包及平台累计消费全部对平，才回算已结束日期的每日余额。历史点带 `platform-ledger-daily` 来源，图表注明“官方日账单回算”，不代表当时实时采样或日内扣费时间；未对平、退款或赠送过期调整不猜测回填。重复导入不重复累计，历史点不能覆盖真实采样。
+
+DeepSeek 同时接入模型统计、环状图、Token / 美元趋势、请求明细、小票及 CSV / JSON 导出。官方历史日账单保留实际原币金额，按消费日的 ECB CNY→USD 汇率折算美元；周末、汇率休市或当日尚未公布时使用最近已公布报价，保留消费日、汇率公布日及来源。逐 API Key / 模型 / 日期匹配实际费用，不把日账单分摊成逐对话实收。
+
+Harness 日志只有 Token，没有逐请求实收金额。本机请求按[官方人民币单价](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)估算，再换算美元，明确标为「估算」。价格核验日期为 2026-10-05，区分输入、缓存命中、缓存写入和输出，以及北京时间高峰 / 空闲时段、2026 年中国节假日；未知年份的高峰节假日状态保留费用范围。单价与汇率随首次记录保存，后续 Token 更新沿用同一依据。更早且缺少历史价表的本机记录、未知模型或汇率不可用时保持未计价，原币金额仍保留。DeepSeek 不参与订阅额度百分比、重置倒计时和耗尽预测。
+
+### 其他来源
+
 - **Cursor**：读取本机 Cursor 登录态并调用账单页使用的接口，获得当前额度、逐模型事件、Token 与实际计费金额。
 - **Codex**：解析本机 `.codex/sessions` 和 `.codex/archived_sessions` 中的 `token_count`、模型、effort 与额度窗口元数据；若会话记录含服务端响应 `service_tier` 则优先持久化，否则回退到 `logs_2.sqlite` / 本地会话设置中的请求 tier。不读取或保存对话正文。
+- **Claude Code**：读取 `type: "assistant"` 记录的 `message.usage`（输入、输出、读缓存、5 分钟 / 1 小时写缓存）、模型、`speed`（Fast）与 effort。同一响应会拆成多行并重复同一 usage，按 `message.id + requestId` 去重。费用按 Anthropic 官方标价计算（内置价表，写缓存区分 5 分钟 1.25× 与 1 小时 2×），与 Claude Code 自身 `cost-state` 记录逐位一致；Pro / Max 订阅不按此扣费。Claude Code 每轮还会发出少量不写入会话记录的后台请求，因此比其会话总额低约 1–5%（ccusage 同样如此）。
+- **Claude 额度**：读取 Claude 桌面版写在本机的 `%APPDATA%\Claude\plan-usage-history.json`（约每 15 分钟一次的 5 小时 / 7 天用量整数百分比），同步保存到本地历史，文件轮换后仍保留。这是整个账号的额度，包含 Cowork、claude.ai 网页和其他设备的用量。文件没有重置时间：窗口按「上一次 0% 采样与首个请求之间」推算起点，重置时间显示为约数并附区间。美元容量按「额度增量 ÷ 同期本机 Claude Code 标价花费」自动拟合（近 30 天，5 小时额度变化决定哪些区间干净，剔除混入其他来源用量的区间；整数取整带来的误差给出区间），并据此拆分当前窗口里本机 Claude Code 与其他来源各占多少。额度接入总览剩余环、Claude Code 卡片、耗尽预测、额度水位、额度球 / 用量池与托盘提示；任务栏额度条仅有三行，暂不显示 Claude。
 - **官方价目表**：OpenAI API 与 Cursor 模型价格每天最多自动检查一次，也可在价目表页点击「更新价格」手动更新。
+- **Codex GPT-6.1 Sol 等效计价**：按官方 Standard API 普通 2×、Fast 5×；短上下文输入／缓存命中／缓存写入／输出分别为 $4／$0.20／$5／$20，Fast 为 $10／$0.50／$12.50／$50（每百万 tokens）。速度未知按普通；超过 272K 输入沿用官方长上下文比例。启动时先备份 SQLite，再仅重算本模型的历史费用，保留 token 与速度证据。此为用户指定的 Pro 5x 每周 $500 等效额度假设。
 - **本地历史库**：两边的事件都会规范化、去重后写入 `%APPDATA%\cursor-usage-widget\usage-history.sqlite`。历史事件不主动清理，远端以后缩短历史窗口也不会删除已采集的数据。
 
 Codex 会优先采用服务端实际响应的 `service_tier`，本机当前版本未稳定落盘响应值时，使用 `priority`（Fast 请求）或 `default`（普通请求）的本地请求证据。旧版本没有该字段的事件继续显示“速度未知”，不会猜测。为了让趋势、模型汇总和套餐额度反推使用同一口径，Codex 美元等效费用采用下方用户假设价格；四个指定模型的 Fast 为 2.5×，未知按 non-fast；Cursor 价格不变。

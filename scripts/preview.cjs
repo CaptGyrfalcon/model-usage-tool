@@ -13,4 +13,6 @@ http.createServer((request, response) => {
     response.writeHead(200, { "Content-Type": `${types[path.extname(name)]}; charset=utf-8`, "Cache-Control": "no-store" });
     response.end(content);
   });
-}).listen(4173, "127.0.0.1", () => console.log("Preview: http://127.0.0.1:4173/?preview=1"));
+}).listen(Number(process.env.PORT) || 4173, "127.0.0.1", function () {
+  console.log(`Preview: http://127.0.0.1:${this.address().port}/?preview=1`);
+});

@@ -2,12 +2,16 @@ const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
 // Session records and reset-after response headers can disagree by seconds.
 const CODEX_RESET_TOLERANCE_MS = 60_000;
+// Claude resets are inferred from 15-minute samples.
+const CLAUDE_RESET_TOLERANCE_MS = 20 * 60_000;
 
 const QUOTA_POOLS = [
   { id: "cursor-models", source: "cursor", label: "Cursor 模型池", typicalMs: 30 * DAY_MS },
   { id: "other-models", source: "cursor", label: "Cursor 三方模型池", typicalMs: 30 * DAY_MS },
   { id: "codex-300", source: "codex", label: "Codex 5 小时", typicalMs: 5 * HOUR_MS },
   { id: "codex-10080", source: "codex", label: "Codex 每周", typicalMs: 7 * DAY_MS },
+  { id: "claude-300", source: "claude", label: "Claude 5 小时", typicalMs: 5 * HOUR_MS },
+  { id: "claude-10080", source: "claude", label: "Claude 每周", typicalMs: 7 * DAY_MS },
 ];
 
 function finite(value) {
@@ -38,16 +42,17 @@ function poolIdOf(sample) {
     return sample.pool === "cursor-models" ? "cursor-models" : "other-models";
   }
   const minutes = windowMinutesOf(sample);
-  if (minutes != null && minutes <= 360) return "codex-300";
-  if (minutes != null && minutes >= 6 * 24 * 60) return "codex-10080";
-  if (minutes != null) return `codex-${minutes}`;
+  const prefix = sample?.source === "claude" ? "claude" : "codex";
+  if (minutes != null && minutes <= 360) return `${prefix}-300`;
+  if (minutes != null && minutes >= 6 * 24 * 60) return `${prefix}-10080`;
+  if (minutes != null) return `${prefix}-${minutes}`;
   return String(sample?.pool || "unknown");
 }
 
 function poolMeta(poolId) {
   return QUOTA_POOLS.find((item) => item.id === poolId) || {
     id: poolId,
-    source: String(poolId).startsWith("codex") ? "codex" : "cursor",
+    source: String(poolId).startsWith("codex") ? "codex" : String(poolId).startsWith("claude") ? "claude" : "cursor",
     label: poolId,
     typicalMs: DAY_MS,
   };
@@ -123,6 +128,17 @@ function livePointsFromSnapshot(data, now = Date.now()) {
       resetsAt: window.resetsAt,
     });
   }
+  for (const window of data.claude?.quota?.windows || []) {
+    if (window.expired) continue;
+    points.push({
+      source: "claude",
+      pool: window.pool,
+      timestamp: window.sampledAt ?? at,
+      usedPercent: window.officialUsedPercent ?? window.usedPercent,
+      windowMinutes: window.windowMinutes,
+      resetsAt: window.resetsAt,
+    });
+  }
   return points.map(normalizeSample).filter(Boolean);
 }
 
@@ -137,7 +153,8 @@ function assignCycleKey(sample, previous, typicalMs) {
 
 function resetMatches(key, resetAt, poolId) {
   if (resetAt == null || !key.startsWith("reset:")) return false;
-  const tolerance = poolId.startsWith("codex") ? CODEX_RESET_TOLERANCE_MS : 0;
+  const tolerance = poolId.startsWith("codex") ? CODEX_RESET_TOLERANCE_MS
+    : poolId.startsWith("claude") ? CLAUDE_RESET_TOLERANCE_MS : 0;
   return Math.abs(Number(key.slice(6)) - resetAt) <= tolerance;
 }
 
@@ -192,7 +209,7 @@ function groupCycles(samples, poolId, now = Date.now()) {
       })),
     };
   });
-  if (meta.source === "codex") closeCodexCycles(cycles, now);
+  if (meta.source === "codex" || meta.source === "claude") closeCodexCycles(cycles, now);
   return cycles.sort((a, b) => (b.endAt || 0) - (a.endAt || 0));
 }
 
@@ -217,7 +234,8 @@ function closeCodexCycles(cycles, now) {
     const cycle = cycles[i];
     const next = cycles[i + 1];
     cycle.endAt = Math.min(cycle.scheduledEndAt, next?.startAt ?? Infinity);
-    cycle.interrupted = cycle.endAt < cycle.scheduledEndAt - CODEX_RESET_TOLERANCE_MS;
+    cycle.interrupted = cycle.endAt < cycle.scheduledEndAt
+      - (cycle.pool.startsWith("claude") ? CLAUDE_RESET_TOLERANCE_MS : CODEX_RESET_TOLERANCE_MS);
     cycle.current = !next && cycle.current;
     // Keep only observations inside the actual allowance. In particular,
     // cached old-window snapshots after an early reset are not old usage.
@@ -267,9 +285,9 @@ function cycleReference(cycle, samples, poolId) {
   if (!Number.isFinite(endAt)) return null;
   const points = samples.map(normalizeSample).filter((point) => point && poolIdOf(point) === poolId);
   const matching = points.filter((point) => resetMatches(cycle.key, point.resetsAt, poolId));
-  if (poolId.startsWith("codex")) {
+  if (poolId.startsWith("codex") || poolId.startsWith("claude")) {
     const minutes = matching.findLast((point) => point.windowMinutes > 0)?.windowMinutes;
-    return { startAt: cycle.startAt, endAt, estimated: !minutes };
+    return { startAt: cycle.startAt, endAt, estimated: poolId.startsWith("claude") || !minutes };
   }
   const explicit = matching.findLast((point) => point.startsAt != null && point.startsAt < endAt);
   if (explicit) return { startAt: explicit.startsAt, endAt, estimated: false };
