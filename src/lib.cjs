@@ -6,6 +6,7 @@ const { getHistory } = require("./history.cjs");
 const { scanCodexUsage, codexPlanName } = require("./codex.cjs");
 const { scanClaudeUsage } = require("./claude-code.cjs");
 const { scanDeepSeekUsage, fetchBalance } = require("./deepseek.cjs");
+const { scanIncrementalDevinUsage, fetchSubscription } = require("./devin.cjs");
 const { historyCacheKey, uncoveredHarnessEvents } = require("./deepseek-history.cjs");
 const { buildBalanceTimeline } = require("./balance-timeline.cjs");
 const claudeQuota = require("./claude-quota.cjs");
@@ -21,6 +22,7 @@ const { buildCodexMonthly, monthBounds, WEEK_MS } = require("./renderer/codex-mo
 const { flattenPricingSnapshot, summarizePricingSnapshot } = require("./pricing-table.cjs");
 const TrendRange = require("./renderer/trend-range.js");
 const ModelDisplay = require("./renderer/model-display.js");
+const modelBreakdownCache = new (require("./immutable-aggregate-cache.cjs").ImmutableAggregateCache)();
 
 const APP_DIR = path.join(os.homedir(), "AppData", "Roaming", "cursor-usage-widget");
 const SETTINGS_PATH = path.join(APP_DIR, "settings.json");
@@ -483,60 +485,65 @@ function modelLabel(descriptor, precision) {
   return ModelDisplay.format(descriptor, { precision });
 }
 
-function buildModelBreakdown(events, precision, autoBucketModels = []) {
-  const groups = new Map();
+function computeModelBreakdowns(events, autoBucketModels = []) {
+  const grouped = { coarse: new Map(), speed: new Map(), exact: new Map() };
+  const precisions = Object.entries(grouped);
   for (const event of events) {
     const descriptor = normalizeModelDescriptor(event.model);
     if (event.effort != null) descriptor.effort = String(event.effort);
     if ("fast" in event) descriptor.fast = Boolean(event.fast);
     descriptor.fastKnown = event.fastKnown !== false;
-    const key = precision === "coarse"
-      ? descriptor.base
-      : precision === "speed"
-        ? `${descriptor.base}|${descriptor.fastKnown ? (descriptor.fast ? "fast" : "standard") : "unknown"}`
-        : `${descriptor.base}|${descriptor.effort || "default"}|${descriptor.fastKnown ? (descriptor.fast ? "fast" : "standard") : "unknown"}`;
-    if (!groups.has(key)) {
-      groups.set(key, {
-        key,
-        name: descriptor.base,
-        label: modelLabel(descriptor, precision),
-        fast: descriptor.fast,
-        fastKnown: descriptor.fastKnown,
-        effort: descriptor.effort,
-        count: 0,
-        reasoning: 0,
-        costCents: 0,
-        inputCostCents: 0,
-        cacheReadCostCents: 0,
-        cacheWriteCostCents: 0,
-        outputCostCents: 0,
-        unallocatedCostCents: 0,
-        tokens: emptyTokens(),
-        cursor: isCursorModel(event.model, autoBucketModels),
-      });
+    const tokens = eventTokens(event);
+    const count = eventCount([event]);
+    const reasoning = Math.max(0, num(event.reasoning));
+    const costCents = eventEquivalentCostCents(event);
+    const unallocatedCostCents = unallocatedEventCostCents(event);
+    for (const [precision, groups] of precisions) {
+      const key = precision === "coarse"
+        ? descriptor.base
+        : precision === "speed"
+          ? `${descriptor.base}|${descriptor.fastKnown ? (descriptor.fast ? "fast" : "standard") : "unknown"}`
+          : `${descriptor.base}|${descriptor.effort || "default"}|${descriptor.fastKnown ? (descriptor.fast ? "fast" : "standard") : "unknown"}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          name: descriptor.base,
+          label: modelLabel(descriptor, precision),
+          fast: descriptor.fast,
+          fastKnown: descriptor.fastKnown,
+          effort: descriptor.effort,
+          count: 0,
+          reasoning: 0,
+          costCents: 0,
+          inputCostCents: 0,
+          cacheReadCostCents: 0,
+          cacheWriteCostCents: 0,
+          outputCostCents: 0,
+          unallocatedCostCents: 0,
+          tokens: emptyTokens(),
+          cursor: isCursorModel(event.model, autoBucketModels),
+        });
+      }
+      const group = groups.get(key);
+      group.count += count;
+      group.reasoning += reasoning;
+      group.costCents += costCents;
+      group.inputCostCents += num(event.inputCostCents);
+      group.cacheReadCostCents += num(event.cacheReadCostCents);
+      group.cacheWriteCostCents += num(event.cacheWriteCostCents);
+      group.outputCostCents += num(event.outputCostCents);
+      group.unallocatedCostCents += unallocatedCostCents;
+      group.tokens = addTokens(group.tokens, tokens);
     }
-    const group = groups.get(key);
-    group.count += eventCount([event]);
-    group.reasoning += Math.max(0, num(event.reasoning));
-    group.costCents += eventEquivalentCostCents(event);
-    group.inputCostCents += num(event.inputCostCents);
-    group.cacheReadCostCents += num(event.cacheReadCostCents);
-    group.cacheWriteCostCents += num(event.cacheWriteCostCents);
-    group.outputCostCents += num(event.outputCostCents);
-    group.unallocatedCostCents += unallocatedEventCostCents(event);
-    group.tokens = addTokens(group.tokens, eventTokens(event));
   }
-  return [...groups.values()]
+  return Object.fromEntries(Object.entries(grouped).map(([precision, groups]) => [precision, [...groups.values()]
     .map((group) => ({ ...group, ...decorateTokens(group.tokens), tokens: undefined }))
-    .sort((a, b) => b.total - a.total || b.effective - a.effective || b.costCents - a.costCents);
+    .sort((a, b) => b.total - a.total || b.effective - a.effective || b.costCents - a.costCents)]));
 }
 
 function buildModelBreakdowns(events, autoBucketModels = []) {
-  return {
-    coarse: buildModelBreakdown(events, "coarse", autoBucketModels),
-    speed: buildModelBreakdown(events, "speed", autoBucketModels),
-    exact: buildModelBreakdown(events, "exact", autoBucketModels),
-  };
+  return modelBreakdownCache.get(JSON.stringify(autoBucketModels), events,
+    () => computeModelBreakdowns(events, autoBucketModels));
 }
 
 function addLocalDays(timestamp, days) {
@@ -836,8 +843,8 @@ async function fetchCursorSnapshot(pricingSnapshot) {
     cacheRead: num(agg?.totalCacheReadTokens), cacheWrite: num(agg?.totalCacheWriteTokens),
   };
 
-  const cycleEvents = history.getEvents({ sources: "cursor", start: cycleStart || now - 31 * DAY_MS, end: now + 60_000 });
-  const trendEvents = history.getEvents({ sources: "cursor", start: startOfLocalDay(now - 29 * DAY_MS), end: now + 60_000 });
+  const cycleEvents = history.getEvents({ copy: false, sources: "cursor", start: cycleStart || now - 31 * DAY_MS, end: now + 60_000 });
+  const trendEvents = history.getEvents({ copy: false, sources: "cursor", start: startOfLocalDay(now - 29 * DAY_MS), end: now + 60_000 });
   const windows = { m5: emptyTokens(), h1: emptyTokens(), today: emptyTokens() };
   for (const event of trendEvents) {
     const ts = parseIsoOrMs(event.timestamp);
@@ -1013,12 +1020,12 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
   const periodStart = usageWindow?.expired
     ? usageWindow.expiredAt
     : codexPeriodStart({ primary: usageWindow }, now);
-  const periodEvents = history.getEvents({ sources: "codex", start: periodStart, end: now + 60_000 });
-  const quotaSamples = history.getQuotaSamples({ source: "codex", end: (rate?.timestamp || now) + 1 });
+  const periodEvents = history.getEvents({ copy: false, sources: "codex", start: periodStart, end: now + 60_000 });
+  const quotaSamples = history.getQuotaSamples({ copy: false, source: "codex", end: (rate?.timestamp || now) + 1 });
   const quotaWindows = rateWindows.map((window) => {
     const start = window.expired ? window.expiredAt : codexPeriodStart({ primary: window }, now);
     const sampledAt = window.sampledAt ?? rate?.timestamp ?? now;
-    const events = history.getEvents({ sources: "codex", start, end: now + 1 });
+    const events = history.getEvents({ copy: false, sources: "codex", start, end: now + 1 });
     const quotaEquivalent = quotaCostSummary(events);
     const estimate = estimateQuota({ samples: quotaSamples, events, window,
       sampledAt: Math.min(now, sampledAt), planType: window.planType || rate?.planType || scan.planType });
@@ -1042,7 +1049,7 @@ function buildCodexSnapshot(now = Date.now(), pricingSnapshot = null) {
   const primaryQuota = quotaWindows.find((window) => window.slot === "primary") || null;
   const secondaryQuota = quotaWindows.find((window) => window.slot === "secondary") || null;
   const activeQuota = quotaWindows.find((window) => window.slot === usageWindow?.slot && window.windowMinutes === usageWindow?.windowMinutes) || null;
-  const trendEvents = history.getEvents({ sources: "codex", start: startOfLocalDay(now - 29 * DAY_MS), end: now + 60_000 });
+  const trendEvents = history.getEvents({ copy: false, sources: "codex", start: startOfLocalDay(now - 29 * DAY_MS), end: now + 60_000 });
   const todayStart = startOfLocalDay(now);
   const todayEvents = trendEvents.filter((event) => event.timestamp >= todayStart);
   const hourEvents = trendEvents.filter((event) => event.timestamp >= now - 60 * 60_000);
@@ -1124,8 +1131,8 @@ function claudeQuotaSnapshot(history, now) {
     } catch (error) { history.db.exec("ROLLBACK"); throw error; }
   }
   const since = now - 35 * DAY_MS;
-  const samples = claudeQuota.fromQuotaSamples(history.getQuotaSamples({ source: "claude", start: since, end: now + 1 }));
-  const events = history.getEvents({ sources: "claude", start: since, end: now + 60_000 });
+  const samples = claudeQuota.fromQuotaSamples(history.getQuotaSamples({ copy: false, source: "claude", start: since, end: now + 1 }));
+  const events = history.getEvents({ copy: false, sources: "claude", start: since, end: now + 60_000 });
   const quota = claudeQuota.buildClaudeQuota({ samples, events, now,
     speedUsage: (start, end) => speedUsageSummary(events.filter((event) => event.timestamp >= start && event.timestamp <= end), { quota: true }) });
   return quota ? { ...quota, file: plan.file, statuslineFile: statusline.file, readError: plan.error || statusline.error }
@@ -1143,7 +1150,7 @@ function buildClaudeSnapshot(now = Date.now(), pricingSnapshot = null) {
       && priced.pricingStatus?.startsWith("official")) priced.pricingStatus = `first-import-${priced.pricingStatus}`;
     return { ...event, ...priced };
   }));
-  const trendEvents = history.getEvents({ sources: "claude", start: startOfLocalDay(now - 29 * DAY_MS), end: now + 60_000 });
+  const trendEvents = history.getEvents({ copy: false, sources: "claude", start: startOfLocalDay(now - 29 * DAY_MS), end: now + 60_000 });
   const since = (start) => trendEvents.filter((event) => event.timestamp >= start);
   const windows = {
     today: since(startOfLocalDay(now)),
@@ -1184,7 +1191,7 @@ async function buildDeepSeekSnapshot(now = Date.now()) {
   const historyImport = balance.accountKey ? history.loadCache(historyCacheKey(balance.accountKey))?.value : null;
   const {addHistoricalUsdPricing} = require('./deepseek-usd.cjs');
   const {updateNativeEstimate} = require('./deepseek-estimate.cjs');
-  const existing = history.getEvents({sources:'deepseek',end:now+1});
+  const existing = history.getEvents({copy:false,sources:'deepseek',end:now+1});
   const previous = new Map(existing.map(event=>[event.eventKey,event]));
   // Retry pending FX even if the unchanged session file is skipped by the scanner.
   const pending = existing.filter(event=>event.pool!=='deepseek-platform-daily'&&event.equivalentCostCents==null);
@@ -1192,11 +1199,28 @@ async function buildDeepSeekSnapshot(now = Date.now()) {
   const localEvents = [...incoming.values()].map(event=>updateNativeEstimate(event,previous.get(event.eventKey)));
   const priced = await addHistoricalUsdPricing(history,localEvents,{now});
   history.upsertEvents(priced.events);
-  const events = history.getEvents({ sources: "deepseek", start: startOfLocalDay(now - 29 * DAY_MS), end: now + 1 });
+  const events = history.getEvents({ copy: false, sources: "deepseek", start: startOfLocalDay(now - 29 * DAY_MS), end: now + 1 });
   const today = events.filter((event) => event.timestamp >= startOfLocalDay(now));
   return { ...scan, events: undefined, balance, historyImport, pricingErrors:priced.errors, planName: "DeepSeek Harness", fetchedAt: now,
     available: scan.files > 0 || balance.balances.length > 0 || history.stats().sources.deepseek?.count > 0,
     tokens: { today: sumEventTokens(today), month: sumEventTokens(events) },
+    requests: { today: eventCount(today), month: eventCount(events) } };
+}
+
+async function buildDevinSnapshot(now = Date.now(), pricingSnapshot, history = getHistory()) {
+  const scan = scanIncrementalDevinUsage();
+  const previous = new Map(scan.events.length ? history.getEvents({ copy: false, sources: "devin", end: now + 60000 }).map(e => [e.eventKey, e]) : []);
+  history.upsertEvents(scan.events.map(event => {
+    const existing = previous.get(event.eventKey);
+    return { ...event, ...priceEvent(event, history.pricingSnapshot(existing?.pricingSnapshotId) || pricingSnapshot) };
+  }));
+  const subscription = await fetchSubscription(history, { now });
+  const events = history.getEvents({ copy: false, sources: "devin", start: startOfLocalDay(now - 29 * DAY_MS), end: now + 60000 });
+  const today = events.filter(e => e.timestamp >= startOfLocalDay(now));
+  return { ...scan, events: undefined, subscription, quota: subscription.quota, planName: subscription.planName || "Devin",
+    fetchedAt: now, available: scan.files > 0 || subscription.sampledAt != null || events.length > 0,
+    tokens: { today: sumEventTokens(today), month: sumEventTokens(events) },
+    costs: { today: costSummary(today), month: costSummary(events) },
     requests: { today: eventCount(today), month: eventCount(events) } };
 }
 
@@ -1247,6 +1271,7 @@ function buildModelUsage(events, rangeKey = "month1", now = Date.now()) {
       codex: sourceUsage("Codex", codexEvents),
       claude: sourceUsage("Claude Code", claudeEvents),
       deepseek: sourceUsage("DeepSeek Harness", rowsInRange.filter((event) => event.source === "deepseek")),
+      devin: sourceUsage("Devin", rowsInRange.filter((event) => event.source === "devin")),
     },
   };
 }
@@ -1255,13 +1280,13 @@ function getModelUsage(rangeKey = "month1", now = Date.now()) {
   const key = Object.hasOwn(MODEL_RANGE_SPECS, rangeKey) ? rangeKey : "month1";
   const spec = MODEL_RANGE_SPECS[key];
   const start = spec.durationMs == null ? 0 : Math.max(0, now - spec.durationMs);
-  const events = getHistory().getEvents({ start, end: now + 60_000 });
+  const events = getHistory().getEvents({ copy: false, start, end: now + 60_000 });
   return buildModelUsage(events, key, now);
 }
 
 function getTrendUsage(payload, now = Date.now(), history = getHistory()) {
   const range = TrendRange.spec(payload, now);
-  const events = history.getEvents({ start: range.start, end: range.end });
+  const events = history.getEvents({ copy: false, start: range.start, end: range.end });
   const sourceUsage = (label, rows) => {
     const costs = costSummary(rows);
     return { label, costAvailable: costs.pricedEvents > 0, costCoveragePercent: costs.coveragePercent,
@@ -1273,23 +1298,27 @@ function getTrendUsage(payload, now = Date.now(), history = getHistory()) {
     codex: sourceUsage("Codex", events.filter((event) => event.source === "codex")),
     claude: sourceUsage("Claude Code", events.filter((event) => event.source === "claude")),
     deepseek: sourceUsage("DeepSeek Harness", events.filter((event) => event.source === "deepseek")),
+    devin: sourceUsage("Devin", events.filter((event) => event.source === "devin")),
   } };
 }
 
-async function fetchSnapshot({ forcePricing = false } = {}) {
+const sourceSnapshots = new (require("./source-snapshot-cache.cjs").SourceSnapshotCache)();
+
+async function fetchSnapshot({ forcePricing = false, sources = null } = {}) {
   await getVerification().tick();
   const now = Date.now();
   const history = getHistory();
   const pricingResult = await refreshPricing(history, { force: forcePricing, now });
   const pricingSnapshot = pricingResult.snapshot;
-  const [cursorResult, codexResult, claudeResult, deepseekResult] = await Promise.allSettled([
-    fetchCursorSnapshot(pricingSnapshot),
-    Promise.resolve().then(() => buildCodexSnapshot(now, pricingSnapshot)),
-    Promise.resolve().then(() => buildClaudeSnapshot(now, pricingSnapshot)),
+  const [cursorResult, codexResult, claudeResult, deepseekResult, devinResult] = await sourceSnapshots.collect({
+    cursor: () => fetchCursorSnapshot(pricingSnapshot),
+    codex: () => buildCodexSnapshot(now, pricingSnapshot),
+    claude: () => buildClaudeSnapshot(now, pricingSnapshot),
     // Finish the synchronous local scans before starting the timed balance request.
     // Otherwise a large transcript import can consume its entire network timeout.
-    Promise.resolve().then(() => buildDeepSeekSnapshot(now)),
-  ]);
+    deepseek: () => buildDeepSeekSnapshot(now),
+    devin: () => buildDevinSnapshot(now, pricingSnapshot),
+  }, { sources: forcePricing ? null : sources, pricingKey: JSON.stringify([pricingSnapshot?.id, pricingSnapshot?.fetchedAt, pricingSnapshot?.status]) });
 
   const cacheBreakdownEvents = history.getEventsNeedingCacheBreakdown();
   if (cacheBreakdownEvents.length) {
@@ -1350,7 +1379,9 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
   const deepseek = deepseekResult.status === "fulfilled" && deepseekResult.value.available ? deepseekResult.value : null;
   const deepseekError = deepseekResult.status === "fulfilled"
     ? deepseekResult.value.scanErrors[0] || deepseekResult.value.balance.error : "Harness 数据读取失败";
-  if (!cursor && !codex && !claude && !deepseek) throw new Error(cursorError || codexError || claudeError || deepseekError || "未找到可用的用量数据");
+  const devin = devinResult.status === "fulfilled" && devinResult.value.available ? devinResult.value : null;
+  const devinError = devinResult.status === "fulfilled" ? devinResult.value.scanErrors[0] || devinResult.value.subscription.error : "Devin 数据读取失败";
+  if (!cursor && !codex && !claude && !deepseek && !devin) throw new Error(cursorError || codexError || claudeError || deepseekError || devinError || "未找到可用的用量数据");
 
   if (codex) {
     const start = monthBounds(now).startAt - WEEK_MS;
@@ -1359,18 +1390,19 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
       dollarBased: true,
       windows: codex.quota?.windows,
       shortLimit: codex.quota?.shortLimit,
-      samples: history.getQuotaSamples({ source: "codex", start, end: now + 1 }),
+      samples: history.getQuotaSamples({ copy: false, source: "codex", start, end: now + 1 }),
       events: history.getQuotaConsumption({ source: "codex", start, end: now + 1 }),
       now,
     });
   }
 
   const trendStart = startOfLocalDay(now - 29 * DAY_MS);
-  const cursorTrendEvents = history.getEvents({ sources: "cursor", start: trendStart, end: now + 60_000 });
-  const codexTrendEvents = history.getEvents({ sources: "codex", start: trendStart, end: now + 60_000 });
-  const claudeTrendEvents = history.getEvents({ sources: "claude", start: trendStart, end: now + 60_000 });
-  const deepseekTrendEvents = history.getEvents({ sources: "deepseek", start: trendStart, end: now + 60_000 });
-  const combinedEvents = [...cursorTrendEvents, ...codexTrendEvents, ...claudeTrendEvents, ...deepseekTrendEvents].sort((a, b) => a.timestamp - b.timestamp);
+  const cursorTrendEvents = history.getEvents({ copy: false, sources: "cursor", start: trendStart, end: now + 60_000 });
+  const codexTrendEvents = history.getEvents({ copy: false, sources: "codex", start: trendStart, end: now + 60_000 });
+  const claudeTrendEvents = history.getEvents({ copy: false, sources: "claude", start: trendStart, end: now + 60_000 });
+  const deepseekTrendEvents = history.getEvents({ copy: false, sources: "deepseek", start: trendStart, end: now + 60_000 });
+  const devinTrendEvents = history.getEvents({ copy: false, sources: "devin", start: trendStart, end: now + 60000 });
+  const combinedEvents = [...cursorTrendEvents, ...codexTrendEvents, ...claudeTrendEvents, ...deepseekTrendEvents, ...devinTrendEvents].sort((a, b) => a.timestamp - b.timestamp);
   const combinedToday = combinedEvents.filter((event) => event.timestamp >= startOfLocalDay(now));
   const combinedHour = combinedEvents.filter((event) => event.timestamp >= now - 60 * 60_000);
   const combinedFiveMinutes = combinedEvents.filter((event) => event.timestamp >= now - 5 * 60_000);
@@ -1398,7 +1430,7 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
   const base = cursor || {
     fetchedAt: now,
     email: null,
-    planName: codex?.planName || claude?.planName || deepseek?.planName || "本机用量",
+    planName: codex?.planName || claude?.planName || deepseek?.planName || devin?.planName || "本机用量",
     billingCycleStart: null,
     billingCycleEnd: null,
     daysLeft: null,
@@ -1419,6 +1451,7 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
     codex,
     claude,
     deepseek,
+    devin,
     verification: getVerification().status(),
     modelUsage: getModelUsage(loadSettings().modelRange, now),
     combined: {
@@ -1438,6 +1471,7 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
       codex: codexView,
       claude: sourceView("Claude Code", "最近 30 天", claudeTrendEvents, now),
       deepseek: sourceView("DeepSeek Harness", "最近 30 天", deepseekTrendEvents, now),
+      devin: sourceView("Devin", "最近 30 天", devinTrendEvents, now),
     },
     persistence: history.stats(),
     sourceStatus: {
@@ -1445,6 +1479,7 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
       codex: { ok: codexResult.status === "fulfilled", cached: false, error: codexError },
       claude: { ok: Boolean(claude), cached: false, error: claudeError || (claude ? null : "未找到 Claude Code 本机会话") },
       deepseek: { ok: Boolean(deepseek) && !deepseekError, cached: Boolean(deepseek?.balance.cached), error: deepseekError },
+      devin: { ok: Boolean(devin) && !devinError, cached: Boolean(devin?.subscription.cached), error: devinError },
     },
     pricing: {
       id: pricingSnapshot?.id || null,
@@ -1469,9 +1504,12 @@ async function fetchSnapshot({ forcePricing = false } = {}) {
 
 function getQuotaTimeline({ pool, cycleKey, range = loadSettings().balanceRange, now = Date.now(), live = [] } = {}) {
   const history = getHistory();
-  const samples = claudeQuota.annotateQuotaSamples(history.getQuotaSamples(),
-    history.getEvents({ sources: "claude", start: now - 35 * DAY_MS, end: now + 60_000 }));
-  const quota = buildQuotaTimeline(samples, { pool, cycleKey, now, live });
+  const devinAccount = history.loadCache("devin-active-account")?.value.accountKey;
+  const samples = claudeQuota.annotateQuotaSamples(history.getQuotaSamples({ copy: false }).filter(sample => sample.source !== "devin"
+    || (devinAccount && sample.pool.endsWith(`:${devinAccount}`))),
+    history.getEvents({ copy: false, sources: "claude", start: now - 35 * DAY_MS, end: now + 60_000 }));
+  const quota = buildQuotaTimeline(samples, { pool, cycleKey, now, live: live.filter(sample => sample.source !== "devin"
+    || (devinAccount && sample.pool?.endsWith(`:${devinAccount}`))) });
   const accountKey = history.loadCache("deepseek-active-account")?.value.accountKey;
   const balancePools = ["CNY", "USD"].map((currency) => {
     const exists = accountKey && history.db.prepare("SELECT 1 FROM balance_samples WHERE source = 'deepseek' AND account_key = ? AND currency = ? AND timestamp <= ? LIMIT 1").get(accountKey, currency, now);
@@ -1512,6 +1550,7 @@ module.exports = {
   saveSettings,
   fetchSnapshot,
   buildClaudeSnapshot,
+  buildDevinSnapshot,
   resolveAuth,
   cursorFetch,
   cursorEventToHistory,

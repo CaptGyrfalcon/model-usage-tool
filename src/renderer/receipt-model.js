@@ -12,6 +12,7 @@
     if (/gemini/.test(m)) return "gemini";
     if (/gemma/.test(m)) return "gemma";
     if (/deepseek/.test(m)) return "deepseek";
+    if (/^swe(?:-|$)/.test(m)) return "devin";
     if (/chatglm|glm|zhipu|z-ai|zai\//.test(m)) return "zai";
     if (/qwen|qwq/.test(m)) return "qwen";
     if (/mistral|codestral|devstral|ministral|pixtral|magistral/.test(m)) return "mistral";
@@ -26,7 +27,7 @@
     return { splitEffort: period === "day", splitSpeed: period === "day" || period === "week" };
   }
   const providerNames = { openai: "OpenAI", anthropic: "Anthropic", cursor: "Cursor", grok: "xAI", zai: "Z.ai",
-    gemini: "Google", gemma: "Google", deepseek: "DeepSeek", qwen: "Alibaba", mistral: "Mistral", meta: "Meta", minimax: "MiniMax", moonshot: "Moonshot" };
+    gemini: "Google", gemma: "Google", deepseek: "DeepSeek", devin: "Cognition", qwen: "Alibaba", mistral: "Mistral", meta: "Meta", minimax: "MiniMax", moonshot: "Moonshot" };
   const effortOrder = ["ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none", "unknown"];
   const tierOrder = { astra: 0, sol: 1, terra: 2, luna: 3, opus: 0, sonnet: 1, haiku: 2,
     ultra: 0, pro: 1, flash: 2, lite: 3, large: 0, medium: 1, small: 2, mini: 3, nano: 4 };

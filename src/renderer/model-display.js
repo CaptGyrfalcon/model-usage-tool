@@ -4,7 +4,7 @@
   else root.ModelDisplay = api;
 })(typeof window === "object" ? window : globalThis, function () {
   const efforts = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
-  const words = { gpt: "GPT", glm: "GLM", deepseek: "DeepSeek", api: "API", ai: "AI" };
+  const words = { gpt: "GPT", glm: "GLM", swe: "SWE", deepseek: "DeepSeek", api: "API", ai: "AI" };
   const capitalize = (word) => words[word.toLowerCase()] || word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
   function descriptor(raw) {
     const parts = String(raw || "unknown").replace(/^cursor-/i, "").split(/[-_\s]+/).filter(Boolean);

@@ -225,6 +225,10 @@ class CodexUsageScanner {
     this.sessionSnapshots = new Map();
     this.timestampGroups = new Map();
     this.scanErrors = [];
+    this.logCursors = new Map();
+    this.logSnapshots = new Map();
+    this.sessionRatesDirty = true;
+    this.sessionRateLimit = null;
   }
 
   updatePlanType(planType, timestamp) {
@@ -237,18 +241,15 @@ class CodexUsageScanner {
   loadTierTimelines() {
     const dbPath = path.join(this.home, "logs_2.sqlite");
     if (!fs.existsSync(dbPath)) return;
-    const timelines = new Map();
-    let db;
     try {
-      db = new DatabaseSync(dbPath, { readOnly: true });
-      const rows = db.prepare(`
+      const rows = this.readLogRows("tiers", `
         SELECT ts, thread_id, feedback_log_body
         FROM logs
-        WHERE target = 'codex_core::session::handlers'
+        WHERE id > ? AND id <= ? AND target = 'codex_core::session::handlers'
           AND thread_id IS NOT NULL
           AND feedback_log_body LIKE '%service_tier:%'
         ORDER BY ts ASC, id ASC
-      `).all();
+      `);
       for (const row of rows) {
         const body = String(row.feedback_log_body || "");
         const explicit = body.match(/service_tier:\s*Some\(Some\("(priority|fast|default)"\)\)/i);
@@ -256,12 +257,49 @@ class CodexUsageScanner {
         if (!explicit && !cleared) continue;
         const tierName = explicit?.[1]?.toLowerCase() || "default";
         const item = { timestamp: Number(row.ts) * 1000, ...tierEvidence(tierName, "local-log") };
-        if (!timelines.has(row.thread_id)) timelines.set(row.thread_id, []);
-        timelines.get(row.thread_id).push(item);
+        if (!this.tierTimelines.has(row.thread_id)) this.tierTimelines.set(row.thread_id, []);
+        this.tierTimelines.get(row.thread_id).push(item);
       }
-      this.tierTimelines = timelines;
+      if (rows.length) for (const timeline of this.tierTimelines.values()) timeline.sort((a, b) => a.timestamp - b.timestamp);
     } catch {
       // Logs are optional and can be briefly locked while Codex is writing them.
+    }
+  }
+
+  readLogRows(kind, sql) {
+    const dbPath = path.join(this.home, "logs_2.sqlite");
+    const stat = fs.statSync(dbPath);
+    let wal = null;
+    try { wal = fs.statSync(`${dbPath}-wal`); } catch (error) { if (error.code !== "ENOENT") throw error; }
+    const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+    const signature = `${identity}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${wal?.ino}:${wal?.size}:${wal?.mtimeMs}:${wal?.ctimeMs}`;
+    const previous = this.logCursors.get(kind);
+    let db;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      db.exec("BEGIN");
+      const maxId = Number(db.prepare("SELECT MAX(id) AS id FROM logs").get().id || 0);
+      // Check the actual committed row ID even when Windows delays WAL mtime
+      // updates or reuses its file size. This is an indexed, constant-size read.
+      if (previous?.signature === signature && previous.id === maxId) {
+        db.exec("COMMIT");
+        return [];
+      }
+      let cursor = previous?.id || 0;
+      // Replacements, truncation and in-place edits must not hide reused IDs.
+      const reset = previous && (previous.identity !== identity || maxId <= cursor);
+      if (reset) cursor = 0;
+      const limit = kind === "quota" && !this.fullHistory && cursor === 0 ? " LIMIT 512" : "";
+      const rows = db.prepare(sql + limit).all(cursor, maxId);
+      db.exec("COMMIT");
+      if (reset) {
+        if (kind === "tiers") this.tierTimelines.clear();
+        else this.logSnapshots.clear();
+      }
+      // Advance only after a successful consistent read. Irrelevant new logs
+      // advance the cursor too, so they never rescan the historical prefix.
+      this.logCursors.set(kind, { id: maxId, identity, signature });
+      return rows;
     } finally {
       try { db?.close(); } catch {}
     }
@@ -270,20 +308,17 @@ class CodexUsageScanner {
   loadRateLimitFromLogs() {
     const dbPath = path.join(this.home, "logs_2.sqlite");
     if (!fs.existsSync(dbPath)) return;
-    let db;
     try {
-      db = new DatabaseSync(dbPath, { readOnly: true });
-      const rows = db.prepare(`
+      const rows = this.readLogRows("quota", `
         SELECT id, ts, thread_id, feedback_log_body
         FROM logs
-        WHERE target = 'codex_http_client::client'
+        WHERE id > ? AND id <= ? AND target = 'codex_http_client::client'
           AND (
             feedback_log_body LIKE '%x-codex-primary-window-minutes%'
             OR feedback_log_body LIKE '%x-codex-secondary-window-minutes%'
           )
         ORDER BY ts DESC, id DESC
-        ${this.fullHistory ? "" : "LIMIT 512"}
-      `).all();
+      `);
       const snapshots = rows
         .map((row) => {
           const snapshot = rateLimitFromResponseHeaders(row.feedback_log_body, Number(row.ts));
@@ -292,15 +327,16 @@ class CodexUsageScanner {
             recordIndex: row.id, sessionId: row.thread_id || null };
         })
         .filter(Boolean);
-      for (const snapshot of snapshots) this.collectQuotaSamples(snapshot);
-      const rateLimit = mergeRateLimitSnapshots([...snapshots, this.latestRateLimit]);
+      for (const snapshot of snapshots) {
+        this.collectQuotaSamples(snapshot);
+        this.logSnapshots.set(snapshot.recordKey, snapshot);
+      }
+      const rateLimit = mergeRateLimitSnapshots([...this.logSnapshots.values(), this.latestRateLimit]);
       if (rateLimit && (!this.latestRateLimit || rateLimit.timestamp >= this.latestRateLimit.timestamp)) this.latestRateLimit = rateLimit;
       for (const snapshot of snapshots) this.updatePlanType(snapshot.planType, snapshot.timestamp);
     } catch (error) {
       // Response headers are optional and the database can be briefly locked while Codex writes to it.
       this.scanErrors.push({ path: dbPath, error: error.message });
-    } finally {
-      try { db?.close(); } catch {}
     }
   }
 
@@ -343,13 +379,17 @@ class CodexUsageScanner {
     }
     // Recompute from qualified original observations, never from a synthesized
     // snapshot whose windows may have come from different observation times.
-    const qualified = [...this.sessionSnapshots.values()].map(snapshot => ({ ...snapshot,
-      windows: snapshot.quality ? [] : snapshot.windows.filter(w => !w.resetsAt
-        || snapshot.samples.some(s => s.slot === w.slot && s.quality === "valid")).map(w => ({
-        ...w, sampledAt: snapshot.timestamp, planType: snapshot.planType,
-      })),
-    })).filter(snapshot => snapshot.windows.length);
-    this.latestRateLimit = mergeRateLimitSnapshots(qualified);
+    if (this.sessionRatesDirty) {
+      const qualified = [...this.sessionSnapshots.values()].map(snapshot => ({ ...snapshot,
+        windows: snapshot.quality ? [] : snapshot.windows.filter(w => !w.resetsAt
+          || snapshot.samples.some(s => s.slot === w.slot && s.quality === "valid")).map(w => ({
+          ...w, sampledAt: snapshot.timestamp, planType: snapshot.planType,
+        })),
+      })).filter(snapshot => snapshot.windows.length);
+      this.sessionRateLimit = mergeRateLimitSnapshots(qualified);
+      this.sessionRatesDirty = false;
+    }
+    this.latestRateLimit = this.sessionRateLimit;
     this.loadRateLimitFromLogs();
     for (const file of this.fileStates.keys()) {
       if (!present.has(file)) this.fileStates.delete(file);
@@ -386,6 +426,7 @@ class CodexUsageScanner {
   }
 
   collectSessionSnapshot(snapshot) {
+    this.sessionRatesDirty = true;
     const groupKey = `${snapshot.sessionId}:${snapshot.timestamp}`;
     const group = this.timestampGroups.get(groupKey) || new Map();
     group.set(snapshot.recordKey, snapshot);

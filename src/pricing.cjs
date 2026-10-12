@@ -4,6 +4,7 @@ const { billingUsdPricing } = require("./deepseek-usd.cjs");
 const OPENAI_PRICING_URL = "https://developers.openai.com/api/docs/pricing.md";
 const CURSOR_PRICING_URL = "https://cursor.com/docs/models-and-pricing.md";
 const ANTHROPIC_PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing";
+const DEVIN_PRICING_URL = "https://docs.devin.ai/desktop/models.md";
 
 function tier(short, long = short) {
   return { short, long };
@@ -177,6 +178,21 @@ const FALLBACK_CLAUDE_MODELS = {
   "claude-haiku-4-5": { provider: "anthropic", standard: tier(anthropicRate(1, 5)) },
 };
 
+// SWE-2 list price, independently of the temporary self-serve free offer.
+// Source: docs.devin.ai/desktop/models, verified 2026-10-11. Cache writes
+// have no separate published rate; value them as ordinary input for display.
+const FALLBACK_DEVIN_MODELS = { ...FALLBACK_CODEX_MODELS, ...FALLBACK_CLAUDE_MODELS,
+  "swe-2": { provider: "cognition", standard: tier({ input: 3, cacheRead: 0.3, cacheWrite: 3, output: 15 }),
+    note: "SWE-2 官方原价等值；写缓存按输入价估算；额度使用服务端实际百分比" } };
+
+function parseDevinListPricing(text) {
+  const match = String(text).match(/list pric(?:ing|e)\s*\(\s*\$([\d.]+)\s*\/\s*1M\s+input\s*,\s*\$([\d.]+)\s*\/\s*1M\s+output\s*,\s*\$([\d.]+)\s*\/\s*1M\s+cache input\s*\)/i);
+  if (!match) throw new Error("Devin 官方原价格式变化，保留已有原价");
+  const [input, output, cacheRead] = match.slice(1).map(Number);
+  if (![input, output, cacheRead].every(n => Number.isFinite(n) && n > 0)) throw new Error("Devin 官方原价无效");
+  return { "swe-2": { ...FALLBACK_DEVIN_MODELS["swe-2"], standard: tier({ input, output, cacheRead, cacheWrite: input }) } };
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -188,6 +204,9 @@ function mergeFallbackCatalog(snapshot, now = Date.now()) {
     codex: { ...clone(FALLBACK_CODEX_MODELS), ...(base.modelsBySource?.codex || {}) },
     cursor: { ...clone(FALLBACK_CURSOR_MODELS), ...(base.modelsBySource?.cursor || {}) },
     claude: { ...clone(FALLBACK_CLAUDE_MODELS), ...(base.modelsBySource?.claude || {}) },
+    devin: { ...clone(FALLBACK_DEVIN_MODELS),
+      ...Object.fromEntries(Object.entries(base.models || {}).filter(([name]) => name.startsWith("gpt-"))),
+      ...(base.modelsBySource?.claude || {}), ...(base.modelsBySource?.devin || {}) },
   };
   return base;
 }
@@ -197,6 +216,7 @@ function catalogModel(snapshot, source, key) {
 }
 
 function fallbackModel(source, key) {
+  if (source === "devin") return FALLBACK_DEVIN_MODELS[key] || null;
   if (source === "claude") return FALLBACK_CLAUDE_MODELS[key] || null;
   if (source === "codex") return FALLBACK_CODEX_MODELS[key] || FALLBACK_MODELS[key] || null;
   return FALLBACK_CURSOR_MODELS[key] || FALLBACK_MODELS[key] || null;
@@ -211,8 +231,9 @@ function builtInSnapshot(now = Date.now()) {
       codex: clone(FALLBACK_CODEX_MODELS),
       cursor: clone(FALLBACK_CURSOR_MODELS),
       claude: clone(FALLBACK_CLAUDE_MODELS),
+      devin: clone(FALLBACK_DEVIN_MODELS),
     },
-    sourceUrls: [OPENAI_PRICING_URL.replace(/\.md$/, ""), CURSOR_PRICING_URL.replace(/\.md$/, ""), ANTHROPIC_PRICING_URL],
+    sourceUrls: [OPENAI_PRICING_URL.replace(/\.md$/, ""), CURSOR_PRICING_URL.replace(/\.md$/, ""), ANTHROPIC_PRICING_URL, DEVIN_PRICING_URL.replace(/\.md$/, "")],
     note: "内置的最近一次官方价目表；联网更新失败时使用。",
   };
 }
@@ -343,10 +364,11 @@ async function refreshPricing(history, { force = false, now = Date.now() } = {})
     return { snapshot: mergeFallbackCatalog(latest || builtInSnapshot(now)), updated: false, nextCheckAt: attempt.updatedAt + DAY_MS };
   }
   history.saveCache("pricing-last-attempt", { at: now, force: Boolean(force) });
-  const results = await Promise.allSettled([fetchText(OPENAI_PRICING_URL), fetchText(CURSOR_PRICING_URL)]);
+  const results = await Promise.allSettled([fetchText(OPENAI_PRICING_URL), fetchText(CURSOR_PRICING_URL), fetchText(DEVIN_PRICING_URL)]);
   const previous = mergeFallbackCatalog(latest);
   let codexModels = clone(previous.modelsBySource.codex);
   let cursorModels = clone(previous.modelsBySource.cursor);
+  let devinModels = clone(previous.modelsBySource.devin);
   const errors = [];
   for (const [index, parser, label] of [[0, parseOpenAiPricing, "OpenAI"], [1, parseCursorPricing, "Cursor"]]) {
     try {
@@ -357,13 +379,18 @@ async function refreshPricing(history, { force = false, now = Date.now() } = {})
       else cursorModels = { ...cursorModels, ...parsed };
     } catch (error) { errors.push(error?.message || `${label} 价目表更新失败`); }
   }
+  try {
+    if (results[2].status === "rejected") throw results[2].reason;
+    devinModels = { ...devinModels, ...parseDevinListPricing(results[2].value) };
+  } catch { errors.push("Devin 官方原价更新失败，保留已有原价"); }
   const snapshot = {
     fetchedAt: now,
-    status: errors.length ? (errors.length === 2 ? "built-in" : "remote-partial") : "remote",
+    status: errors.length ? (errors.length === 3 ? "built-in" : "remote-partial") : "remote",
     models: { ...cursorModels, ...codexModels },
-    modelsBySource: { codex: codexModels, cursor: cursorModels, claude: clone(previous.modelsBySource.claude) },
-    sourceUrls: [OPENAI_PRICING_URL.replace(/\.md$/, ""), CURSOR_PRICING_URL.replace(/\.md$/, ""), ANTHROPIC_PRICING_URL],
-    note: errors.length ? errors.join("；") : "已从 OpenAI 与 Cursor 官方文档更新。",
+    modelsBySource: { codex: codexModels, cursor: cursorModels, claude: clone(previous.modelsBySource.claude),
+      devin: { ...devinModels, ...codexModels, ...clone(previous.modelsBySource.claude) } },
+    sourceUrls: [OPENAI_PRICING_URL.replace(/\.md$/, ""), CURSOR_PRICING_URL.replace(/\.md$/, ""), ANTHROPIC_PRICING_URL, DEVIN_PRICING_URL.replace(/\.md$/, "")],
+    note: errors.length ? errors.join("；") : "已从 OpenAI、Cursor 与 Devin 官方文档更新。",
   };
   if (snapshot.status !== "built-in" || !latest) snapshot.id = history.savePricingSnapshot(snapshot);
   else snapshot.id = latest?.id || history.savePricingSnapshot(snapshot);
@@ -453,9 +480,9 @@ function priceEvent(event, snapshot, { authoritativeTotalCents = null, authorita
     const billing = billingUsdPricing(event);
     if (billing) return billing;
   }
-  const key = source === "claude"
+  const key = source === "claude" || (source === "devin" && /^claude-/i.test(event.model))
     ? claudeModelKey(event.model, { ...FALLBACK_CLAUDE_MODELS, ...(snapshot?.modelsBySource?.claude || {}) })
-    : modelKey(event.model);
+    : modelKey(source === "devin" ? String(event.model).replace(/-(ultra|max|xhigh|high|medium|low|minimal|none)$/, "") : event.model);
   // User-selected accounting assumption, not an official published rate.
   // Token updates are retained; a separate, stable completed-turn event carries the fee.
   if (source === "codex" && String(event.model || "").toLowerCase() === "codex-auto-review") {
@@ -543,9 +570,9 @@ function priceEvent(event, snapshot, { authoritativeTotalCents = null, authorita
     equivalentCostCents: totalCost(selected),
     equivalentCostLowCents: totalCost(low),
     equivalentCostHighCents: totalCost(high),
-    quotaEquivalentCostCents: quotaSelected,
-    quotaEquivalentCostLowCents: quotaLow,
-    quotaEquivalentCostHighCents: quotaHigh,
+    quotaEquivalentCostCents: source === "devin" ? null : quotaSelected,
+    quotaEquivalentCostLowCents: source === "devin" ? null : quotaLow,
+    quotaEquivalentCostHighCents: source === "devin" ? null : quotaHigh,
     pricingSnapshotId: snapshot?.id || null,
     pricingStatus: Number.isFinite(authoritative)
       ? "api-total-allocated"
@@ -565,6 +592,7 @@ module.exports = {
   parseOpenAiPricing,
   parseCursorPricing,
   refreshPricing,
+  parseDevinListPricing,
   mergeFallbackCatalog,
   modelKey,
   claudeModelKey,

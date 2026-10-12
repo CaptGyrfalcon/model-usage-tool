@@ -228,7 +228,7 @@ test('refresh rejects unreadable price pages and retains previous source prices'
     const result = await refreshPricing({ latestPricingSnapshot: () => prior,
       loadCache: () => null, saveCache() {}, savePricingSnapshot: () => 1 }, { force: true });
     assert.equal(result.updated, false);
-    assert.equal(result.errors.length, 2);
+    assert.equal(result.errors.length, 3);
     assert.equal(result.snapshot.modelsBySource.codex['gpt-6-sol'].standard.short.input, 3);
   } finally { global.fetch = original; }
 });

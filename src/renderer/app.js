@@ -128,7 +128,7 @@ function formatRequestUsd(event, cents) {
   return Math.abs(dollars)<0.000001 ? "<$0.000001" : `$${dollars.toFixed(6)}`;
 }
 
-const SOURCE_NAMES = { cursor: "Cursor", codex: "Codex", claude: "Claude Code", deepseek: "DeepSeek Harness" };
+const SOURCE_NAMES = { cursor: "Cursor", codex: "Codex", claude: "Claude Code", deepseek: "DeepSeek Harness", devin: "Devin" };
 function formatBalance(value, currency = "CNY") {
   return value == null || !Number.isFinite(Number(value)) ? "—" : `${currency === "CNY" ? "¥" : "$"}${Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4, useGrouping: false })}`;
 }
@@ -329,6 +329,12 @@ function quotaPools(d) {
       capacityEstimated: true,
     });
   }
+  for (const quota of d.devin?.quota?.windows || []) {
+    if (quota.expired) continue;
+    addPool(`devin-window-${quota.windowMinutes}`, `Devin · ${quota.name}`, quota.usedPercent, quota.percentRemaining,
+      `${formatQuotaReset(quota.resetsAt) || "重置时间未知"}${d.devin.subscription?.cached ? " · 缓存" : ""}`, 2, null,
+      { source: "devin", windowMinutes: quota.windowMinutes, capacityCents: null, capacityLabel: "订阅额度 · 美元容量未知" });
+  }
   return pools;
 }
 
@@ -420,6 +426,7 @@ function selectedQuotaPool(pools) {
   return pools.find((pool) => pool.id === settings.orbPool)
     || (String(settings.orbPool).startsWith("codex-") ? pools.find((pool) => pool.source === "codex") : null)
     || (String(settings.orbPool).startsWith("claude-") ? pools.find((pool) => pool.source === "claude") : null)
+    || (String(settings.orbPool).startsWith("devin-") ? pools.find((pool) => pool.source === "devin") : null)
     || pools[0];
 }
 
@@ -432,6 +439,7 @@ function poolViewCombined() {
 }
 
 function liquidCapacityText(pool) {
+  if (pool?.capacityLabel) return pool.capacityLabel;
   if (!pool?.capacityCents) return "容量待估算";
   return `${pool.capacityEstimated ? "估算容量 " : "容量 "}${formatUsd(pool.capacityCents)}`;
 }
@@ -841,6 +849,7 @@ function renderCombinedPoolCard(tank, shape) {
       <b>${escapeHtml(tank.name)}</b>
       <strong>${escapeHtml(pct)}<small>${tank.hasMonthly ? " 合计待用" : " 合计可用"}</small></strong>
       <span>${escapeHtml(liquidCapacityText(tank))}</span>
+      ${snapshot.data?.devin ? "<span>Devin 美元容量未知，额度请查看独立池</span>" : ""}
       ${legend}
     </div>
   </article>`;
@@ -1018,7 +1027,7 @@ function renderOverview(d) {
   const names = { "cursor-models": "Cursor 模型", "cursor-api": "三方模型", "codex-window-300": "Codex 5h", "codex-window-10080": "Codex 7d",
     "claude-window-300": "Claude 5h", "claude-window-10080": "Claude 7d" };
   $("quotaGlance").innerHTML = quotaPools(d).map((pool) => {
-    const target = pool.source === "codex" ? "codexPool" : pool.source === "claude" ? "claudePool"
+    const target = pool.source === "devin" ? "devinPool" : pool.source === "codex" ? "codexPool" : pool.source === "claude" ? "claudePool"
       : pool.id === "cursor-models" ? "cursorPool" : "otherPool";
     const remaining = Math.min(100, Math.max(0, Number(pool.remaining) || 0));
     // Presentation attributes rather than inline styles: the CSP forbids style attributes.
@@ -1107,6 +1116,24 @@ function renderOverview(d) {
   } else {
     $("claudePool").innerHTML = `<div class="empty-state">未找到可读取的 Claude Code 本机会话</div>`;
   }
+
+  const devin = d.devin;
+  $("devinPool").innerHTML = devin ? `
+    <div class="quota-head"><div class="quota-icon devin" aria-hidden="true">D</div>
+      <div class="quota-title"><h3>Devin</h3><span>${escapeHtml(devin.planName)} · 账户订阅额度</span></div></div>
+    ${(devin.quota?.windows || []).map(w => `<section class="codex-window-row">
+      <div class="codex-window-head"><span><b>${escapeHtml(w.name)}</b><small>${escapeHtml(w.expired ? "已重置 · 等待新采样" : formatQuotaReset(w.resetsAt) || "重置时间未知")}</small></span>
+      <strong>${w.expired ? "—" : formatCursorPct(w.percentRemaining)} <em>剩余</em></strong></div>
+      <progress class="quota-progress devin" max="100" value="${w.usedPercent}" aria-label="Devin ${escapeHtml(w.name)}已用比例"></progress>
+      ${forecastHtml((d.quotaInsights || []).find(i => i.id === `devin-${w.windowMinutes}`))}</section>`).join("")}
+    <div class="quota-stats"><span>今日总 Token <b>${formatTokens(devin.tokens?.today?.total)}</b></span><span>${formatInteger(devin.requests?.today)} 次</span></div>
+    <div class="quota-credit"><span>近 30 天 Token</span><b>${formatTokens(devin.tokens?.month?.total)}</b></div>
+    <div class="quota-credit"><span>近 30 天 API 等值估算</span><b>${formatUsd(devin.costs?.month?.equivalentCostCents)}</b></div>
+    ${Object.entries(devin.subscription?.credits || {}).map(([key, value]) => `<div class="quota-credit"><span>${escapeHtml(devinCreditLabel(key))}</span><b>${value === -1 ? "不限 / 不按 credits 计费" : formatInteger(value)}</b></div>`).join("")}
+    <div class="quota-message">额度包含整个账号；Token 来自本机 CLI。SWE-2 按官方原价展示等值费用，免费活动期间水位遵循服务端实际扣费，恢复收费后自动跟随。其他缺少单价的模型保持未计价；速度证据缺失时显示未知。</div>
+    <div class="quota-message">${devin.subscription?.sampledAt ? `额度采样 ${escapeHtml(formatDateTime(devin.subscription.sampledAt))}${devin.subscription.cached ? " · 缓存" : ""}` : "额度待同步"} · 计价覆盖 ${formatPct(devin.costs?.month?.coveragePercent ?? 100)}</div>
+    ${devin.subscription?.error || devin.scanErrors?.length ? `<div class="quota-message">${escapeHtml(devin.subscription.error || devin.scanErrors[0])}</div>` : ""}`
+    : `<div class="empty-state">未找到 Devin 数据，请先登录本机 Devin CLI；支持 DEVIN_HOME、DEVIN_SESSIONS_DB 与 DEVIN_USAGE_CREDENTIALS_FILE。</div>`;
 
   const deepseek = d.deepseek;
   const wallet = deepseek?.balance;
@@ -1211,6 +1238,13 @@ function recentDonutHtml(last) {
   }).join("");
   const cost = last?.equivalentCostCents == null ? "—" : formatUsd(last.equivalentCostCents);
   return `<div class="recent-donut" aria-label="最近一次 Token 构成"><svg viewBox="0 0 42 42" role="img"><circle class="recent-donut-ring track" cx="21" cy="21" r="${radius}"></circle>${rings}</svg><div class="recent-donut-core">${escapeHtml(cost)}</div></div>`;
+}
+
+function devinCreditLabel(key) {
+  return ({ availablePromptCredits: "可用 Prompt credits", usedPromptCredits: "已用 Prompt credits",
+    availableFlowCredits: "可用 Flow credits", usedFlowCredits: "已用 Flow credits",
+    availableFlexCredits: "可用 Flex credits", usedFlexCredits: "已用 Flex credits",
+    overageBalanceMicros: "额外余额（百万分之一美元）", acuConsumed: "已用 ACU", acuLimit: "ACU 上限" })[key] || key;
 }
 
 const precisionNotes = {
@@ -1732,6 +1766,10 @@ function liveQuotaPoints(d) {
       windowMinutes: window.windowMinutes,
       resetsAt: window.resetsAt,
     })),
+    ...(d.devin?.subscription?.cached ? [] : d.devin?.quota?.windows || []).filter(w => !w.expired).map(w => ({
+      source: "devin", pool: w.pool, timestamp: w.sampledAt, usedPercent: w.usedPercent,
+      windowMinutes: w.windowMinutes, resetsAt: w.resetsAt, startsAt: w.startsAt,
+    })),
   ].filter(Boolean);
 }
 
@@ -1901,7 +1939,7 @@ function renderPricing() {
   $("pricingSubtitle").textContent = catalog.snapshot
     ? `${catalog.snapshot.status === "remote" || catalog.snapshot.status === "official" ? "官方" : "内置"}价目 · ${catalog.snapshot.modelCount} 个模型`
     : "按模型与 Fast / 非 Fast 分档";
-  $("pricingNote").textContent = catalog.snapshot?.note || "价格单位为每百万 Token 美元。";
+  $("pricingNote").textContent = `${catalog.snapshot?.note || "价格单位为每百万 Token 美元。"}${["all", "devin"].includes(settings.pricingSource) ? " Devin 显示模型原价等值，SWE-2 写缓存按输入价估算；免费活动与额度扣费以服务端实际数据为准。" : ""}`;
   $("pricingList").innerHTML = catalog.rows?.length
     ? `<div class="pricing-table-wrap"><table class="pricing-table">
       <thead>
@@ -1996,10 +2034,10 @@ function renderStatus() {
   const cursorState = d?.sourceStatus?.cursor;
   const codexState = d?.sourceStatus?.codex;
   const claudeState = d?.sourceStatus?.claude;
-  if (cursorState?.ok === false || codexState?.ok === false) dot.className = "live-dot warning";
+  if (cursorState?.ok === false || codexState?.ok === false || d?.sourceStatus?.devin?.ok === false) dot.className = "live-dot warning";
   const cursorText = cursorState?.ok ? "Cursor 云端" : cursorState?.cached ? "Cursor 本地缓存" : null;
   const localText = [codexState?.ok && "Codex", claudeState?.ok && "Claude Code", d?.deepseek && "DeepSeek Harness"].filter(Boolean).join(" / ");
-  const sourceText = [cursorText, localText && `${localText} 本机`].filter(Boolean).join(" + ") || "本地缓存";
+  const sourceText = [cursorText, localText && `${localText} 本机`, d?.devin && `Devin${d.devin.subscription?.cached ? " 缓存" : ""}`].filter(Boolean).join(" + ") || "本地缓存";
   $("statusText").textContent = `${sourceText} · ${timeAgo(d?.fetchedAt)}`;
   const seconds = Math.max(0, Math.ceil(((d?.fetchedAt || Date.now()) + Number(settings.intervalMs || 30_000) - Date.now()) / 1000));
   $("syncCountdown").textContent = seconds > 0 ? `${seconds}s 后刷新` : "等待同步";
@@ -2007,12 +2045,12 @@ function renderStatus() {
 
 function renderSourceHealth() {
   const status = snapshot.data?.sourceStatus || {};
-  $("sourceHealth").innerHTML = `<b>数据来源</b>${["cursor", "codex", "claude", "deepseek"].map((source) => {
+  $("sourceHealth").innerHTML = `<b>数据来源</b>${["cursor", "codex", "claude", "deepseek", "devin"].map((source) => {
     const state = status[source];
-    const label = source === "cursor" ? "Cursor 云端" : `${sourceName(source)} 本机`;
+    const label = source === "devin" ? "Devin 订阅 / 本机" : source === "cursor" ? "Cursor 云端" : `${sourceName(source)} 本机`;
     const healthy = snapshot.ok && state?.ok;
-    const text = snapshot.loading ? "同步中" : healthy ? "已同步" : state?.cached ? "使用缓存" : "暂不可用";
-    return `<div><span>${label}</span><strong class="${healthy ? "healthy" : "warning"}">${text}</strong>${source === "deepseek" && state?.error ? `<small>${escapeHtml(state.error)}</small>` : ""}</div>`;
+    const text = snapshot.loading ? "同步中" : state?.cached ? "使用缓存" : healthy ? "已同步" : "暂不可用";
+    return `<div><span>${label}</span><strong class="${healthy ? "healthy" : "warning"}">${text}</strong>${["deepseek", "devin"].includes(source) && state?.error ? `<small>${escapeHtml(state.error)}</small>` : ""}</div>`;
   }).join("")}<small>${snapshot.data?.fetchedAt ? `最近采集 ${escapeHtml(formatDateTime(snapshot.data.fetchedAt))}` : "等待首次采集"} · 历史 ${formatInteger(snapshot.data?.persistence?.count || 0)} 条<br>缓存可能滞后；同步失败不会删除已保存的历史。可点顶栏刷新重试。</small>`;
 }
 
@@ -2055,14 +2093,15 @@ function render() {
   renderOrb(d);
   if (!d) return;
   if (d.modelUsage?.key === settings.modelRange && modelUsage?.key !== settings.modelRange) modelUsage = d.modelUsage;
-  const sourceCount = [d.cursorModels, d.codex, d.claude, d.deepseek].filter(Boolean).length;
-  $("planBadge").textContent = sourceCount > 1 ? `${sourceCount} 源` : d.codex ? "Codex" : d.claude ? "Claude Code" : d.deepseek ? "DeepSeek" : d.planName || "Cursor";
+  const sourceCount = [d.cursorModels, d.codex, d.claude, d.deepseek, d.devin].filter(Boolean).length;
+  $("planBadge").textContent = sourceCount > 1 ? `${sourceCount} 源` : d.codex ? "Codex" : d.claude ? "Claude Code" : d.deepseek ? "DeepSeek" : d.devin ? "Devin" : d.planName || "Cursor";
   const accountParts = [];
   if (d.email) accountParts.push(displayEmail(d.email));
   if (d.cursorModels) accountParts.push(`Cursor ${d.planName || ""}`.trim());
   if (d.codex) accountParts.push(`Codex ${d.codex.planName || ""}`.trim());
   if (d.claude) accountParts.push("Claude Code");
   if (d.deepseek) accountParts.push("DeepSeek Harness");
+  if (d.devin) accountParts.push(`Devin ${d.devin.planName}`);
   $("planLine").textContent = accountParts.join(" · ") || "本机用量历史";
   $("priceBtn").title = d.pricing?.fetchedAt
     ? `手动更新官方价目表 · 当前 ${new Date(d.pricing.fetchedAt).toLocaleString("zh-CN")}`
@@ -2472,7 +2511,7 @@ $("healthBtn").addEventListener("click", () => setSmartPanel(true));
 $("smartCloseBtn").addEventListener("click", () => setSmartPanel(false));
 $("quotaGlance").addEventListener("click", (event) => {
   const target = event.target.closest("[data-quota-target]")?.dataset.quotaTarget;
-  if (["cursorPool", "otherPool", "codexPool", "claudePool"].includes(target)) {
+  if (["cursorPool", "otherPool", "codexPool", "claudePool", "devinPool"].includes(target)) {
     $(target).scrollIntoView({ behavior: reducedMotion() ? "instant" : "smooth", block: "start" });
   }
 });

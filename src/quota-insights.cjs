@@ -115,6 +115,14 @@ function buildQuotaInsights(data, now = Date.now()) {
       forecast: forecastQuota({ usedPercent, startAt: finite(window.startsAt), resetsAt }, now),
     });
   }
+  for (const window of data.devin?.quota?.windows || []) {
+    if (window.expired) continue;
+    insights.push({ id: `devin-${window.windowMinutes}`, label: `Devin ${window.name}`,
+      usedPercent: window.usedPercent, remainingPercent: window.percentRemaining, resetsAt: window.resetsAt,
+      startEstimated: true, forecast: data.devin.subscription?.cached
+        ? { status: "unknown", exhaustionAt: null }
+        : forecastQuota({ usedPercent: window.usedPercent, startAt: window.startsAt, resetsAt: window.resetsAt }, now) });
+  }
   insights.sort((a, b) => {
     const order = { "cursor-models": 0, "cursor-api": 1, cursor: 1, "codex-300": 2, "codex-10080": 3, "claude-300": 4, "claude-10080": 5 };
     return (order[a.id] ?? 10) - (order[b.id] ?? 10);

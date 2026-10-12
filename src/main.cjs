@@ -7,10 +7,12 @@ const { codexHomePath } = require("./codex.cjs");
 const { claudeProjectDirs } = require("./claude-code.cjs");
 const { claudeAppDataDir } = require("./claude-quota.cjs");
 const { statuslinePath } = require("./claude-statusline.cjs");
+const { credentialsFile: devinCredentialsFile, sessionsFile: devinSessionsFile } = require("./devin.cjs");
 const { smartDockBounds, windowMetrics, windowModeOptions } = require("./window-layout.cjs");
 const { alertLevel } = require("./quota-insights.cjs");
 const { createWindowDrag } = require("./window-drag.cjs");
 const { createTaskbarMeters, menuPopupAnchor } = require("./taskbar-meters.cjs");
+const { RefreshScheduler } = require("./refresh-scheduler.cjs");
 
 const MIN_INTERVAL = 15_000;
 const MAX_INTERVAL = 300_000;
@@ -26,6 +28,7 @@ let codexWatcher;
 let codexRefreshTimer;
 let claudeWatchers = [];
 let claudeRefreshTimer = null;
+const changedClaudeSources = new Set();
 let activePull;
 let isQuitting = false;
 let fullscreenRestore = null;
@@ -54,6 +57,7 @@ let dataWorker = null;
 let dataTaskId = 0;
 const dataTasks = new Map();
 const quotaAlertState = new Map();
+const refreshScheduler = new RefreshScheduler({ run: performPull, interval: () => clampInterval(loadSettings().intervalMs) });
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -320,6 +324,7 @@ function updateTray() {
     else if (d.claude) parts.push(`Claude Code 今日 $${(Number(d.claude.costs?.today?.equivalentCostCents || 0) / 100).toFixed(2)}`);
     const wallet = d.deepseek?.balance?.balances?.[0];
     if (wallet) parts.push(`DeepSeek ${wallet.currency === "CNY" ? "¥" : "$"}${wallet.total.toFixed(2)}${d.deepseek.balance.cached ? "（缓存）" : ""}`);
+    for (const w of d.devin?.quota?.windows || []) parts.push(`Devin ${w.name} ${w.expired ? "待更新" : `${w.percentRemaining.toFixed(0)}%`}${d.devin.subscription?.cached ? "（缓存）" : ""}`);
     tray.setToolTip(parts.join(" · "));
   } else if (latest.error) {
     tray.setToolTip(`Cursor 额度 · ${latest.error}`);
@@ -735,17 +740,16 @@ function applySettings(partial) {
   return next;
 }
 
-async function pull(forcePricing = false) {
-  if (activePull) {
-    if (!forcePricing) return activePull;
-    await activePull;
-    return pull(true);
-  }
+function pull(forcePricing = false, sources = null, background = false) {
+  return refreshScheduler.request({ forcePricing, sources, background });
+}
+
+async function performPull({ forcePricing = false, sources = null } = {}) {
   latest = { ...latest, loading: true };
   if (win) win.webContents.send("snapshot", latest);
   activePull = (async () => {
     try {
-      const data = await runDataTask("fetch-snapshot", { forcePricing });
+      const data = await runDataTask("fetch-snapshot", { forcePricing, sources });
       latest = { ok: true, loading: false, data, error: null, fetchedAt: Date.now() };
     } catch (err) {
       latest = {
@@ -777,9 +781,12 @@ function startCodexWatch() {
   try {
     codexWatcher = fs.watch(codexHomePath(), { persistent: false }, (_event, filename) => {
       const changed = String(filename || "").replaceAll("\\", "/");
-      if (!/(^|\/)logs_2\.sqlite(?:-(?:wal|shm))?$/.test(changed)) return;
-      clearTimeout(codexRefreshTimer);
-      codexRefreshTimer = setTimeout(() => pull(), 1200);
+      // SQLite readers update SHM locks too; watching SHM creates a refresh loop.
+      if (!/(^|\/)logs_2\.sqlite(?:-wal)?$/.test(changed) || codexRefreshTimer) return;
+      codexRefreshTimer = setTimeout(() => {
+        codexRefreshTimer = null;
+        pull(false, ["codex"], true).catch(() => {});
+      }, 4000);
     });
   } catch {
     // The regular polling loop remains available when the Codex directory cannot be watched.
@@ -790,17 +797,26 @@ function startClaudeWatch() {
   for (const watcher of claudeWatchers) { try { watcher.close(); } catch {} }
   claudeWatchers = [];
   const watched = [
-    ...claudeProjectDirs().map((dir) => [dir, true, (name) => name.endsWith(".jsonl")]),
+    ...claudeProjectDirs().map((dir) => [dir, true, (name) => name.endsWith(".jsonl"), "claude"]),
     // The desktop app rewrites its plan usage samples every 15 minutes.
-    [claudeAppDataDir(), false, (name) => name === "plan-usage-history.json"],
-    [path.dirname(statuslinePath()), false, (name) => name === path.basename(statuslinePath())],
+    [claudeAppDataDir(), false, (name) => name === "plan-usage-history.json", "claude"],
+    [path.dirname(devinCredentialsFile()), false, (name) => name === path.basename(devinCredentialsFile()), "devin"],
+    [path.dirname(devinSessionsFile()), false, (name) => name === path.basename(devinSessionsFile()) || name === `${path.basename(devinSessionsFile())}-wal`, "devin"],
+    [path.dirname(statuslinePath()), false, (name) => name === path.basename(statuslinePath()), "claude"],
   ];
-  for (const [dir, recursive, relevant] of watched) {
+  for (const [dir, recursive, relevant, source] of watched) {
     try {
       claudeWatchers.push(fs.watch(dir, { persistent: false, recursive }, (_event, filename) => {
-        if (!relevant(String(filename || "")) || claudeRefreshTimer) return;
+        if (!relevant(String(filename || ""))) return;
+        changedClaudeSources.add(source);
+        if (claudeRefreshTimer) return;
         // Transcripts grow on every streamed message; throttle rather than debounce.
-        claudeRefreshTimer = setTimeout(() => { claudeRefreshTimer = null; pull(); }, 4000);
+        claudeRefreshTimer = setTimeout(() => {
+          claudeRefreshTimer = null;
+          const sources = [...changedClaudeSources];
+          changedClaudeSources.clear();
+          pull(false, sources, true).catch(() => {});
+        }, 4000);
       }));
     } catch {
       // The regular polling loop still picks up Claude Code transcripts.
@@ -832,6 +848,7 @@ app.on("window-all-closed", () => {
 });
 app.on("before-quit", () => {
   isQuitting = true;
+  refreshScheduler.dispose();
   taskbarMeters?.dispose();
   clearInterval(pollTimer);
   clearTimeout(codexRefreshTimer);
@@ -890,7 +907,7 @@ ipcMain.handle("export-usage-events", async (_event, payload) => {
   exporting = true;
   try {
     const kind = payload.kind;
-    const source = ["cursor", "codex", "claude", "deepseek"].includes(payload.source) ? payload.source : "all";
+    const source = ["cursor", "codex", "claude", "deepseek", "devin"].includes(payload.source) ? payload.source : "all";
     const query = String(payload.query || "");
     const stamp = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
     const result = await dialog.showSaveDialog(win, {

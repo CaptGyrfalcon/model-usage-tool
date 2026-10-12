@@ -15,6 +15,7 @@ test("receipt provider mapping covers brands, casing and family aliases with bun
     qwen: ["qwen3", "qwq-32b"], mistral: ["mistral-large", "codestral", "devstral", "ministral", "pixtral", "magistral"],
     meta: ["llama-4"], minimax: ["MiniMax-M2"], moonshot: ["kimi-k2-instruct", "moonshot-v1"],
     cursor: ["composer-2.5-fast", "auto", "default", "cursor-auto-high"],
+    devin: ["swe-2", "SWE-2-high", "swe-2-max"],
   };
   for (const [provider, names] of Object.entries(families)) {
     for (const name of names) assert.equal(ReceiptModel.provider(name), provider, name);
@@ -24,6 +25,10 @@ test("receipt provider mapping covers brands, casing and family aliases with bun
   }
   assert.equal(ReceiptModel.provider("unknown"), null);
   assert.equal(context.window.ReceiptBrandIcons.zhipu, undefined);
+  const devinSvg = Buffer.from(context.window.ReceiptBrandIcons.devin.split(",")[1], "base64").toString();
+  assert.match(devinSvg, /<title>Devin<\/title>/);
+  assert.match(devinSvg, /M8\.30437 8\.18853/); // Official symbol, shared by channel and SWE model rows.
+  assert.doesNotMatch(devinSvg, /M5 3h6|<text\b/);
   assert.match(Buffer.from(context.window.ReceiptBrandIcons.zai.split(",")[1], "base64").toString(), /<title>Z.ai<\/title>/);
 });
 

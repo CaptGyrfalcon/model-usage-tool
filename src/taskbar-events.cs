@@ -26,7 +26,11 @@ public sealed class QuotaTaskbarEvents : IDisposable {
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint process);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder name, int size);
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hwnd, int index);
     private readonly List<IntPtr> hooks = new List<IntPtr>();
+    private readonly HashSet<IntPtr> taskWindows = new HashSet<IntPtr>();
     private readonly WinEventProc callback;
     private readonly uint owner;
     private readonly Stopwatch clock = Stopwatch.StartNew();
@@ -53,9 +57,17 @@ public sealed class QuotaTaskbarEvents : IDisposable {
     }
     private void OnEvent(IntPtr hook, uint kind, IntPtr hwnd, int objectId, int childId, uint thread, uint time) {
         if (disposed) return;
-        // Most global object events describe controls, text and caret changes.
-        // Reject them before making any further cross-process window queries.
-        if (kind >= 0x8000 && (objectId != 0 || childId != 0)) return;
+        // Taskbar accessibility children report button create/reorder/location
+        // events too. Retain those, while rejecting unrelated text/caret churn.
+        bool childEvent=kind >= 0x8000 && (objectId != 0 || childId != 0);
+        if (childEvent) {
+            if (hwnd == IntPtr.Zero) return;
+            var root=GetAncestor(hwnd, 2);
+            var rootName=new StringBuilder(64);
+            GetClassName(root, rootName, rootName.Capacity);
+            if (rootName.ToString() != "Shell_TrayWnd" && rootName.ToString() != "Shell_SecondaryTrayWnd") return;
+            changed=true; return;
+        }
         var current = GetForegroundWindow();
         bool relevant = kind == 3;
         if (!relevant && hwnd != IntPtr.Zero && objectId == 0 && childId == 0) {
@@ -68,7 +80,21 @@ public sealed class QuotaTaskbarEvents : IDisposable {
                 bool shell = cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd" || cls == "TrayNotifyWnd";
                 // Games may reorder their windows repeatedly without changing
                 // fullscreen state. Only shell reorders require raising meters.
-                relevant = shell || (kind != 0x8004 && (hwnd == current || hwnd == foreground));
+                // Background top-level windows can add/remove task buttons
+                // without becoming foreground. Ignore their location churn.
+                var root=GetAncestor(hwnd, 2);
+                bool appears=kind == 0x8000 || kind == 0x8002 || kind == 0x8018;
+                bool disappears=kind == 0x8001 || kind == 0x8003 || kind == 0x8017;
+                // UI Automation / console workers create hidden top-level
+                // windows. Treating those as task buttons creates a scan loop.
+                bool taskWindow=appears && root == hwnd && IsWindowVisible(hwnd)
+                    && (GetWindowLong(hwnd, -20) & 0x80) == 0;
+                if (taskWindow) taskWindows.Add(hwnd);
+                if (disappears) taskWindow=taskWindows.Remove(hwnd);
+                var rootName=new StringBuilder(64);
+                GetClassName(root, rootName, rootName.Capacity);
+                bool shellChild=rootName.ToString() == "Shell_TrayWnd" || rootName.ToString() == "Shell_SecondaryTrayWnd";
+                relevant = shell || shellChild || taskWindow || (kind != 0x8004 && (hwnd == current || hwnd == foreground));
             }
         }
         foreground = current;

@@ -10,7 +10,7 @@ function dayBounds(date) {
 
 function getReceipt(history, { date, source = "all", period = "day", ...options } = {}) {
   const { start, end } = ReceiptModel.range(date, period);
-  if (!["all", "cursor", "codex", "claude", "deepseek"].includes(source)) throw new Error("数据来源无效");
+  if (!["all", "cursor", "codex", "claude", "deepseek", "devin"].includes(source)) throw new Error("数据来源无效");
   const rows = history.db.prepare(`SELECT source, model, effort, fast,
     SUM(request_count) AS count, SUM(input_tokens) AS input, SUM(output_tokens) AS output,
     SUM(cache_read_tokens) AS cacheRead, SUM(cache_write_tokens) AS cacheWrite,
@@ -21,6 +21,7 @@ function getReceipt(history, { date, source = "all", period = "day", ...options 
     GROUP BY source, model, effort, fast ORDER BY SUM(equivalent_cost_cents) DESC, source, model
   `).all(start, end, ...(source === "all" ? [] : [source]));
   const result = ReceiptModel.build(rows, { date, source, period, ...options });
+  if (source === "devin") result.costNote = "模型 API 等值估算 · 非 Devin 订阅扣费";
   const deepseekCosts = rows.some(row=>row.source==='deepseek'&&row.costCents!=null);
   const converted = deepseekCosts ? history.db.prepare(`SELECT COUNT(*) AS n FROM usage_events WHERE timestamp >= ? AND timestamp < ?
     AND source = 'deepseek' AND pricing_status = 'official-billing-fx'`).get(start,end).n : 0;

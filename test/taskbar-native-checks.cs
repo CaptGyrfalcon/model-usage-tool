@@ -51,6 +51,36 @@ internal static class TaskbarNativeChecks {
     }
     [STAThread] private static void Main(string[] args) {
         if (args[0]=="--desktop") { CaptureDesktop(args[1]); return; }
+        var scanClock=new DateTime(2026,10,12,0,0,0,DateTimeKind.Utc);
+        var schedule=new TaskbarScanSchedule();
+        int scanRevision=schedule.Start(scanClock);
+        Check(schedule.Complete(scanClock.AddMilliseconds(100),scanRevision,true),"Initial scan is accepted");
+        Check(!schedule.invalidated && schedule.nextScan==scanClock.AddSeconds(30.1),"Stable taskbar scans only every 30 seconds");
+        schedule.Invalidate(scanClock.AddMilliseconds(200));
+        Check(schedule.invalidated && schedule.nextScan==scanClock.AddSeconds(1),"Layout changes invalidate old positions and coalesce within one second");
+        scanRevision=schedule.Start(scanClock.AddSeconds(1));
+        schedule.Invalidate(scanClock.AddSeconds(1.2));
+        Check(!schedule.Complete(scanClock.AddSeconds(1.5),scanRevision,true) && schedule.invalidated,"Changes during a scan cannot accept obsolete positions");
+        Check(schedule.nextScan==scanClock.AddSeconds(2),"Stale completion cannot postpone the pending change");
+        scanRevision=schedule.Start(scanClock.AddSeconds(2));
+        Check(!schedule.Complete(scanClock.AddSeconds(2.2),scanRevision,false) && schedule.nextScan==scanClock.AddSeconds(4.2),"Scan failures retry promptly and keep positions invalid");
+        scanRevision=schedule.Start(scanClock.AddSeconds(4.2));
+        Check(schedule.Complete(scanClock.AddSeconds(4.3),scanRevision,true),"Successful retry restores valid positions");
+        for (int i=0;i<100;i++) schedule.Invalidate(scanClock.AddSeconds(4.4+i*0.001));
+        Check(schedule.nextScan==scanClock.AddSeconds(5.2),"Event storms cannot start repeated scans or push their deadline away");
+        using (var hiddenWorker=new Form()) using (var events=new QuotaTaskbarEvents(uint.MaxValue)) {
+            var callback=typeof(QuotaTaskbarEvents).GetMethod("OnEvent",BindingFlags.NonPublic|BindingFlags.Instance);
+            var changed=typeof(QuotaTaskbarEvents).GetField("changed",BindingFlags.NonPublic|BindingFlags.Instance);
+            var workerWindow=hiddenWorker.Handle;
+            callback.Invoke(events,new object[]{IntPtr.Zero,(uint)0x8000,workerWindow,0,0,(uint)0,(uint)0});
+            callback.Invoke(events,new object[]{IntPtr.Zero,(uint)0x8001,workerWindow,0,0,(uint)0,(uint)0});
+            Check(!(bool)changed.GetValue(events),"Hidden scan/console windows cannot invalidate taskbar positions");
+            IntPtr desktopBar=NativeTaskbar.FindWindow("Shell_TrayWnd",null);
+            if (desktopBar!=IntPtr.Zero) {
+                callback.Invoke(events,new object[]{IntPtr.Zero,(uint)0x8004,desktopBar,-4,1,(uint)0,(uint)0});
+                Check((bool)changed.GetValue(events),"Taskbar accessibility button reorders trigger immediate layout checks");
+            }
+        }
         var bar=new Rectangle(-1920,1032,1920,48); var tray=new Rectangle(-240,1032,240,48);
         var slot=TaskbarHost.FindSlot(bar,tray,new List<Rectangle>(),MeterLayout.Width,MeterLayout.Height,6);
         Check(slot == new Rectangle(-240-6-MeterLayout.Width,1034,MeterLayout.Width,MeterLayout.Height),"Negative monitor coordinates");
@@ -144,6 +174,30 @@ internal static class TaskbarNativeChecks {
                     }
                 }
                 image.Save(args[0],ImageFormat.Png);
+            }
+            meter.SetData(new QuotaData { rows=new[] {
+                new QuotaRow {label="Cursor",meters=new[]{new QuotaMeter {label="模型",value=82.5,remainingCents=114514.4,pace=70}}},
+                new QuotaRow {label="三方",meters=new[]{new QuotaMeter {label="三方",value=12,remainingCents=180,pace=70}}},
+                new QuotaRow {label="Codex",meters=new[]{new QuotaMeter {label="周",value=61,pace=50},new QuotaMeter {label="5h",value=8,pace=30}}},
+                new QuotaRow {label="Devin",meters=new[]{new QuotaMeter {label="日",value=100,pace=60},new QuotaMeter {label="周",value=81.25,pace=50}}},
+            }});
+            Check(meter.AccessibleDescription.Contains("Devin"),"Devin fourth row reaches the tooltip");
+            string devinTooltip=meter.AccessibleDescription.Substring(meter.AccessibleDescription.IndexOf("Devin"));
+            Check(devinTooltip.Contains("日") && devinTooltip.Contains("周") && !devinTooltip.Contains("$"),"Devin exposes actual daily/weekly percentages without invented dollars");
+            float fourthHeight=(surfaceHeight-4*scale)/4f;
+            var devinBar=MeterLayout.Bar(MeterLayout.MeterLeft*scale,2*scale+3*fourthHeight,MeterLayout.Segment(surfaceWidth,2,scale),fourthHeight,scale);
+            using (var image=new Bitmap(surfaceWidth+40,192,PixelFormat.Format32bppPArgb)) using (var graphics=Graphics.FromImage(image)) {
+                for (int i=0;i<2;i++) {
+                    bool light=i==1;
+                    typeof(MeterControl).GetField("light",BindingFlags.NonPublic|BindingFlags.Instance).SetValue(meter,light);
+                    using (var surface=new Bitmap(surfaceWidth,surfaceHeight,PixelFormat.Format32bppPArgb)) using (var g=Graphics.FromImage(surface)) {
+                        meter.Render(g);
+                        Check(TrackSpan(surface,(int)(devinBar.Y+devinBar.Height/2))>20,"Fourth row tracks remain visible in both themes");
+                        using (var brush=new SolidBrush(light ? Color.FromArgb(243,243,243) : Color.FromArgb(36,36,36))) graphics.FillRectangle(brush,0,i*96,surfaceWidth+40,96);
+                        graphics.DrawImageUnscaled(surface,20,i*96+15);
+                    }
+                }
+                image.Save(Path.Combine(Path.GetDirectoryName(args[0]),"taskbar-devin-themes.png"),ImageFormat.Png);
             }
         }
         Console.WriteLine("Native layout, child styles and transparent dark/light rendering passed.");

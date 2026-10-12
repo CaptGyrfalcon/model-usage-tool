@@ -67,12 +67,13 @@ function meterRows(snapshot, now = Date.now()) {
   const short = quota?.shortLimit === 'absent' ? null : windows.find(w => w.windowMinutes === 300);
   const cursorCycle = { startAt: data?.billingCycleStart, resetsAt: data?.billingCycleEnd, typicalMs: 30 * 86_400_000 };
   return {
-    stale: Boolean(snapshot?.error || data?.sourceStatus?.cursor?.error || data?.sourceStatus?.codex?.error),
+    stale: Boolean(snapshot?.error || data?.sourceStatus?.cursor?.error || data?.sourceStatus?.codex?.error || (data?.devin && data?.sourceStatus?.devin?.error)),
     sampledAt: quota?.sampledAt,
     rows: [
       { label: 'Cursor', meters: [meter('模型', data?.cursorModels, now, cursorCycle)] },
       { label: '三方', meters: [meter('三方', data?.otherModels, now, cursorCycle)] },
       { label: 'Codex', meters: [meter('周', week, now), ...(short ? [meter('5h', short, now)] : [])] },
+      ...(data?.devin ? [{ label: 'Devin', meters: (data.devin.quota?.windows || []).map(w => meter(w.windowMinutes === 1440 ? '日' : '周', w, now, { startAt: w.startsAt })) }] : []),
     ],
   };
 }

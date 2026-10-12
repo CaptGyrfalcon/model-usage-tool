@@ -163,7 +163,7 @@ internal sealed class MeterControl : Control {
         dirty = true; Invalidate();
     }
     private static string Prefix(string rowLabel, QuotaMeter meter) {
-        return rowLabel == "Codex" ? meter.label + " " : "";
+        return rowLabel == "Codex" || rowLabel == "Devin" ? meter.label + " " : "";
     }
     private static string Percent(QuotaMeter meter) {
         return meter.value.HasValue ? Math.Max(0, Math.Min(100, meter.value.Value)).ToString("0.00") + "%" : "—";
@@ -231,15 +231,17 @@ internal sealed class MeterControl : Control {
         if (data == null || data.rows == null) return;
         var fg = SystemInformation.HighContrast ? SystemColors.ControlText : light ? Color.FromArgb(35,35,35) : Color.FromArgb(242,242,242);
         var track = SystemInformation.HighContrast ? SystemColors.GrayText : light ? Color.FromArgb(210,210,210) : Color.FromArgb(77,77,77);
-        float rowHeight = (Height - 4*scale) / 3f;
-        using (var nameFont = new Font("Segoe UI", 10.5f * scale, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (var valueFont = new Font("Microsoft YaHei UI", 10.5f * scale, FontStyle.Bold, GraphicsUnit.Pixel))
+        int rowCount = Math.Max(3, Math.Min(4, data.rows.Length));
+        float rowHeight = (Height - 4*scale) / rowCount;
+        float fontSize = rowCount > 3 ? 9f : 10.5f;
+        using (var nameFont = new Font("Segoe UI", fontSize * scale, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (var valueFont = new Font("Microsoft YaHei UI", fontSize * scale, FontStyle.Bold, GraphicsUnit.Pixel))
         using (var text = new SolidBrush(fg))
         using (var format = new StringFormat { LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter }) {
             var cells = new List<MeterCell>();
             var widths = new Dictionary<int, List<float>>();
             float gap = MeterLayout.ValueGap * scale, moneyMin = MeterLayout.MinMoneyWidth * scale;
-            for (int i = 0; i < Math.Min(3, data.rows.Length); i++) {
+            for (int i = 0; i < Math.Min(4, data.rows.Length); i++) {
                 var row = data.rows[i]; float y = 2*scale + i*rowHeight;
                 g.DrawString(row.label, nameFont, text, new RectangleF(MeterLayout.NameLeft*scale,y,MeterLayout.NameWidth*scale,rowHeight),format);
                 if (row.meters == null || row.meters.Length == 0) continue;
@@ -308,16 +310,41 @@ internal sealed class MeterControl : Control {
     protected override void Dispose(bool disposing) { if (disposing) { hoverTimer.Dispose(); tip.Dispose(); } base.Dispose(disposing); }
 }
 
+// Keep quota repainting independent of expensive UI Automation. Events and
+// geometry changes scan promptly; stable layouts only need a recovery check.
+internal sealed class TaskbarScanSchedule {
+    internal DateTime nextScan = DateTime.MinValue, lastStarted = DateTime.MinValue;
+    internal int revision;
+    internal bool invalidated = true;
+    internal void Invalidate(DateTime now) {
+        revision++; invalidated=true;
+        nextScan = now > lastStarted.AddSeconds(1) ? now : lastStarted.AddSeconds(1);
+    }
+    internal int Start(DateTime now) {
+        lastStarted=now; nextScan=now.AddSeconds(30);
+        return revision;
+    }
+    internal bool Complete(DateTime now, int startedRevision, bool success) {
+        if (startedRevision != revision) return false;
+        invalidated=!success;
+        nextScan=now.AddSeconds(success ? 30 : 2);
+        return success;
+    }
+}
+
 internal sealed class TaskbarPane {
     internal IntPtr shell;
     internal MeterControl meter;
     internal Task<List<Rectangle>> scan;
     internal IntPtr scanShell;
     internal List<Rectangle> occupied;
-    internal DateTime scannedAt = DateTime.MinValue, nextScan = DateTime.MinValue, lastScanStarted = DateTime.MinValue;
+    internal DateTime scannedAt = DateTime.MinValue;
+    internal readonly TaskbarScanSchedule schedule = new TaskbarScanSchedule();
+    internal int scanRevision;
+    internal Rectangle barBounds, trayBounds;
     internal uint currentDpi;
     internal string lastStatus;
-    internal void InvalidateScan() { nextScan = lastScanStarted.AddSeconds(2); }
+    internal void InvalidateScan() { schedule.Invalidate(DateTime.UtcNow); }
     internal void DisposeMeter() { if (meter != null) { meter.Dispose(); meter = null; } }
 }
 
@@ -340,7 +367,15 @@ internal sealed class TaskbarHost : ApplicationContext {
         Task.Run(() => {
             try {
                 using (var events = new QuotaTaskbarEvents(NativeTaskbar.GetCurrentProcessId())) {
-                    while (!stopped) { events.Wait(); if (!stopped) dispatcher.BeginInvoke((Action)(() => { foreach (var pane in panes.Values) pane.InvalidateScan(); Tick(); })); }
+                    while (!stopped) {
+                        string reason=events.Wait();
+                        if (!stopped) dispatcher.BeginInvoke((Action)(() => {
+                            // The five-second hook fallback is a cheap health
+                            // check, not evidence that button positions changed.
+                            if (reason != "fallback") foreach (var pane in panes.Values) pane.InvalidateScan();
+                            Tick();
+                        }));
+                    }
                 }
             } catch (Exception) { /* The timer still handles Explorer recovery. */ }
         });
@@ -485,7 +520,7 @@ internal sealed class TaskbarHost : ApplicationContext {
         NativeTaskbar.SetThreadDpiAwarenessContext(NativeTaskbar.GetWindowDpiAwarenessContext(bar));
         if (bar != pane.shell || pane.currentDpi != NativeTaskbar.GetDpiForWindow(bar) || pane.meter == null || !pane.meter.IsHandleCreated || !NativeTaskbar.IsWindow(pane.meter.Handle)) {
             pane.DisposeMeter();
-            pane.shell=bar; pane.occupied=null; pane.scannedAt=DateTime.MinValue; pane.nextScan=DateTime.MinValue; pane.lastScanStarted=DateTime.MinValue;
+            pane.shell=bar; pane.occupied=null; pane.scannedAt=DateTime.MinValue; pane.InvalidateScan();
             pane.currentDpi=NativeTaskbar.GetDpiForWindow(bar);
             float scale=pane.currentDpi/96f;
             pane.meter=new MeterControl(bar,scale);
@@ -496,19 +531,30 @@ internal sealed class TaskbarHost : ApplicationContext {
             pane.meter.SetData(data);
         }
         pane.meter.RefreshTheme();
-        if (pane.scan != null && pane.scan.IsCompleted) {
-            if (pane.scan.Status == TaskStatus.RanToCompletion && pane.scanShell == pane.shell) { pane.occupied=pane.scan.Result; pane.scannedAt=DateTime.UtcNow; }
-            else { var ignored=pane.scan.Exception; pane.occupied=null; }
-            pane.scan=null;
-        }
-        if (pane.scan == null && DateTime.UtcNow >= pane.nextScan) {
-            pane.scanShell=pane.shell; var target=pane.shell;
-            pane.scan=Task.Run(() => ScanButtons(target)); pane.lastScanStarted=DateTime.UtcNow; pane.nextScan=pane.lastScanStarted.AddSeconds(2);
-        }
         NativeTaskbar.Rect b,client;
         if (!NativeTaskbar.IsWindowVisible(bar) || !NativeTaskbar.GetWindowRect(bar,out b) || !NativeTaskbar.GetClientRect(bar,out client)) { Hide(pane, "taskbar-hidden"); return; }
         var tray = ResolveTray(bar, b.Bounds);
-        if (pane.occupied == null || DateTime.UtcNow-pane.scannedAt > TimeSpan.FromSeconds(8)) { Hide(pane, "waiting-for-layout"); return; }
+        if (pane.barBounds != b.Bounds || pane.trayBounds != tray) {
+            pane.barBounds=b.Bounds; pane.trayBounds=tray; pane.InvalidateScan();
+        }
+        if (pane.scan != null && pane.scan.IsCompleted) {
+            bool success=pane.scan.Status == TaskStatus.RanToCompletion && pane.scanShell == pane.shell;
+            if (pane.schedule.Complete(DateTime.UtcNow, pane.scanRevision, success)) { pane.occupied=pane.scan.Result; pane.scannedAt=DateTime.UtcNow; }
+            else { var ignored=pane.scan.Exception; }
+            pane.scan=null;
+        }
+        if (pane.scan == null && DateTime.UtcNow >= pane.schedule.nextScan) {
+            pane.scanShell=pane.shell; var target=pane.shell;
+            pane.scanRevision=pane.schedule.Start(DateTime.UtcNow);
+            pane.scan=Task.Run(() => ScanButtons(target));
+            // Accept completed scans promptly instead of waiting for the next
+            // one-second quota/geometry tick.
+            pane.scan.ContinueWith(_ => { if (!stopped) {
+                try { dispatcher.BeginInvoke((Action)(() => { if (!stopped) Tick(); })); }
+                catch (InvalidOperationException) { }
+            } });
+        }
+        if (pane.schedule.invalidated || pane.occupied == null || DateTime.UtcNow-pane.scannedAt > TimeSpan.FromSeconds(36)) { Hide(pane, "waiting-for-layout"); return; }
         // Never extend the desktop work area or resize Explorer's own controls.
         float dpi=NativeTaskbar.GetDpiForWindow(bar)/96f;
         int width=(int)Math.Round(MeterLayout.Width*dpi), height=Math.Min((int)Math.Round(MeterLayout.Height*dpi),client.Bottom-4);

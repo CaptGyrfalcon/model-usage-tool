@@ -12,6 +12,8 @@ const QUOTA_POOLS = [
   { id: "codex-10080", source: "codex", label: "Codex 每周", typicalMs: 7 * DAY_MS },
   { id: "claude-300", source: "claude", label: "Claude 5 小时", typicalMs: 5 * HOUR_MS },
   { id: "claude-10080", source: "claude", label: "Claude 每周", typicalMs: 7 * DAY_MS },
+  { id: "devin-1440", source: "devin", label: "Devin 每日", typicalMs: DAY_MS },
+  { id: "devin-10080", source: "devin", label: "Devin 每周", typicalMs: 7 * DAY_MS },
 ];
 
 function finite(value) {
@@ -42,6 +44,7 @@ function poolIdOf(sample) {
     return sample.pool === "cursor-models" ? "cursor-models" : "other-models";
   }
   const minutes = windowMinutesOf(sample);
+  if (sample?.source === "devin") return `devin-${minutes}`;
   const prefix = sample?.source === "claude" ? "claude" : "codex";
   if (minutes != null && minutes <= 360) return `${prefix}-300`;
   if (minutes != null && minutes >= 6 * 24 * 60) return `${prefix}-10080`;
@@ -52,7 +55,7 @@ function poolIdOf(sample) {
 function poolMeta(poolId) {
   return QUOTA_POOLS.find((item) => item.id === poolId) || {
     id: poolId,
-    source: String(poolId).startsWith("codex") ? "codex" : String(poolId).startsWith("claude") ? "claude" : "cursor",
+    source: String(poolId).startsWith("devin") ? "devin" : String(poolId).startsWith("codex") ? "codex" : String(poolId).startsWith("claude") ? "claude" : "cursor",
     label: poolId,
     typicalMs: DAY_MS,
   };
@@ -139,6 +142,10 @@ function livePointsFromSnapshot(data, now = Date.now()) {
       resetsAt: window.resetsAt,
     });
   }
+  for (const window of data.devin?.quota?.windows || []) {
+    if (window.expired || data.devin.subscription?.cached) continue;
+    points.push({ source: "devin", ...window, timestamp: window.sampledAt });
+  }
   return points.map(normalizeSample).filter(Boolean);
 }
 
@@ -159,18 +166,24 @@ function resetMatches(key, resetAt, poolId) {
 }
 
 function groupCycles(samples, poolId, now = Date.now()) {
+  return groupNormalizedCycles(samples.map(normalizeSample).filter(Boolean), poolId, now);
+}
+
+function groupNormalizedCycles(samples, poolId, now) {
   const meta = poolMeta(poolId);
   const filtered = samples
-    .map(normalizeSample)
-    .filter((sample) => sample && poolIdOf(sample) === poolId && sample.timestamp <= now)
+    .filter((sample) => poolIdOf(sample) === poolId && sample.timestamp <= now)
     .sort((a, b) => a.timestamp - b.timestamp);
   const groups = new Map();
   let previous = null;
   for (const sample of filtered) {
     // Compare to a fixed group anchor, not the preceding sample, so small
     // successive changes cannot chain unrelated reset dates into one cycle.
-    const cycleKey = [...groups.keys()].find((key) => resetMatches(key, sample.resetsAt, poolId))
-      || assignCycleKey(sample, previous, meta.typicalMs);
+    let cycleKey;
+    for (const key of groups.keys()) {
+      if (resetMatches(key, sample.resetsAt, poolId)) { cycleKey = key; break; }
+    }
+    cycleKey ||= assignCycleKey(sample, previous, meta.typicalMs);
     const tagged = { ...sample, cycleKey };
     if (!groups.has(cycleKey)) groups.set(cycleKey, []);
     groups.get(cycleKey).push(tagged);
@@ -209,7 +222,7 @@ function groupCycles(samples, poolId, now = Date.now()) {
       })),
     };
   });
-  if (meta.source === "codex" || meta.source === "claude") closeCodexCycles(cycles, now);
+  if (["codex", "claude", "devin"].includes(meta.source)) closeCodexCycles(cycles, now);
   return cycles.sort((a, b) => (b.endAt || 0) - (a.endAt || 0));
 }
 
@@ -279,15 +292,14 @@ function extendCompletedCycle(cycle, points, now) {
   }];
 }
 
-function cycleReference(cycle, samples, poolId) {
+function cycleReference(cycle, points, poolId) {
   if (!cycle?.key.startsWith("reset:")) return null;
   const endAt = cycle.endAt;
   if (!Number.isFinite(endAt)) return null;
-  const points = samples.map(normalizeSample).filter((point) => point && poolIdOf(point) === poolId);
   const matching = points.filter((point) => resetMatches(cycle.key, point.resetsAt, poolId));
-  if (poolId.startsWith("codex") || poolId.startsWith("claude")) {
+  if (poolId.startsWith("codex") || poolId.startsWith("claude") || poolId.startsWith("devin")) {
     const minutes = matching.findLast((point) => point.windowMinutes > 0)?.windowMinutes;
-    return { startAt: cycle.startAt, endAt, estimated: poolId.startsWith("claude") || !minutes };
+    return { startAt: cycle.startAt, endAt, estimated: poolId.startsWith("claude") || poolId.startsWith("devin") || !minutes };
   }
   const explicit = matching.findLast((point) => point.startsAt != null && point.startsAt < endAt);
   if (explicit) return { startAt: explicit.startsAt, endAt, estimated: false };
@@ -306,12 +318,21 @@ function buildQuotaTimeline(samples, {
   live = [],
 } = {}) {
   // Include live data before grouping: an early reset may not be persisted yet.
-  const observations = [...samples, ...live.filter((point) => normalizeSample(point)?.remainingPercent != null)];
-  const grouped = new Map(QUOTA_POOLS.map((item) => [item.id, groupCycles(observations, item.id, now)]));
+  // Normalize once and partition once. Keep input order for cycle references;
+  // grouping sorts its own filtered array and live points still win ties.
+  const byPool = new Map(QUOTA_POOLS.map((item) => [item.id, []]));
+  for (const [rows, isLive] of [[samples, false], [live, true]]) {
+    for (const raw of rows) {
+      const point = normalizeSample(raw);
+      if (!point || (isLive && point.remainingPercent == null)) continue;
+      byPool.get(poolIdOf(point))?.push(point);
+    }
+  }
+  const grouped = new Map(QUOTA_POOLS.map((item) => [item.id, groupNormalizedCycles(byPool.get(item.id), item.id, now)]));
   const available = QUOTA_POOLS.filter((item) => grouped.get(item.id).length);
   const poolId = available.some((item) => item.id === pool) ? pool : (available[0]?.id || pool);
   const cycles = (grouped.get(poolId) || []).map((cycle) => {
-    const reference = cycleReference(cycle, observations, poolId);
+    const reference = cycleReference(cycle, byPool.get(poolId) || [], poolId);
     const startAt = reference?.startAt ?? cycle.startAt;
     return { ...cycle, startAt, reference,
       label: formatCycleRange(startAt, cycle.endAt, poolMeta(poolId).typicalMs) };

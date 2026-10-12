@@ -2,6 +2,21 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { buildQuotaTimeline, groupCycles, livePointsFromSnapshot, remainingOf } = require("../src/quota-timeline.cjs");
 
+test("timeline normalizes each historical and live sample once across all pools and cycles", () => {
+  let reads = 0;
+  const rows = Array.from({ length: 2000 }, (_, i) => ({ source: i % 2 ? "cursor" : "codex",
+    pool: i % 2 ? "cursor-models" : "primary-300", windowMinutes: i % 2 ? null : 300,
+    get timestamp() { reads++; return i * 1000; }, usedPercent: i % 100,
+    resetsAt: (Math.floor(i / 100) + 1) * 100000 + 18000000,
+  }));
+  const live = { source: "cursor", pool: "cursor-models", usedPercent: 0,
+    get timestamp() { reads++; return 2000000; }, resetsAt: 20000000 };
+  const timeline = buildQuotaTimeline(rows, { now: 2000000, live: [live] });
+  assert.equal(reads, rows.length + 1);
+  assert.ok(timeline.cycles.length > 1);
+  assert.equal(timeline.series.at(-1).remainingPercent, 100);
+});
+
 test("remaining percent is the water level", () => {
   assert.equal(remainingOf(61.37), 38.63);
   assert.equal(remainingOf(0), 100);

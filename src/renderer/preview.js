@@ -52,13 +52,14 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
   });
   const trends = { day: makeSeries(24, true), week: makeSeries(7, false), month: makeSeries(30, false) };
   const modelRows = [
+    { label: "swe-2 · 速度未知", name: "swe-2", effort: "high", fast: false, fastKnown: false, count: 30, input: 1000000, output: 500000, cacheRead: 2000000, cacheWrite: 0, effective: 1500000, total: 3500000, costCents: 1110 },
     { label: "gpt-5.6-sol · Fast", name: "gpt-5.6-sol", fast: true, fastKnown: true, count: 42, input: 11_800_000, cacheRead: 36_800_000, cacheWrite: 0, output: 2_400_000, reasoning: 740_000, effective: 14_200_000, total: 51_000_000, costCents: 8_430 },
     { label: "grok-4.6 · 标准", name: "grok-4.6", fast: false, fastKnown: true, count: 35, input: 7_700_000, cacheRead: 23_900_000, cacheWrite: 0, output: 1_400_000, reasoning: 310_000, effective: 9_100_000, total: 33_000_000, costCents: 2_150 },
     { label: "claude-opus-5-5 · 标准", name: "claude-opus-5-5", effort: "medium", fast: false, fastKnown: true, count: 232, input: 464, cacheRead: 30_240_000, cacheWrite: 660_000, output: 212_000, reasoning: 0, effective: 212_464, total: 31_112_000, costCents: 1_558 },
     { label: "gpt-5.6-terra · 速度未知", name: "gpt-5.6-terra", fast: false, fastKnown: false, count: 18, input: 4_050_000, cacheRead: 12_200_000, cacheWrite: 0, output: 750_000, reasoning: 180_000, effective: 4_800_000, total: 17_000_000, costCents: 990 },
   ];
   const source = (label) => {
-    const origin = (row) => row.name.startsWith("grok") ? "Cursor" : row.name.startsWith("claude") ? "Claude Code" : "Codex";
+    const origin = (row) => row.name.startsWith("swe") ? "Devin" : row.name.startsWith("grok") ? "Cursor" : row.name.startsWith("claude") ? "Claude Code" : "Codex";
     const rows = modelRows.filter((row) => label === "全部" || origin(row) === label);
     return { label, periodLabel: "最近 30 天", eventCount: rows.reduce((sum, row) => sum + row.count, 0), costAvailable: true, costCoveragePercent: 93.4, modelBreakdowns: { coarse: rows, speed: rows, exact: rows }, trends };
   };
@@ -71,6 +72,7 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
       cursor: { ...source("Cursor"), periodLabel: modelRangeLabels[key] || modelRangeLabels.month1 },
       codex: { ...source("Codex"), periodLabel: modelRangeLabels[key] || modelRangeLabels.month1 },
       claude: { ...source("Claude Code"), periodLabel: modelRangeLabels[key] || modelRangeLabels.month1 },
+      devin: { ...source("Devin"), periodLabel: modelRangeLabels[key] || modelRangeLabels.month1 },
     },
   });
   const data = {
@@ -131,6 +133,16 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     balance: { ok: true, sampledAt: now, balances: [{ currency: "CNY", total: 42.36, toppedUp: 36.36, granted: 6 }] } };
   data.sourceStatus.deepseek = { ok: true };
   data.sources.deepseek = { ...source("DeepSeek Harness"), costAvailable: false };
+  data.devin = { planName: "Pro", files: 1, scanErrors: [],
+    tokens: { today: { effective: 1500000, total: 3500000 }, month: { total: 3500000 } },
+    costs: { month: { equivalentCostCents: 1110, coveragePercent: 100 } }, requests: { today: 30 },
+    subscription: { ok: true, cached: false, sampledAt: now, credits: { availablePromptCredits: -1 } },
+    quota: { windows: [
+      { pool: "devin-1440:preview", name: "每日", windowMinutes: 1440, usedPercent: 0, percentRemaining: 100, resetsAt: now + 8 * 3600000, sampledAt: now },
+      { pool: "devin-10080:preview", name: "每周", windowMinutes: 10080, usedPercent: 18.75, percentRemaining: 81.25, resetsAt: now + 4 * 86400000, sampledAt: now },
+    ] } };
+  data.sourceStatus.devin = { ok: true };
+  data.sources.devin = source("Devin");
   data.quotaInsights = [
     { id: "cursor-models", label: "Cursor 模型池", usedPercent: 91.24, remainingPercent: 8.76, resetsAt: data.billingCycleEnd, forecast: { status: "exhaust", exhaustionAt: now + 26 * 3_600_000 } },
     { id: "cursor-api", label: "Cursor API 池", usedPercent: 34.5, remainingPercent: 65.5, resetsAt: data.billingCycleEnd, forecast: { status: "safe", exhaustionAt: now + 35 * 86_400_000 } },
@@ -140,10 +152,13 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
     { id: "claude-10080", label: "Claude 每周", usedPercent: 15, remainingPercent: 85, resetsAt: now + 6.8 * 86_400_000, forecast: { status: "safe", exhaustionAt: now + 26 * 86_400_000 } },
   ];
   data.claude.quota.primary = data.claude.quota.windows[0];
+  data.quotaInsights.push(...data.devin.quota.windows.map(w => ({ id: `devin-${w.windowMinutes}`, label: `Devin ${w.name}`,
+    usedPercent: w.usedPercent, remainingPercent: w.percentRemaining, resetsAt: w.resetsAt, forecast: { status: "unknown", exhaustionAt: null } })));
   data.claude.quota.secondary = data.claude.quota.windows[1];
   const previewQuery = new URLSearchParams(location.search);
   const previewSettings = { opacity: 0.96, compact: false, orbMode: previewQuery.get("orb") === "1", orbPool: previewQuery.get("orbPool") || "cursor-models", orbDisplayMode: previewQuery.get("orbDisplay") || "quota", orbPoolShape: previewQuery.get("shape") || "sphere", orbPoolCombined: previewQuery.get("combined") === "1", intervalMs: 30_000, activeTab: previewQuery.get("tab") || "models", modelRange: "month1", modelPrecision: "speed", trendRange: "day", trendMetric: "total", trendBreakdown: true, trendSpeedBreakdown: previewQuery.get("speed") === "1", dataSource: "all", quotaLevelPool: previewQuery.get("pool") || "cursor-models", eventSource: "all", pricingSource: "all", tokenDisplayVersion: 2, smartDock: false, privacyMode: previewQuery.get("privacy") === "1", quotaAlerts: false, alertThreshold: 20, taskbarMeters: true, taskbarMetersSecondary: true };
   const previewEvents = [
+    { source: "devin", timestamp: now - 30000, model: "swe-2-high", effort: "high", fast: false, fastKnown: false, input: 1000000, output: 500000, cacheRead: 2000000, cacheWrite: 0, equivalentCostCents: 1110 },
     { source: "codex", timestamp: now - 90_000, model: "gpt-5.6-sol", effort: "high", fast: true, fastKnown: true, input: 120_000, output: 24_000, cacheRead: 410_000, cacheWrite: 36_000, equivalentCostCents: 86 },
     { source: "cursor", timestamp: now - 25 * 60_000, model: "grok-4.6", effort: null, fast: false, fastKnown: true, input: 88_000, output: 16_000, cacheRead: 260_000, cacheWrite: 0, equivalentCostCents: 42 },
     { source: "cursor", timestamp: now - 3 * 60 * 60_000, model: "composer-2.5", effort: null, fast: true, fastKnown: true, input: 54_000, output: 11_000, cacheRead: 190_000, cacheWrite: 8_000, equivalentCostCents: 31 },
@@ -181,6 +196,7 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
       },
     },
   };
+  previewPricingCurrent.modelsBySource.devin = { "swe-2": { standard: { short: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 } } } };
   const flattenPreviewPricing = (snapshot, source = "all") => {
     const rows = [];
     for (const [catalog, models] of Object.entries(snapshot.modelsBySource || {})) {
@@ -215,7 +231,26 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
       return { at: start + index * (current ? 11 * 86_400_000 / 23 : 30 * 86_400_000 / 19), usedPercent: used, remainingPercent: Math.max(0, 100 - used) };
     });
   };
-  const previewTimeline = (pool = "cursor-models", cycleKey = "reset:current") => ({
+  const previewTimeline = (pool = "cursor-models", cycleKey = "reset:current") => {
+    let cycles = previewCycles, series = previewSeries(cycleKey);
+    if (pool.startsWith("devin-")) {
+      const window = data.devin.quota.windows.find(w => `devin-${w.windowMinutes}` === pool);
+      const duration = window.windowMinutes * 60000;
+      cycles = [0, 1].map(index => {
+        const endAt = window.resetsAt - index * duration, startAt = endAt - duration;
+        return { key: index ? "reset:prev" : "reset:current", current: !index,
+          label: `${index ? "上期" : "当前"} · ${window.name}`, startAt, endAt, sampleCount: 24,
+          startRemaining: 100, endRemaining: index ? 60 : window.percentRemaining,
+          reference: { startAt, endAt, estimated: true } };
+      });
+      const cycle = cycles.find(c => c.key === cycleKey) || cycles[0];
+      series = Array.from({ length: 24 }, (_, index) => ({
+        at: cycle.startAt + index / 23 * (Math.min(now, cycle.endAt) - cycle.startAt),
+        remainingPercent: 100 - index / 23 * (100 - cycle.endRemaining),
+        usedPercent: index / 23 * (100 - cycle.endRemaining),
+      }));
+    }
+    return {
     pools: [
       { id: "cursor-models", label: "Cursor 模型池", hasData: true },
       { id: "other-models", label: "Cursor 三方模型池", hasData: true },
@@ -223,13 +258,15 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
       { id: "codex-10080", label: "Codex 每周", hasData: true },
       { id: "claude-300", label: "Claude 5 小时", hasData: true },
       { id: "claude-10080", label: "Claude 每周", hasData: true },
+      { id: "devin-1440", label: "Devin 每日", hasData: true },
+      { id: "devin-10080", label: "Devin 每周", hasData: true },
       { id: "deepseek-balance-CNY", label: "DeepSeek CNY 余额", hasData: true },
     ],
     pool,
-    cycles: previewCycles,
-    cycle: previewCycles.find((item) => item.key === cycleKey) || previewCycles[0],
-    series: previewSeries(cycleKey),
-  });
+    cycles,
+    cycle: cycles.find((item) => item.key === cycleKey) || cycles[0],
+    series,
+  }; };
   data.quotaTimeline = previewTimeline();
   const monthlyWindows = [data.codex.quota.primary, data.codex.quota.secondary];
   const monthlySamples = Array.from({ length: 6 }, (_, index) => ({
@@ -263,6 +300,7 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
         { source: "cursor", model: "claude-opus-4-6", costCents: 1456, input: 400000, cacheRead: 42000000, cacheWrite: 120000, output: 180000, count: 38, unpriced: 0 },
         { source: "cursor", model: "grok-4.6", costCents: 176, input: 100000, cacheRead: 6000000, cacheWrite: 0, output: 62800, count: 12, unpriced: 0 },
         { source: "codex", model: "gpt-5.6", costCents: 62, input: 100000, cacheRead: 12931400, cacheWrite: 0, output: 50000, count: 13, unpriced: 0 },
+        { source: "devin", model: "swe-2-high", costCents: 1110, input: 1000000, cacheRead: 2000000, cacheWrite: 0, output: 500000, count: 30, unpriced: 0 },
       ].filter((r) => source === "all" || r.source === source);
       rows.forEach((row) => { row.effort = row.source === "codex" ? "high" : "medium"; row.fast = row.source === "codex"; });
       const bounds = window.ReceiptModel.range(date, period);
@@ -276,7 +314,7 @@ if (!window.widget && new URLSearchParams(location.search).has("preview")) {
         ...window.TrendRange.labels(range.boundaries[index], range.boundaries[index + 1], range.bucket),
       }));
       const source = (label) => ({ label, costAvailable: true, costCoveragePercent: 100, trends: { custom: series } });
-      return { range, sources: { all: source("全部"), cursor: source("Cursor"), codex: source("Codex"), claude: source("Claude Code") } };
+      return { range, sources: { all: source("全部"), cursor: source("Cursor"), codex: source("Codex"), claude: source("Claude Code"), devin: source("Devin") } };
     },
     getQuotaTimeline: async (payload = {}) => {
       const pool = payload.pool || previewSettings.quotaLevelPool;

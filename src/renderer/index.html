@@ -58,7 +58,7 @@
           <div class="receipt-controls">
             <label>账单周期 <select id="receiptPeriod"><option value="day">日账单</option><option value="week">周账单</option><option value="month">月账单</option><option value="year">年账单</option></select></label>
             <label>日期 <input id="receiptDate" type="date" aria-label="小票日期"></label>
-            <label>来源 <select id="receiptSource"><option value="all">全部</option><option value="cursor">Cursor</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="deepseek">DeepSeek Harness</option></select></label>
+            <label>来源 <select id="receiptSource"><option value="all">全部</option><option value="cursor">Cursor</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="deepseek">DeepSeek Harness</option><option value="devin">Devin</option></select></label>
             <label>排序 <select id="receiptSort" title="模型顺序：供应商名称 A–Z → 版本从新到旧 → 同代档位从强到弱 → Fast 优先 → 思考强度从高到低"><option value="cost">费用从高到低</option><option value="model">供应商 / 模型顺序</option></select></label>
             <button type="button" id="receiptRefresh">生成小票</button>
             <button type="button" id="receiptSave" disabled>保存 PNG</button>
@@ -84,6 +84,7 @@
             <article class="quota-card codex-card" id="codexPool"></article>
             <article class="quota-card claude-card" id="claudePool"></article>
             <article class="quota-card deepseek-card" id="deepseekPool"></article>
+            <article class="quota-card devin-card" id="devinPool"></article>
           </div>
           <article class="detail-card" id="recentPanel"></article>
 
@@ -104,6 +105,7 @@
             <button type="button" data-source="codex">Codex</button>
             <button type="button" data-source="claude">Claude</button>
             <button type="button" data-source="deepseek">DeepSeek</button>
+            <button type="button" data-source="devin">Devin</button>
           </div>
           <div class="segmented precision-switch" aria-label="模型统计精度">
             <button type="button" data-precision="coarse" class="active">笼统</button>
@@ -162,6 +164,7 @@
             <button type="button" data-source="codex">Codex</button>
             <button type="button" data-source="claude">Claude</button>
             <button type="button" data-source="deepseek">DeepSeek</button>
+            <button type="button" data-source="devin">Devin</button>
           </div>
           <div class="segmented trend-range-switch" aria-label="趋势范围">
             <button type="button" data-range="day" class="active">日</button>
@@ -257,6 +260,7 @@
             <button type="button" data-event-source="codex">Codex</button>
             <button type="button" data-event-source="claude">Claude</button>
             <button type="button" data-event-source="deepseek">DeepSeek</button>
+            <button type="button" data-event-source="devin">Devin</button>
           </div>
           <div class="event-toolbar">
             <input id="eventSearch" type="search" placeholder="搜索模型或 effort" aria-label="搜索请求" />
@@ -282,6 +286,7 @@
             <button type="button" data-pricing-source="cursor">Cursor</button>
             <button type="button" data-pricing-source="codex">Codex</button>
             <button type="button" data-pricing-source="claude">Claude</button>
+            <button type="button" data-pricing-source="devin">Devin</button>
           </div>
           <label class="model-range-control">
             <span>版本</span>
@@ -445,6 +450,7 @@
     <script src="usage-charts.js"></script>
     <script src="app.js?v=25"></script>
     <script src="brand-icons.js"></script>
+    <script src="receipt-render-task.js"></script>
     <script src="receipt.js"></script>
   </body>
 </html>

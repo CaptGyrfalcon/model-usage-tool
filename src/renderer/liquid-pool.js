@@ -246,7 +246,7 @@
   }
 
   function combinedTank(pools) {
-    const listed = (Array.isArray(pools) ? pools : []).filter(Boolean);
+    const listed = (Array.isArray(pools) ? pools : []).filter(pool => pool && !(pool.source === "devin" && !capacityOf(pool)));
     const layers = [];
     const pushLayer = (id, name, tone, cents) => {
       layers.push({

@@ -28,6 +28,10 @@ npm test
 
 ## 提交前
 
+新增或补齐渠道 / agent 数据源时，先阅读 [新渠道接入指南](docs/channel-integration.md)。
+根目录 `AGENTS.md` 已建立自动发现入口；按功能矩阵覆盖统计、导出、小票、额度、
+各窗口模式、托盘 / 任务栏和演示数据，并更新文档中的渠道能力表。
+
 - 为行为变更补测试，并确保 `npm test` 通过
 - 不要提交 `node_modules`、`*.sqlite`、`session.json` 或真实用量数据
 - 不要在代码、测试夹具或截图中写入真实 token、邮箱或账单金额

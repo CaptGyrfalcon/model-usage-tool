@@ -262,6 +262,7 @@ class UsageHistory {
     this.unifyCodexDollarEquivalent();
     this.normalizeUnknownTierCosts();
     this.migrateLegacyHistory();
+    this.readCache = new (require("./history-read-cache.cjs").HistoryReadCache)(this.db);
   }
 
   normalizeUnknownTierCosts() {
@@ -555,10 +556,20 @@ class UsageHistory {
     return { updated, backupPath };
   }
 
-  getEvents({ sources, start = 0, end = Date.now() + 60_000 } = {}) {
+  getEvents({ sources, start = 0, end = Date.now() + 60_000, copy = true } = {}) {
+    if (!this.readCache) return this.readEvents({ sources, start, end });
+    const list = [...new Set(Array.isArray(sources) ? sources.filter(Boolean) : sources ? [sources] : [])].sort();
+    const events = this.readCache.get("events", JSON.stringify(list), list.length ? list : null,
+      () => this.readEvents({ sources: list, start: Number.MIN_SAFE_INTEGER, end: Number.MAX_SAFE_INTEGER }));
+    const selected = events.filter(event => event.timestamp >= Math.trunc(start) && event.timestamp < Math.trunc(end));
+    // Internal statistics read frozen rows; public callers receive detached rows.
+    return copy ? selected.map(event => ({ ...event, ...(event.billingBasis ? { billingBasis: structuredClone(event.billingBasis) } : {}) })) : selected;
+  }
+
+  readEvents({ sources, start = 0, end = Date.now() + 60_000, rows: suppliedRows } = {}) {
     const sourceList = Array.isArray(sources) ? sources.filter(Boolean) : sources ? [sources] : [];
     const whereSource = sourceList.length ? ` AND source IN (${sourceList.map(() => "?").join(",")})` : "";
-    const rows = this.db
+    const rows = suppliedRows || this.db
       .prepare(`SELECT * FROM usage_events WHERE timestamp >= ? AND timestamp < ?${whereSource} ORDER BY timestamp ASC`)
       .all(Math.trunc(start), Math.trunc(end), ...sourceList);
     return rows.map((row) => ({
@@ -731,6 +742,11 @@ class UsageHistory {
 
   pricingSnapshot(id) {
     if (id == null) return null;
+    if (this.readCache) return this.readCache.get("pricing", String(id), null, () => this.readPricingSnapshot(id));
+    return this.readPricingSnapshot(id);
+  }
+
+  readPricingSnapshot(id) {
     const row = this.db.prepare("SELECT id, data_json FROM pricing_snapshots WHERE id = ?").get(Math.trunc(finite(id)));
     if (!row) return null;
     try {
@@ -743,8 +759,7 @@ class UsageHistory {
   getEvent(source, eventKey) {
     const row = this.db.prepare("SELECT * FROM usage_events WHERE source = ? AND event_key = ?").get(String(source), String(eventKey));
     if (!row) return null;
-    return this.getEvents({ sources: source, start: Number(row.timestamp), end: Number(row.timestamp) + 1 })
-      .find((event) => event.eventKey === String(eventKey)) || null;
+    return this.readEvents({ rows: [row] })[0];
   }
 
   latestTimestamp(source) {
@@ -763,7 +778,15 @@ class UsageHistory {
     }));
   }
 
-  getQuotaSamples({ source, start = 0, end = Number.MAX_SAFE_INTEGER, includeUnreliable = false } = {}) {
+  getQuotaSamples({ source, start = 0, end = Number.MAX_SAFE_INTEGER, includeUnreliable = false, copy = true } = {}) {
+    if (!this.readCache) return this.readQuotaSamples({ source, start, end, includeUnreliable });
+    const samples = this.readCache.get("quota", JSON.stringify([source || null, includeUnreliable]), source ? [source] : null,
+      () => this.readQuotaSamples({ source, start: Number.MIN_SAFE_INTEGER, includeUnreliable }));
+    const selected = samples.filter(sample => sample.timestamp >= start && sample.timestamp < end);
+    return copy ? selected.map(sample => ({ ...sample })) : selected;
+  }
+
+  readQuotaSamples({ source, start = 0, end = Number.MAX_SAFE_INTEGER, includeUnreliable = false } = {}) {
     if (this.loadCache("codex-provenance-samples-v1")) {
       const codex = !source || source === "codex" ? this.db.prepare(`
         SELECT * FROM codex_quota_observations WHERE timestamp >= ? AND timestamp < ?
@@ -894,7 +917,7 @@ class UsageHistory {
     }
     const timestamp = Math.trunc(Number(sample.timestamp));
     // Keep reset boundaries even when both observations fall in one five-minute bucket.
-    const bucket = sample.source === "codex" || sample.source === "claude" ? timestamp : Math.floor(timestamp / 300_000) * 300_000;
+    const bucket = ["codex", "claude", "devin"].includes(sample.source) ? timestamp : Math.floor(timestamp / 300_000) * 300_000;
     this.insertQuota.run(
       String(sample.source),
       String(sample.pool),

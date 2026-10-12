@@ -27,6 +27,7 @@ function flattenPricingSnapshot(snapshot, { source = "all" } = {}) {
   if (source === "all" || source === "cursor") catalogs.push(["cursor", bySource.cursor || (source === "cursor" ? snapshot?.models : null) || {}]);
   if (source === "all" || source === "codex") catalogs.push(["codex", bySource.codex || {}]);
   if (source === "all" || source === "claude") catalogs.push(["claude", bySource.claude || {}]);
+  if (source === "all" || source === "devin") catalogs.push(["devin", bySource.devin || {}]);
   if (!catalogs.length && snapshot?.models) catalogs.push(["cursor", snapshot.models]);
 
   const rows = [];
