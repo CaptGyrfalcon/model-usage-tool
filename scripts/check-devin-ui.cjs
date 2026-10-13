@@ -14,11 +14,11 @@ app.whenReady().then(async () => {
   const output = path.join(root, "out/devin-ui"); fs.mkdirSync(output, { recursive: true });
   const checks = await win.webContents.executeJavaScript(`(async () => {
     const results = {};
-    settings.orbMode=false;settings.compact=false;settings.modelView='list';render();
+    settings.orbMode=false;settings.compact=false;settings.modelView='list';overviewExpanded.add('devin');render();
     const d = snapshot.data;
     if (!d) throw new Error('Synthetic snapshot did not load');
     results.card = document.getElementById('devinPool').innerText.includes('SWE-2');
-    results.glance = document.querySelectorAll('[data-quota-target="devinPool"]').length === 2;
+    results.glance = document.querySelectorAll('#devinPool .ov-window .ov-ring').length === 2;
     results.sources = document.querySelectorAll('[data-source="devin"]').length === 2
       && !!document.querySelector('[data-event-source="devin"]') && !!document.querySelector('[data-pricing-source="devin"]');
     results.noOverflow = document.body.scrollWidth <= innerWidth;

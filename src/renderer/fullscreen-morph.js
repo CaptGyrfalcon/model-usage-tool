@@ -1,9 +1,10 @@
 (function (root) {
   const selectors = [
     ".brand-mark", ".brand-copy", ".window-actions > button", ".sync-strip", ".tab", "footer",
-    ".overview-heading", ".quota-glance > button", ".hero-metric", ".hero-metric > span", ".hero-metric > strong", ".hero-metric > small",
-    ".quota-card", ".quota-icon", ".quota-title", ".quota-title h3", ".quota-remain", ".quota-progress", ".quota-stats", ".quota-message",
-    ".detail-card", ".section-heading", ".segmented", ".chart-card", ".chart-card svg", ".model-row", ".model-donut-panel", ".model-donut-visual",
+    ".ov-hero", ".ov-hero-main strong", ".ov-spark", ".ov-source", ".ov-logo", ".ov-source-title", ".ov-window", ".ov-ring", ".ov-recent",
+    ".detail-card", ".section-heading", ".segmented", ".chart-card", ".chart-card svg",
+    ".logo-switch", ".md-toolbar", ".md-row", ".md-logo", ".md-bar", ".md-donut-panel", ".md-donut-visual",
+    ".vw-toolbar", ".vw-stat", ".vw-card", ".lv-pool", ".ev-row", ".pr-head", ".pr-group",
   ];
   function stageGeometry(plan, fullscreen) {
     const box = fullscreen ? plan.stage : plan.widget;

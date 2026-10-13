@@ -75,6 +75,16 @@ test("donut shares source and precision filters and keeps metric sums intact", (
   assert.ok(Math.abs(cost.rows.reduce((sum, row) => sum + row.percent, 0) - 100) < 1e-10);
 });
 
+test("the all-sources donut includes Devin models like the list view", () => {
+  const sources = {
+    codex: { modelBreakdowns: { coarse: [{ name: "gpt-5.6-sol", total: 70 }] } },
+    devin: { modelBreakdowns: { coarse: [{ name: "swe-2", total: 30, fastKnown: false }] } },
+  };
+  const slices = modelSlices(sources, { source: "all" });
+  assert.equal(slices.total, 100);
+  assert.ok(slices.rows.some((row) => row.name === "swe-2"));
+});
+
 test("donut retains tiny and zero groups without NaN or arbitrary truncation", () => {
   const rows = Array.from({ length: 50 }, (_, i) => ({ name: `model-${i}`, total: i, costCents: 0 }));
   const sources = { codex: { modelBreakdowns: { coarse: rows } } };

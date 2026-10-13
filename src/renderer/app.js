@@ -199,55 +199,6 @@ function forecastText(insight) {
   return `预计 ${formatUntil(insight.forecast.exhaustionAt)}后耗尽`;
 }
 
-function claudeQuotaWindowsHtml(claude) {
-  const quota = claude?.quota;
-  const windows = claudeQuotaWindows(claude);
-  if (!windows.length) {
-    const reason = quota?.readError ? `读取失败：${quota.readError}` : "等待 Claude Code 状态栏返回额度，或 Claude 桌面版写入采样";
-    return `<div class="empty-state codex-window-empty" title="${escapeHtml(quota?.file || "")}">尚无 Claude 额度采样；${escapeHtml(reason)}</div>`;
-  }
-  const insights = quotaInsightsForDisplay(snapshot.data);
-  const rows = windows.map((window) => {
-    const used = Math.min(100, Math.max(0, Number(window.usedPercent) || 0));
-    const remaining = Math.max(0, 100 - used);
-    const estimate = window.quotaEstimate || {};
-    const reset = window.expired
-      ? "已重置 · 等待新采样"
-      : window.resetsAt ? `${window.resetEstimated === false ? "" : "约 "}${formatQuotaReset(window.resetsAt)}` : "重置时间待推算";
-    const resetRange = window.resetEstimated !== false && window.resetsLow && window.resetsHigh
-      ? `推算重置区间 ${formatQuotaReset(window.resetsLow).replace(/ 重置$/, "")} – ${formatQuotaReset(window.resetsHigh)}` : "";
-    const capacity = estimate.inferredTotalCents
-      ? `<div class="quota-credit" title="按本机 Claude Code 花费与额度变化拟合，已剔除混入其他来源用量的时段"><span>剩余 / 容量（拟合）</span><b>≈${formatUsd(estimate.inferredRemainingCents)} <em>/ ${formatUsd(estimate.inferredTotalCents)}（${formatUsd(estimate.inferredTotalLowCents)}–${formatUsd(estimate.inferredTotalHighCents)}）</em></b></div>`
-      : `<div class="quota-credit"><span>美元容量</span><b><em>数据不足，继续采样中</em></b></div>`;
-    const split = estimate.localPercent != null && estimate.otherPercent != null && !window.expired
-      ? `<div class="quota-credit" title="其他来源：Cowork、claude.ai 网页、其他设备等；按拟合容量推算"><span>本机 Claude Code / 其他来源</span><b>≈${formatPct(Math.min(used, estimate.localPercent))} <em>/ ≈${formatPct(estimate.otherPercent)}</em></b></div>` : "";
-    return `<section class="codex-window-row" aria-label="Claude ${escapeHtml(window.name)}">
-      <div class="codex-window-head">
-        <span><b>${escapeHtml(window.name)}</b><small title="${escapeHtml(resetRange)}">${escapeHtml(reset)}</small></span>
-        <strong class="${toneClass(used)}">${formatPct(remaining)} <em>剩余</em></strong>
-      </div>
-      <progress class="quota-progress claude" max="100" value="${used}" aria-label="Claude ${escapeHtml(window.name)}已用比例">${used}%</progress>
-      <div class="codex-window-stats"><span>已用 <b>${formatPct(used)}</b></span><span>剩余 <b>${formatPct(remaining)}</b></span></div>
-      <small>${window.source === "statusline" ? "Claude Code 状态栏" : "桌面版采样"} · ${escapeHtml(timeAgo(window.sampledAt))}${window.stale ? " · 数据可能滞后" : ""}</small>
-      ${capacity}
-      ${split}
-      ${forecastHtml(insights.find((item) => item.id === `claude-${Number(window.windowMinutes)}`))}
-    </section>`;
-  }).join("");
-  const fit = quota.fit || {};
-  const sampled = quota.stale
-    ? `最近采样 ${timeAgo(quota.sampledAt)}，等待来源更新`
-    : `最近采样 ${timeAgo(quota.sampledAt)}`;
-  return `<div class="codex-window-list">${rows}</div>
-    <div class="quota-message">额度为整个账号的用量（含 Cowork、网页、其他设备），按各窗口最新观测显示。Claude Code 状态栏随会话返回额度及官方重置时间；桌面版每 15 分钟采样，重置时间为推算。空闲或未触发状态栏时不会获得新的状态栏观测。美元容量为拟合：近 ${formatInteger(fit.lookbackDays)} 天、${formatInteger(fit.intervals)} 个采样区间，剔除 ${formatInteger(fit.excludedIntervals)} 个混入其他来源的区间。${escapeHtml(sampled)}。</div>`;
-}
-
-function forecastHtml(insight) {
-  if (!insight) return "";
-  const atRisk = insight.forecast?.status === "exhaust";
-  return `<div class="quota-forecast ${atRisk ? "at-risk" : "safe"}"><i></i><span>${escapeHtml(forecastText(insight))}</span></div>`;
-}
-
 function formatInteger(value) {
   return new Intl.NumberFormat("zh-CN").format(Number(value) || 0);
 }
@@ -956,234 +907,435 @@ function changeOrbPool(direction) {
   renderOrb(snapshot.data);
 }
 
-function poolHtml(pool, kind, extra = "") {
-  const used = Math.min(100, Math.max(0, Number(pool.percentUsed) || 0));
-  return `
-    <div class="quota-head">
-      <div class="quota-icon ${kind}" aria-hidden="true">${kind === "cursor" ? "C" : "AI"}</div>
-      <div class="quota-title">
-        <h3>${escapeHtml(pool.name)}</h3>
-        <span>${escapeHtml(pool.hint)}</span>
-      </div>
-      <div class="quota-remain ${toneClass(used)}"><b>${formatCursorPct(pool.percentRemaining)}</b><span>剩余</span></div>
-    </div>
-    <progress class="quota-progress ${kind}" max="100" value="${used}">${used}%</progress>
-    <div class="quota-stats">
-      <span>已用 <b>${formatCursorPct(pool.percentUsed)}</b></span>
-      <span class="token-pair">总 Token <b>${formatTokens(pool.tokens?.total)}</b><small>有效 ${formatTokens(pool.tokens?.effective)}</small></span>
-    </div>
-    ${extra}
-  `;
+const OVERVIEW_SOURCES = ["cursor", "codex", "claude", "devin", "deepseek"];
+const OVERVIEW_BRAND_ICONS = { cursor: "cursor", codex: "openai", claude: "anthropic", devin: "devin", deepseek: "deepseek" };
+const OVERVIEW_CARD_IDS = { cursor: "cursorPool", codex: "codexPool", claude: "claudePool", devin: "devinPool", deepseek: "deepseekPool" };
+const OVERVIEW_MISSING_HINTS = {
+  cursor: "Cursor 当前额度暂不可用",
+  codex: "未找到可读取的 Codex 本机会话",
+  claude: "未找到可读取的 Claude Code 本机会话",
+  devin: "未找到 Devin 数据，请先登录本机 Devin CLI；支持 DEVIN_HOME、DEVIN_SESSIONS_DB 与 DEVIN_USAGE_CREDENTIALS_FILE。",
+  deepseek: "未找到 DeepSeek Harness 数据。默认读取 ~/.dsh；支持 DSH_HOME、DSH_SESSIONS_DIR 与 DEEPSEEK_API_KEY。",
+};
+const OVERVIEW_SHORT_NAMES = { cursor: "Cursor", codex: "Codex", claude: "Claude", devin: "Devin", deepseek: "DeepSeek" };
+const overviewExpanded = new Set();
+let overviewHtml = "";
+
+function finiteOrNull(value) {
+  return value != null && value !== "" && Number.isFinite(Number(value)) ? Number(value) : null;
 }
 
-function costPartsHtml(costs) {
+function formatRemainingPct(value) {
+  const rounded = Math.round(value * 100) / 100;
+  return Number.isInteger(rounded) ? `${rounded}%` : `${rounded.toFixed(2)}%`;
+}
+
+function overviewTokens(value) {
+  return finiteOrNull(value) == null ? "—" : formatTokens(value);
+}
+
+function overviewLogo(source) {
+  const icon = window.ReceiptBrandIcons?.[OVERVIEW_BRAND_ICONS[source]];
+  return `<span class="ov-logo ${source}" aria-hidden="true">${icon ? `<img src="${icon}" alt="">` : escapeHtml(sourceName(source).slice(0, 1))}</span>`;
+}
+
+function overviewChip(text, tone = "", title = "") {
+  return `<i class="ov-chip ${tone}"${title ? ` title="${escapeHtml(title)}"` : ""}>${escapeHtml(text)}</i>`;
+}
+
+function overviewKv(label, value, title = "") {
+  return `<div class="ov-kv"${title ? ` title="${escapeHtml(title)}"` : ""}><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`;
+}
+
+function overviewGroup(title, rows, extra = "") {
+  const body = rows.filter(Boolean).join("");
+  return `<section class="ov-group">${title ? `<h4>${escapeHtml(title)}</h4>` : ""}${body ? `<dl>${body}</dl>` : ""}${extra}</section>`;
+}
+
+function overviewNotes(...notes) {
+  const items = notes.filter(Boolean);
+  return items.length ? `<div class="ov-notes">${items.map((note) => `<p>${escapeHtml(note)}</p>`).join("")}</div>` : "";
+}
+
+function overviewCostParts(costs) {
   const value = costs || {};
-  return `<div class="quota-cost-parts">
-    <span>输入 ${formatUsd(value.inputCostCents)}</span>
-    <span>写缓存 ${formatUsd(value.cacheWriteCostCents)}</span>
-    <span>读缓存 ${formatUsd(value.cacheReadCostCents)}</span>
-    <span>输出 ${formatUsd(value.outputCostCents)}</span>
-    ${value.unallocatedCostCents ? `<span>未拆分 ${formatUsd(value.unallocatedCostCents)}</span>` : ""}
-    ${value.reviewCostCents ? `<span>自动审批 ${formatUsd(value.reviewCostCents)}</span>` : ""}
+  const parts = [["输入", value.inputCostCents], ["写缓存", value.cacheWriteCostCents], ["读缓存", value.cacheReadCostCents], ["输出", value.outputCostCents]];
+  if (value.unallocatedCostCents) parts.push(["未拆分", value.unallocatedCostCents]);
+  if (value.reviewCostCents) parts.push(["自动审批", value.reviewCostCents]);
+  return `<div class="ov-parts">${parts.map(([label, cents]) => `<span>${label}<b>${formatUsd(cents)}</b></span>`).join("")}</div>`;
+}
+
+function overviewRing(remaining) {
+  const track = `<circle class="ov-ring-track" cx="18" cy="18" r="15" pathLength="100"/>`;
+  // Presentation attributes rather than inline styles: the CSP forbids style attributes.
+  const value = remaining == null ? ""
+    : `<circle class="ov-ring-value" cx="18" cy="18" r="15" pathLength="100" stroke-dasharray="${remaining.toFixed(2)} 100" transform="rotate(-90 18 18)"/>`;
+  return `<svg class="ov-ring" viewBox="0 0 36 36" aria-hidden="true">${track}${value}</svg>`;
+}
+
+function overviewWindowHtml(w) {
+  const raw = w.state ? null : finiteOrNull(w.remaining);
+  const remaining = raw == null ? null : Math.min(100, Math.max(0, raw));
+  const used = finiteOrNull(w.used) ?? (remaining == null ? null : 100 - remaining);
+  const tone = remaining == null ? "unknown" : toneClass(used);
+  const atRisk = remaining != null && w.insight?.forecast?.status === "exhaust";
+  const title = [w.title, w.sub, w.insight && forecastText(w.insight)].filter(Boolean).join(" · ");
+  return `<div class="ov-window ${tone}${atRisk ? " at-risk" : ""}" title="${escapeHtml(title)}">
+    ${overviewRing(remaining)}
+    <div class="ov-window-copy">
+      <span>${escapeHtml(w.label)}</span>
+      <b>${remaining == null ? "—" : formatRemainingPct(remaining)}${remaining == null ? "" : "<small>剩余</small>"}</b>
+      <small>${escapeHtml(w.sub || "")}</small>
+      ${atRisk ? `<em>${escapeHtml(forecastText(w.insight))}</em>` : ""}
+    </div>
   </div>`;
 }
 
-function codexQuotaWindowsHtml(codex) {
+function overviewSourceHtml(item) {
+  const open = overviewExpanded.has(item.source);
+  const id = OVERVIEW_CARD_IDS[item.source];
+  return `<article class="ov-source ${item.source}${open ? " open" : ""}" id="${id}">
+    <button type="button" class="ov-source-head" data-ov-toggle="${item.source}" aria-expanded="${open}" aria-controls="${id}Detail" title="展开或收起 ${escapeHtml(item.name)} 明细">
+      ${overviewLogo(item.source)}
+      <span class="ov-source-title"><b><span class="ov-name">${escapeHtml(item.name)}</span><span class="ov-name-short">${escapeHtml(OVERVIEW_SHORT_NAMES[item.source])}</span>${(item.chips || []).join("")}</b><small>${escapeHtml(item.sub || "")}</small></span>
+      <span class="ov-head-metric"><b>${item.metric}</b><small>${escapeHtml(item.metricLabel || "今日 Token")}</small></span>
+      <svg class="ov-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+    </button>
+    <div class="ov-windows">${item.body}</div>
+    <div class="ov-detail" id="${id}Detail">${item.detail}</div>
+  </article>`;
+}
+
+function overviewInsight(d, id, fallback) {
+  const insights = d.quotaInsights || [];
+  return insights.find((item) => item.id === id) || (fallback ? insights.find((item) => item.id === fallback) : null) || null;
+}
+
+function overviewStatusChips(state, extra = []) {
+  const chips = [];
+  if (state?.cached) chips.push(overviewChip("缓存", "warning", "使用上次成功同步的数据"));
+  else if (state?.ok === false) chips.push(overviewChip("同步失败", "danger", state.error || "本次同步失败，保留上次成功值"));
+  return chips.concat(extra);
+}
+
+function overviewCursor(d) {
+  const models = d.cursorModels;
+  const other = d.otherModels;
+  if (!models && !other) return null;
+  const modelsQuota = models?.quotaEstimate || {};
+  const modelsCost = models?.apiEquivalent || {};
+  const otherQuota = other?.quotaEstimate || {};
+  const otherCost = other?.apiEquivalent || {};
+  const included = other?.includedCents || {};
+  const modelsInsight = overviewInsight(d, "cursor-models", "cursor");
+  const otherInsight = overviewInsight(d, "cursor-api", "cursor");
+  const poolWindow = (pool, label, sub, insight) => pool
+    ? { label, used: pool.percentUsed, remaining: finiteOrNull(pool.percentRemaining) ?? (finiteOrNull(pool.percentUsed) == null ? null : 100 - Number(pool.percentUsed)), sub, insight, title: `${label} · ${pool.hint || ""}` }
+    : { label, state: "unknown", sub: "暂不可用" };
+  const windows = [
+    poolWindow(models, "Cursor 模型", `已用 ${formatUsd(modelsQuota.usedCents)} / ${modelsQuota.inferredTotalCents == null ? "待确认" : formatUsd(modelsQuota.inferredTotalCents)}`, modelsInsight),
+    poolWindow(other, "三方模型", `已计 ${formatUsd(included.used)} / ${formatUsd(included.limit ?? otherQuota.packageTotalCents)}`, otherInsight),
+  ];
+  const detail = [
+    models ? overviewGroup(`Cursor 模型 · ${models.hint || "Grok / Composer"}`, [
+      overviewKv("已用 / 套餐额度", `${formatUsd(modelsQuota.usedCents)} <em>/ ${modelsQuota.inferredTotalCents == null ? "池总额待确认" : formatUsd(modelsQuota.inferredTotalCents)}</em>`),
+      overviewKv("剩余额度", formatUsd(modelsQuota.inferredRemainingCents)),
+      overviewKv("本周期 API 等效", formatUsd(modelsCost.equivalentCostCents)),
+      overviewKv("总 Token / 有效", `${formatTokens(models.tokens?.total)} <em>/ ${formatTokens(models.tokens?.effective)}</em>`),
+      modelsInsight && overviewKv("耗尽预测", escapeHtml(forecastText(modelsInsight))),
+    ], overviewCostParts(modelsCost) + overviewNotes(models.message)) : "",
+    other ? overviewGroup(`三方模型 · ${other.hint || "Claude / GPT 等"}`, [
+      overviewKv("官方已计 / 套餐额度", `${formatUsd(included.used)} <em>/ ${formatUsd(included.limit ?? otherQuota.packageTotalCents)}</em>`),
+      overviewKv("第三方模型 API 等效", formatUsd(otherCost.equivalentCostCents)),
+      overviewKv(`按 ${formatCursorPct(other.percentUsed)} 反推池总额`, formatUsd(otherQuota.inferredTotalCents)),
+      overviewKv("总 Token / 有效", `${formatTokens(other.tokens?.total)} <em>/ ${formatTokens(other.tokens?.effective)}</em>`),
+      otherInsight && overviewKv("耗尽预测", escapeHtml(forecastText(otherInsight))),
+    ], overviewCostParts(otherCost) + overviewNotes(d.onDemand?.enabled ? `按需已用 ${formatUsd(d.onDemand.usedCents)}${d.onDemand.limitCents != null ? ` · 上限 ${formatUsd(d.onDemand.limitCents)}` : ""}` : "")) : "",
+  ].join("");
+  const reset = formatQuotaReset(d.billingCycleEnd);
+  return {
+    source: "cursor", name: "Cursor", sub: [d.planName, reset || "账单周期"].filter(Boolean).join(" · "),
+    chips: overviewStatusChips(d.sourceStatus?.cursor),
+    metric: overviewTokens(d.tokens?.today?.total),
+    body: windows.map(overviewWindowHtml).join(""), detail,
+  };
+}
+
+function overviewCodex(d) {
+  const codex = d.codex;
+  if (!codex) return null;
   const windows = codexQuotaWindows(codex);
-  const insights = quotaInsightsForDisplay(snapshot.data);
+  const insights = quotaInsightsForDisplay(d);
   const pending = insights.filter((item) => item.pending && String(item.id).startsWith("codex-"));
-  if (!windows.length && !pending.length) return `<div class="empty-state codex-window-empty">当前套餐额度窗口暂不可用</div>`;
-  const windowRows = windows.map((quota) => {
+  const cost = codex.apiEquivalent || {};
+  const rows = windows.map((quota) => {
     const used = Math.min(100, Math.max(0, Number(quota.usedPercent) || 0));
-    const remaining = Number.isFinite(Number(quota.percentRemaining)) ? Number(quota.percentRemaining) : Math.max(0, 100 - used);
-    const name = quota.name || (quota.windowMinutes ? `${quota.windowMinutes} 分钟额度` : "额度窗口");
-    const reset = quota.expired
-      ? "已重置 · 等待新请求同步"
-      : formatQuotaReset(quota.resetsAt) || "等待重置时间";
-    const insight = insights.find((item) => item.id === `codex-${Number(quota.windowMinutes)}`);
-    return `<section class="codex-window-row" aria-label="${escapeHtml(name)}">
-      <div class="codex-window-head">
-        <span><b>${escapeHtml(name)}</b><small>${escapeHtml(reset)}</small></span>
-        <strong class="${toneClass(used)}">${formatPct(remaining)} <em>剩余</em></strong>
-      </div>
-      <progress class="quota-progress codex" max="100" value="${used}" aria-label="${escapeHtml(name)}已用比例">${used}%</progress>
-      <div class="codex-window-stats"><span>已用 <b>${formatPct(used)}</b></span><span>剩余 <b>${formatPct(remaining)}</b></span></div>
-      ${quota.quotaEstimate?.estimateStatus === "local-dollar-usage" ? `<div class="quota-credit"><span>按累计美元消耗计算剩余</span><b>${formatUsd(quota.quotaEstimate.inferredRemainingCents)} / ${formatUsd(quota.quotaEstimate.inferredTotalCents)}</b></div>` : ""}
-      ${forecastHtml(insight)}
-    </section>`;
+    return {
+      quota,
+      label: quota.name || (quota.windowMinutes ? `${quota.windowMinutes} 分钟额度` : "额度窗口"),
+      used,
+      remaining: finiteOrNull(quota.percentRemaining) ?? Math.max(0, 100 - used),
+      sub: quota.expired ? "已重置 · 等待新请求同步" : formatQuotaReset(quota.resetsAt) || "等待重置时间",
+      insight: insights.find((item) => item.id === `codex-${Number(quota.windowMinutes)}`),
+    };
+  });
+  const cells = rows.concat(pending.map((insight) => ({ label: insight.label.replace(/^Codex\s*/, ""), state: "pending", sub: "保留窗口 · 等待下次响应同步" })));
+  const windowGroups = rows.map((row) => {
+    const estimate = row.quota.quotaEstimate;
+    return overviewGroup(row.label, [
+      estimate?.estimateStatus === "local-dollar-usage"
+        && overviewKv("按累计美元消耗剩余", `${formatUsd(estimate.inferredRemainingCents)} <em>/ ${formatUsd(estimate.inferredTotalCents)}</em>`),
+      overviewKv("耗尽预测", escapeHtml(forecastText(row.insight))),
+    ]);
   }).join("");
-  const pendingRows = pending.map((insight) => `<section class="codex-window-row pending" aria-label="${escapeHtml(insight.label)}等待同步">
-    <div class="codex-window-head">
-      <span><b>${escapeHtml(insight.label.replace(/^Codex\s*/, ""))}</b><small>暂未包含在最新响应中</small></span>
-      <strong>— <em>剩余</em></strong>
+  const detail = windowGroups + overviewGroup("本周期", [
+    overviewKv("短周期总 Token / 有效", `${formatTokens(codex.tokens?.period?.total)} <em>/ ${formatTokens(codex.tokens?.period?.effective)}</em>`),
+    overviewKv("本周期本地成本（假设价格）", formatUsdRange(cost.equivalentCostLowCents, cost.equivalentCostHighCents)),
+  ], overviewCostParts(cost) + overviewNotes(
+    "Pro5x 周额度按 $500、Plus 按 $100；非官方金额。自动审批每完整 turn $0.01，输入／缓存／输出均按假设价，未知 Fast 按普通。余额按官方百分比折算，与本地累计成本分别展示。",
+    `${codex.periodLabel || "当前周期"} · ${formatInteger(codex.eventCount)} 次 · tier：服务端 ${formatInteger(codex.tierEvidence?.response)} / 本地 ${formatInteger(codex.tierEvidence?.local)} / 未知 ${formatInteger(codex.tierEvidence?.unknown)} · ${formatInteger(codex.files)} 个本地会话文件`,
+  ));
+  return {
+    source: "codex", name: "Codex", sub: `${codex.planName || "Codex"} · 周额度按累计美元消耗计算`,
+    chips: overviewStatusChips(d.sourceStatus?.codex),
+    metric: overviewTokens(codex.tokens?.today?.total),
+    body: cells.length ? cells.map(overviewWindowHtml).join("") : `<p class="ov-empty">当前套餐额度窗口暂不可用</p>`,
+    detail,
+  };
+}
+
+function overviewClaude(d) {
+  const claude = d.claude;
+  if (!claude) return null;
+  const quota = claude.quota;
+  const windows = claudeQuotaWindows(claude);
+  const insights = quotaInsightsForDisplay(d);
+  const costs = claude.costs || {};
+  const rows = windows.map((window) => {
+    const used = Math.min(100, Math.max(0, Number(window.usedPercent) || 0));
+    const range = window.resetEstimated !== false && window.resetsLow && window.resetsHigh
+      ? `推算重置区间 ${formatQuotaReset(window.resetsLow).replace(/ 重置$/, "")} – ${formatQuotaReset(window.resetsHigh)}` : "";
+    return {
+      window, used, label: window.name, remaining: Math.max(0, 100 - used),
+      sub: window.expired ? "已重置 · 等待新采样"
+        : window.resetsAt ? `${window.resetEstimated === false ? "" : "约 "}${formatQuotaReset(window.resetsAt)}` : "重置时间待推算",
+      title: range,
+      insight: insights.find((item) => item.id === `claude-${Number(window.windowMinutes)}`),
+    };
+  });
+  const windowGroups = rows.map((row) => {
+    const estimate = row.window.quotaEstimate || {};
+    return overviewGroup(row.label, [
+      overviewKv("剩余 / 容量（拟合）", estimate.inferredTotalCents
+        ? `≈${formatUsd(estimate.inferredRemainingCents)} <em>/ ${formatUsd(estimate.inferredTotalCents)}（${formatUsd(estimate.inferredTotalLowCents)}–${formatUsd(estimate.inferredTotalHighCents)}）</em>`
+        : "<em>数据不足，继续采样中</em>", "按本机 Claude Code 花费与额度变化拟合，已剔除混入其他来源用量的时段"),
+      estimate.localPercent != null && estimate.otherPercent != null && !row.window.expired
+        && overviewKv("本机 Claude Code / 其他来源", `≈${formatPct(Math.min(row.used, estimate.localPercent))} <em>/ ≈${formatPct(estimate.otherPercent)}</em>`, "其他来源：Cowork、claude.ai 网页、其他设备等；按拟合容量推算"),
+      overviewKv("耗尽预测", escapeHtml(forecastText(row.insight))),
+      row.title && overviewKv("推算重置区间", escapeHtml(row.title.replace(/^推算重置区间 /, ""))),
+      overviewKv("采样", escapeHtml(`${row.window.source === "statusline" ? "Claude Code 状态栏" : "桌面版采样"} · ${timeAgo(row.window.sampledAt)}${row.window.stale ? " · 数据可能滞后" : ""}`)),
+    ]);
+  }).join("");
+  const fit = quota?.fit || {};
+  const quotaNote = windows.length
+    ? `额度为整个账号的用量（含 Cowork、网页、其他设备），按各窗口最新观测显示。Claude Code 状态栏随会话返回额度及官方重置时间；桌面版每 15 分钟采样，重置时间为推算。空闲或未触发状态栏时不会获得新的状态栏观测。美元容量为拟合：近 ${formatInteger(fit.lookbackDays)} 天、${formatInteger(fit.intervals)} 个采样区间，剔除 ${formatInteger(fit.excludedIntervals)} 个混入其他来源的区间。${quota.stale ? `最近采样 ${timeAgo(quota.sampledAt)}，等待来源更新` : `最近采样 ${timeAgo(quota.sampledAt)}`}。`
+    : "";
+  const emptyReason = quota?.readError ? `读取失败：${quota.readError}` : "等待 Claude Code 状态栏返回额度，或 Claude 桌面版写入采样";
+  const extraChips = [];
+  if (quota?.readError) extraChips.push(overviewChip("读取失败", "danger", quota.readError));
+  else if (quota?.stale) extraChips.push(overviewChip("采样滞后", "warning", `最近采样 ${timeAgo(quota.sampledAt)}，等待来源更新`));
+  const detail = windowGroups
+    + overviewGroup("本机花费（API 标价等效）", [
+      overviewKv("今日", `${formatUsd(costs.today?.equivalentCostCents)} <em>· ${formatTokens(claude.tokens?.today?.total)} Token · 有效 ${formatTokens(claude.tokens?.today?.effective)} · ${formatInteger(claude.requests?.today)} 次</em>`),
+      overviewKv("近 5 小时", `${formatUsd(costs.h5?.equivalentCostCents)} <em>· ${formatTokens(claude.tokens?.h5?.total)} Token</em>`),
+      overviewKv("近 7 天", `${formatUsd(costs.d7?.equivalentCostCents)} <em>· ${formatInteger(claude.requests?.d7)} 次</em>`),
+      overviewKv("近 30 天", formatUsd(costs.d30?.equivalentCostCents)),
+    ], overviewCostParts(costs.d7) + overviewNotes(
+      quotaNote,
+      "金额为 API 标价等效；Pro／Max 订阅不按此扣费，仅用于和额度百分比对照拟合。",
+      `${formatInteger(claude.files)} 个本地会话文件（含子代理） · 计价覆盖 ${formatPct(costs.d30?.coveragePercent ?? 100)}`,
+    ));
+  return {
+    source: "claude", name: "Claude Code", sub: "本机会话 · 按 Anthropic 官方标价估算",
+    chips: overviewStatusChips(d.sourceStatus?.claude, extraChips),
+    metric: overviewTokens(claude.tokens?.today?.total),
+    body: rows.length ? rows.map(overviewWindowHtml).join("")
+      : `<p class="ov-empty" title="${escapeHtml(quota?.file || "")}">尚无 Claude 额度采样；${escapeHtml(emptyReason)}</p>`,
+    detail,
+  };
+}
+
+function overviewDevin(d) {
+  const devin = d.devin;
+  if (!devin) return null;
+  const subscription = devin.subscription || {};
+  const windows = (devin.quota?.windows || []).map((w) => ({
+    label: w.name, used: w.usedPercent, remaining: w.percentRemaining,
+    state: w.expired ? "expired" : null,
+    sub: w.expired ? "已重置 · 等待新采样" : formatQuotaReset(w.resetsAt) || "重置时间未知",
+    insight: overviewInsight(d, `devin-${w.windowMinutes}`),
+  }));
+  const error = subscription.error || devin.scanErrors?.[0];
+  const chips = overviewStatusChips(d.sourceStatus?.devin?.ok === false ? d.sourceStatus.devin : { cached: subscription.cached },
+    error ? [overviewChip("异常", "danger", error)] : []);
+  const detail = overviewGroup("", [
+    overviewKv("今日 Token", `${formatTokens(devin.tokens?.today?.total)} <em>· ${formatInteger(devin.requests?.today)} 次</em>`),
+    overviewKv("近 30 天 Token", formatTokens(devin.tokens?.month?.total)),
+    overviewKv("近 30 天 API 等值估算", formatUsd(devin.costs?.month?.equivalentCostCents)),
+    ...Object.entries(subscription.credits || {}).map(([key, value]) => overviewKv(devinCreditLabel(key), value === -1 ? "不限 / 不按 credits 计费" : formatInteger(value))),
+  ], overviewNotes(
+    "额度包含整个账号；Token 来自本机 CLI。SWE-2 按官方原价展示等值费用，免费活动期间水位遵循服务端实际扣费，恢复收费后自动跟随。其他缺少单价的模型保持未计价；速度证据缺失时显示未知。",
+    `${subscription.sampledAt ? `额度采样 ${formatDateTime(subscription.sampledAt)}${subscription.cached ? " · 缓存" : ""}` : "额度待同步"} · 计价覆盖 ${formatPct(devin.costs?.month?.coveragePercent ?? 100)}`,
+    error,
+  ));
+  return {
+    source: "devin", name: "Devin", sub: `${devin.planName || "Devin"} · 账户订阅额度`, chips,
+    metric: overviewTokens(devin.tokens?.today?.total),
+    body: windows.length ? windows.map(overviewWindowHtml).join("") : `<p class="ov-empty">额度待同步</p>`,
+    detail,
+  };
+}
+
+function overviewDeepseek(d) {
+  const deepseek = d.deepseek;
+  if (!deepseek) return null;
+  const wallet = deepseek.balance;
+  const balances = wallet?.balances || [];
+  const chips = [];
+  if (wallet?.error) chips.push(overviewChip("余额异常", "danger", wallet.error));
+  else if (wallet?.cached) chips.push(overviewChip("缓存", "warning", "余额来自上次成功查询"));
+  const body = balances.length ? balances.map((balance) => `<div class="ov-window ov-balance">
+      <div class="ov-window-copy">
+        <span>${escapeHtml(balance.currency)} 余额</span>
+        <b>${formatBalance(balance.total, balance.currency)}</b>
+        <small>充值 ${formatBalance(balance.toppedUp, balance.currency)} · 赠送 ${formatBalance(balance.granted, balance.currency)}</small>
+      </div>
+      <button type="button" class="ov-link" data-ov-balance="${escapeHtml(balance.currency)}" title="在水位页查看 ${escapeHtml(balance.currency)} 余额趋势">趋势</button>
+    </div>`).join("") : `<p class="ov-empty">${escapeHtml(wallet?.error || "账户余额待同步")}</p>`;
+  const history = deepseek.historyImport;
+  const detail = overviewGroup("", [
+    overviewKv("今日 Token", `${formatTokens(deepseek.tokens?.today?.total)} <em>· ${formatInteger(deepseek.requests?.today)} 次</em>`),
+    overviewKv("近 30 天 Token", formatTokens(deepseek.tokens?.month?.total)),
+    history && overviewKv("已补官方历史", `${formatInteger(history.requests)} 次 <em>· ${formatTokens(history.tokens)} Token${(history.costs || []).map((cost) => ` · 实际消费 ${formatBalance(cost.amount, cost.currency)}`).join("")}</em>`),
+  ], overviewNotes(
+    `${wallet?.sampledAt ? `余额采样 ${formatDateTime(wallet.sampledAt)} · ` : ""}${formatInteger(deepseek.files)} 个本机会话文件`,
+    wallet?.error,
+    deepseek.scanErrors?.[0],
+    `${history ? "历史 Token 来自官方账户日汇总，包含其他客户端调用；已覆盖日期不重复累计本机 Harness 记录。" : "Token 来自本机 Harness；余额包含整个账户的消费与充值。"}水位页可按日、周、月、年查看余额变化。`,
+  ));
+  return {
+    source: "deepseek", name: "DeepSeek Harness", sub: "API 按量计费 · 账户余额", chips,
+    metric: overviewTokens(deepseek.tokens?.today?.total), body, detail,
+  };
+}
+
+function trendSum(series, key) {
+  return (Array.isArray(series) ? series : []).reduce((sum, item) => sum + (Number(item?.[key]) || 0), 0);
+}
+
+function overviewHeroHtml(d) {
+  const today = d.combined?.tokens?.today || {};
+  const hour = d.combined?.tokens?.h1 || {};
+  const all = d.sources?.all;
+  const series = Array.isArray(all?.trends?.day) ? all.trends.day : [];
+  const costKnown = series.length > 0 && all?.costAvailable !== false;
+  const coverage = Number(all?.costCoveragePercent);
+  const partial = costKnown && Number.isFinite(coverage) && coverage < 100;
+  const now = Date.now();
+  const peak = Math.max(0, ...series.map((item) => Number(item.total) || 0));
+  const bars = series.map((item, index) => {
+    const value = Number(item.total) || 0;
+    const height = peak > 0 && value > 0 ? Math.max(2, (value / peak) * 34) : 1.2;
+    const state = item.start > now ? "future" : item.end > now ? "current" : value > 0 ? "" : "idle";
+    return `<rect class="${state}" x="${index * 10 + 1.5}" y="${(36 - height).toFixed(2)}" width="7" height="${height.toFixed(2)}" rx="1.5"><title>${escapeHtml(item.label || "")} · ${formatTokens(value)} Token</title></rect>`;
+  }).join("");
+  const shares = OVERVIEW_SOURCES.map((source) => ({ source, value: trendSum(d.sources?.[source]?.trends?.day, "total") }))
+    .filter((item) => item.value > 0);
+  const shareTotal = shares.reduce((sum, item) => sum + item.value, 0);
+  let offset = 0;
+  const shareBar = shares.map((item) => {
+    const width = (item.value / shareTotal) * 100;
+    const rect = `<rect class="${item.source}" x="${offset.toFixed(3)}" y="0" width="${width.toFixed(3)}" height="4"/>`;
+    offset += width;
+    return rect;
+  }).join("");
+  const shareLegend = shares.sort((a, b) => b.value - a.value).map((item) =>
+    `<span class="${item.source}"><i></i>${escapeHtml(OVERVIEW_SHORT_NAMES[item.source])}<b>${Math.round((item.value / shareTotal) * 100)}%</b></span>`).join("");
+  return `<section class="ov-hero" aria-label="今日用量">
+    <div class="ov-hero-top">
+      <div class="ov-hero-main">
+        <span>今日总 Token<small>含缓存</small></span>
+        <strong>${formatTokens(today.total)}</strong>
+      </div>
+      <div class="ov-hero-cost"${partial ? ` title="部分请求缺少单价，未计入；30 天计价覆盖 ${formatPct(coverage)}"` : ""}>
+        <span>今日美元等效</span>
+        <b>${costKnown ? `${partial ? "≈" : ""}${formatUsd(trendSum(series, "equivalentCostCents"))}` : "—"}</b>
+      </div>
     </div>
-    <div class="quota-forecast"><i></i><span>保留窗口 · 等待下次响应同步</span></div>
-  </section>`).join("");
-  return `<div class="codex-window-list">${windowRows}${pendingRows}</div>`;
+    <div class="ov-hero-stats">
+      <span>有效<b>${formatTokens(today.effective)}</b></span>
+      <span>读缓存<b>${formatTokens(today.cacheRead)}</b></span>
+      <span>写缓存<b>${formatTokens(today.cacheWrite)}</b></span>
+      <span>近 1 小时<b>${formatTokens(hour.total)}</b></span>
+    </div>
+    ${series.length ? `<svg class="ov-spark" viewBox="0 0 240 36" preserveAspectRatio="none" role="img" aria-label="今日每小时总 Token">${bars}</svg>
+    <div class="ov-spark-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>` : ""}
+    ${shareTotal > 0 ? `<svg class="ov-share" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true">${shareBar}</svg>
+    <div class="ov-share-legend" aria-label="今日各来源 Token 占比">${shareLegend}</div>` : ""}
+  </section>`;
+}
+
+function overviewRecentHtml(d) {
+  const last = d.combined?.lastEvent || d.lastEvent;
+  if (!last) return `<p class="ov-recent ov-empty">本周期还没有可显示的用量事件</p>`;
+  const tokens = last.tokens || {};
+  const parts = [
+    ["input", "输入", Number(tokens.input) || 0, null],
+    ["cache-write", "写缓存", Number(tokens.cacheWrite) || 0, last.cacheWriteCostCents],
+    ["cache-read", "读缓存", Number(tokens.cacheRead) || 0, last.cacheReadCostCents],
+    ["output", "输出", Number(tokens.output) || 0, null],
+  ];
+  const total = parts.reduce((sum, part) => sum + part[2], 0);
+  const effective = parts[0][2] + parts[3][2];
+  let offset = 0;
+  const bar = total > 0 ? parts.map(([key, , value]) => {
+    const width = (value / total) * 100;
+    const rect = `<rect class="${key}" x="${offset.toFixed(3)}" y="0" width="${width.toFixed(3)}" height="4"/>`;
+    offset += width;
+    return rect;
+  }).join("") : "";
+  return `<section class="ov-recent" aria-label="最近一次调用">
+    <div class="ov-recent-head">
+      ${overviewLogo(last.source || "cursor")}
+      <span class="ov-source-title"><b>${escapeHtml(window.ModelDisplay.format(last))}</b><small>${sourceName(last.source)} · ${escapeHtml(timeAgo(last.at))}</small></span>
+      <span class="ov-head-metric"><b>${last.equivalentCostCents == null ? "—" : formatUsd(last.equivalentCostCents)}</b><small>${last.equivalentCostCents == null ? "价格不可用" : "美元等效"}</small></span>
+    </div>
+    <svg class="ov-share ov-composition" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true">${bar}</svg>
+    <div class="ov-share-legend ov-composition-legend">
+      <span class="total">总<b>${formatTokens(total)}</b></span>
+      <span class="total">有效<b>${formatTokens(effective)}</b></span>
+      ${parts.map(([key, label, value, cents]) => `<span class="${key}"><i></i>${label}<b>${formatTokens(value)}</b>${cents == null ? "" : `<em>${formatUsd(cents)}</em>`}</span>`).join("")}
+    </div>
+  </section>`;
 }
 
 function renderOverview(d) {
   renderVerification(d?.verification);
-  const names = { "cursor-models": "Cursor 模型", "cursor-api": "三方模型", "codex-window-300": "Codex 5h", "codex-window-10080": "Codex 7d",
-    "claude-window-300": "Claude 5h", "claude-window-10080": "Claude 7d" };
-  $("quotaGlance").innerHTML = quotaPools(d).map((pool) => {
-    const target = pool.source === "devin" ? "devinPool" : pool.source === "codex" ? "codexPool" : pool.source === "claude" ? "claudePool"
-      : pool.id === "cursor-models" ? "cursorPool" : "otherPool";
-    const remaining = Math.min(100, Math.max(0, Number(pool.remaining) || 0));
-    // Presentation attributes rather than inline styles: the CSP forbids style attributes.
-    const ring = `<svg class="glance-ring" viewBox="0 0 40 40" aria-hidden="true"><circle class="glance-track" cx="20" cy="20" r="17" pathLength="100"/><circle class="glance-value" cx="20" cy="20" r="17" pathLength="100" stroke-dasharray="${remaining.toFixed(2)} 100" transform="rotate(-90 20 20)"/></svg>`;
-    return `<button type="button" class="${toneClass(pool.used)}" data-quota-target="${target}" title="${escapeHtml(pool.name)} · 点击查看详情">${ring}<b>${pool.precision === 2 ? formatCursorPct(pool.remaining) : formatPct(pool.remaining)}</b><span>${escapeHtml(names[pool.id] || pool.name)}</span><small>剩余</small></button>`;
-  }).join("");
-  const combined = d.combined || {};
-  const codex = d.codex;
-  const cursorIncluded = d.otherModels?.includedCents || {};
-  const codexCost = codex?.apiEquivalent || {};
-  const cursorPoolCost = d.cursorModels?.apiEquivalent || {};
-  const cursorPoolQuota = d.cursorModels?.quotaEstimate || {};
-  const otherPoolCost = d.otherModels?.apiEquivalent || {};
-  const otherPoolQuota = d.otherModels?.quotaEstimate || {};
-  const cursorModelInsight = (d.quotaInsights || []).find((item) => item.id === "cursor-models")
-    || (d.quotaInsights || []).find((item) => item.id === "cursor");
-  const otherModelInsight = (d.quotaInsights || []).find((item) => item.id === "cursor-api")
-    || (d.quotaInsights || []).find((item) => item.id === "cursor");
-  $("heroGrid").innerHTML = `
-    <div class="hero-metric primary"><span>今日总 Token（含缓存）</span><strong>${formatTokens(combined.tokens?.today?.total)}</strong><small>有效 ${formatTokens(combined.tokens?.today?.effective)} · 写缓存 ${formatTokens(combined.tokens?.today?.cacheWrite)} · 读缓存 ${formatTokens(combined.tokens?.today?.cacheRead)} · 近 1 小时总 ${formatTokens(combined.tokens?.h1?.total)}</small></div>
-    <div class="hero-metric"><span>Cursor 模型 · 已用</span><strong>${formatUsd(cursorPoolQuota.usedCents)}</strong><small>${cursorPoolQuota.inferredTotalCents == null ? "池总额待确认" : `套餐额度 ${formatUsd(cursorPoolQuota.inferredTotalCents)}`}</small></div>
-    <div class="hero-metric"><span>三方模型 · 已用</span><strong>${formatUsd(otherPoolQuota.usedCents)}</strong><small>套餐总额 ${formatUsd(otherPoolQuota.packageTotalCents)} · 官方已计 ${formatUsd(cursorIncluded.used)}</small></div>
-  `;
-
-  if (d.cursorModels) {
-    $("cursorPool").innerHTML = poolHtml(
-      d.cursorModels,
-      "cursor",
-      `<div class="quota-credit"><span>本周期 API 等效</span><b>${formatUsd(cursorPoolCost.equivalentCostCents)}</b></div>
-       ${costPartsHtml(cursorPoolCost)}
-       <div class="quota-credit"><span>剩余额度 / 套餐额度</span><b>${formatUsd(cursorPoolQuota.inferredRemainingCents)} / ${formatUsd(cursorPoolQuota.inferredTotalCents)}</b></div>
-       ${forecastHtml(cursorModelInsight)}
-       ${d.cursorModels.message ? `<div class="quota-message">${escapeHtml(d.cursorModels.message)}</div>` : ""}`
-    );
-  } else {
-    $("cursorPool").innerHTML = `<div class="empty-state">Cursor 当前额度暂不可用</div>`;
-  }
-
-  if (d.otherModels) {
-    const included = d.otherModels.includedCents || {};
-    const otherExtra = `
-      <div class="quota-credit">
-        <span>套餐额度</span>
-        <b>${formatUsd(included.used)} <em>/ ${formatUsd(included.limit)}</em></b>
-      </div>
-      ${forecastHtml(otherModelInsight)}
-      <div class="quota-credit">
-        <span>第三方模型 API 等效</span>
-        <b>${formatUsd(otherPoolCost.equivalentCostCents)}</b>
-      </div>
-      ${costPartsHtml(otherPoolCost)}
-      <div class="quota-credit">
-        <span>按 ${formatCursorPct(d.otherModels.percentUsed)} 反推池总额</span>
-        <b>${formatUsd(otherPoolQuota.inferredTotalCents)}</b>
-      </div>
-      ${d.onDemand?.enabled ? `<div class="quota-message">按需已用 ${formatUsd(d.onDemand.usedCents)}${d.onDemand.limitCents != null ? ` · 上限 ${formatUsd(d.onDemand.limitCents)}` : ""}</div>` : ""}
-    `;
-    $("otherPool").innerHTML = poolHtml(d.otherModels, "other", otherExtra);
-  } else {
-    $("otherPool").innerHTML = `<div class="empty-state">Cursor 其他模型额度暂不可用</div>`;
-  }
-
-  const claude = d.claude;
-  if (claude) {
-    const today = claude.costs?.today || {};
-    const week = claude.costs?.d7 || {};
-    const short = claude.quota?.primary;
-    $("claudePool").innerHTML = `
-      <div class="quota-head">
-        <div class="quota-icon claude" aria-hidden="true">CC</div>
-        <div class="quota-title"><h3>Claude Code</h3><span>本机会话 · 按 Anthropic 官方标价估算</span></div>
-        ${short
-          ? `<div class="quota-remain ${toneClass(short.usedPercent)}"><b>${formatPct(short.percentRemaining)}</b><span>5 小时剩余</span></div>`
-          : `<div class="quota-remain"><b>${formatUsd(today.equivalentCostCents)}</b><span>今日</span></div>`}
-      </div>
-      ${claudeQuotaWindowsHtml(claude)}
-      <div class="quota-credit"><span>今日</span><b>${formatUsd(today.equivalentCostCents)}</b></div>
-      <div class="quota-stats"><span>今日总 Token <b>${formatTokens(claude.tokens?.today?.total)}</b></span><span class="token-pair">有效 <b>${formatTokens(claude.tokens?.today?.effective)}</b><small>${formatInteger(claude.requests?.today)} 次</small></span></div>
-      <div class="quota-credit"><span>近 5 小时</span><b>${formatUsd(claude.costs?.h5?.equivalentCostCents)} <em>· ${formatTokens(claude.tokens?.h5?.total)} Token</em></b></div>
-      <div class="quota-credit"><span>近 7 天</span><b>${formatUsd(week.equivalentCostCents)} <em>· ${formatInteger(claude.requests?.d7)} 次</em></b></div>
-      ${costPartsHtml(week)}
-      <div class="quota-credit"><span>近 30 天</span><b>${formatUsd(claude.costs?.d30?.equivalentCostCents)}</b></div>
-      <div class="quota-message">金额为 API 标价等效；Pro／Max 订阅不按此扣费，仅用于和额度百分比对照拟合。</div>
-      <div class="quota-message">${formatInteger(claude.files)} 个本地会话文件（含子代理） · 计价覆盖 ${formatPct(claude.costs?.d30?.coveragePercent ?? 100)}</div>
-    `;
-  } else {
-    $("claudePool").innerHTML = `<div class="empty-state">未找到可读取的 Claude Code 本机会话</div>`;
-  }
-
-  const devin = d.devin;
-  $("devinPool").innerHTML = devin ? `
-    <div class="quota-head"><div class="quota-icon devin" aria-hidden="true">D</div>
-      <div class="quota-title"><h3>Devin</h3><span>${escapeHtml(devin.planName)} · 账户订阅额度</span></div></div>
-    ${(devin.quota?.windows || []).map(w => `<section class="codex-window-row">
-      <div class="codex-window-head"><span><b>${escapeHtml(w.name)}</b><small>${escapeHtml(w.expired ? "已重置 · 等待新采样" : formatQuotaReset(w.resetsAt) || "重置时间未知")}</small></span>
-      <strong>${w.expired ? "—" : formatCursorPct(w.percentRemaining)} <em>剩余</em></strong></div>
-      <progress class="quota-progress devin" max="100" value="${w.usedPercent}" aria-label="Devin ${escapeHtml(w.name)}已用比例"></progress>
-      ${forecastHtml((d.quotaInsights || []).find(i => i.id === `devin-${w.windowMinutes}`))}</section>`).join("")}
-    <div class="quota-stats"><span>今日总 Token <b>${formatTokens(devin.tokens?.today?.total)}</b></span><span>${formatInteger(devin.requests?.today)} 次</span></div>
-    <div class="quota-credit"><span>近 30 天 Token</span><b>${formatTokens(devin.tokens?.month?.total)}</b></div>
-    <div class="quota-credit"><span>近 30 天 API 等值估算</span><b>${formatUsd(devin.costs?.month?.equivalentCostCents)}</b></div>
-    ${Object.entries(devin.subscription?.credits || {}).map(([key, value]) => `<div class="quota-credit"><span>${escapeHtml(devinCreditLabel(key))}</span><b>${value === -1 ? "不限 / 不按 credits 计费" : formatInteger(value)}</b></div>`).join("")}
-    <div class="quota-message">额度包含整个账号；Token 来自本机 CLI。SWE-2 按官方原价展示等值费用，免费活动期间水位遵循服务端实际扣费，恢复收费后自动跟随。其他缺少单价的模型保持未计价；速度证据缺失时显示未知。</div>
-    <div class="quota-message">${devin.subscription?.sampledAt ? `额度采样 ${escapeHtml(formatDateTime(devin.subscription.sampledAt))}${devin.subscription.cached ? " · 缓存" : ""}` : "额度待同步"} · 计价覆盖 ${formatPct(devin.costs?.month?.coveragePercent ?? 100)}</div>
-    ${devin.subscription?.error || devin.scanErrors?.length ? `<div class="quota-message">${escapeHtml(devin.subscription.error || devin.scanErrors[0])}</div>` : ""}`
-    : `<div class="empty-state">未找到 Devin 数据，请先登录本机 Devin CLI；支持 DEVIN_HOME、DEVIN_SESSIONS_DB 与 DEVIN_USAGE_CREDENTIALS_FILE。</div>`;
-
-  const deepseek = d.deepseek;
-  const wallet = deepseek?.balance;
-  $("deepseekPool").innerHTML = deepseek ? `
-    <div class="quota-head"><div class="quota-icon deepseek" aria-hidden="true">DS</div>
-      <div class="quota-title"><h3>DeepSeek Harness</h3><span>API 按量计费 · 账户余额</span></div></div>
-    ${(wallet?.balances || []).map((balance) => `<div class="quota-credit"><span>${escapeHtml(balance.currency)} 余额${wallet.cached ? " · 缓存" : ""}</span><b>${formatBalance(balance.total, balance.currency)}</b></div>
-      <div class="quota-stats"><span>充值 ${formatBalance(balance.toppedUp, balance.currency)}</span><span>赠送 ${formatBalance(balance.granted, balance.currency)}</span></div>`).join("")}
-    <div class="quota-stats"><span>今日总 Token <b>${formatTokens(deepseek.tokens?.today?.total)}</b></span><span>${formatInteger(deepseek.requests?.today)} 次</span></div>
-    <div class="quota-credit"><span>近 30 天 Token</span><b>${formatTokens(deepseek.tokens?.month?.total)}</b></div>
-    ${deepseek.historyImport ? `<div class="quota-message">已补官方历史：${formatInteger(deepseek.historyImport.requests)} 次请求 · ${formatTokens(deepseek.historyImport.tokens)} Token${(deepseek.historyImport.costs || []).map((cost) => ` · 实际消费 ${formatBalance(cost.amount, cost.currency)}`).join("")}</div>` : ""}
-    <div class="quota-message">${wallet?.sampledAt ? `余额采样 ${escapeHtml(formatDateTime(wallet.sampledAt))} · ` : ""}${formatInteger(deepseek.files)} 个本机会话文件</div>
-    ${wallet?.error ? `<div class="quota-message">${escapeHtml(wallet.error)}</div>` : ""}
-    ${deepseek.scanErrors?.length ? `<div class="quota-message">${escapeHtml(deepseek.scanErrors[0])}</div>` : ""}
-    <div class="quota-message">${deepseek.historyImport ? "历史 Token 来自官方账户日汇总，包含其他客户端调用；已覆盖日期不重复累计本机 Harness 记录。" : "Token 来自本机 Harness；余额包含整个账户的消费与充值。"}水位页可按日、周、月、年查看余额变化。</div>
-    <button type="button" id="deepseekBalanceBtn" class="text-btn">查看余额趋势</button>`
-    : `<div class="empty-state">未找到 DeepSeek Harness 数据。默认读取 ~/.dsh；支持 DSH_HOME、DSH_SESSIONS_DIR 与 DEEPSEEK_API_KEY。</div>`;
-  $("deepseekBalanceBtn")?.addEventListener("click", () => {
-    settings.quotaLevelPool = `deepseek-balance-${wallet?.balances?.[0]?.currency || "CNY"}`;
-    selectedCycleKey = null;
-    window.widget.saveSettings({ quotaLevelPool: settings.quotaLevelPool });
-    setActiveTab("levels", true);
-  });
-
-  if (codex) {
-    const codexWindows = codexQuotaWindows(codex);
-    $("codexPool").innerHTML = `
-      <div class="quota-head">
-        <div class="quota-icon codex" aria-hidden="true">OX</div>
-        <div class="quota-title"><h3>Codex</h3><span>${escapeHtml(codex.planName)} · 周额度按累计美元消耗计算</span></div>
-        <div class="quota-remain codex-window-count"><b>${formatInteger(codexWindows.length)}</b><span>额度窗口</span></div>
-      </div>
-      ${codexQuotaWindowsHtml(codex)}
-      <div class="quota-stats codex-token-stats"><span>短周期总 Token <b>${formatTokens(codex.tokens?.period?.total)}</b></span><span class="token-pair">有效 <b>${formatTokens(codex.tokens?.period?.effective)}</b></span></div>
-      <div class="quota-credit"><span>本周期本地成本（假设价格）</span><b>${formatUsdRange(codexCost.equivalentCostLowCents, codexCost.equivalentCostHighCents)}</b></div>
-      ${costPartsHtml(codexCost)}
-      <div class="quota-message">Pro5x 周额度按 $500、Plus 按 $100；非官方金额。自动审批每完整 turn $0.01，输入／缓存／输出均按假设价，未知 Fast 按普通。余额按官方百分比折算，与本地累计成本分别展示。</div>
-      <div class="quota-message">${escapeHtml(codex.periodLabel)} · ${formatInteger(codex.eventCount)} 次 · tier：服务端 ${formatInteger(codex.tierEvidence?.response)} / 本地 ${formatInteger(codex.tierEvidence?.local)} / 未知 ${formatInteger(codex.tierEvidence?.unknown)} · ${codex.files} 个本地会话文件</div>
-    `;
-  } else {
-    $("codexPool").innerHTML = `<div class="empty-state">未找到可读取的 Codex 本机会话</div>`;
-  }
-
-  const last = combined.lastEvent || d.lastEvent;
-  const lastEffective = last ? (last.tokens?.input || 0) + (last.tokens?.output || 0) : 0;
-  const lastTotal = lastEffective + (last?.tokens?.cacheRead || 0) + (last?.tokens?.cacheWrite || 0);
-  const lastCost = last?.equivalentCostCents == null ? "价格不可用" : `${formatUsd(last.equivalentCostCents)} 美元等效`;
-  $("recentPanel").innerHTML = last
-    ? `<div class="recent-icon">↗</div><div class="recent-copy"><span>最近一次调用 · ${sourceName(last.source)}</span><b>${escapeHtml(window.ModelDisplay.format(last))}</b><small>总 ${formatTokens(lastTotal)} Token · 有效 ${formatTokens(lastEffective)} · 写缓存 ${formatTokens(last.tokens?.cacheWrite)} / ${formatUsd(last.cacheWriteCostCents)} · 读缓存 ${formatTokens(last.tokens?.cacheRead)} / ${formatUsd(last.cacheReadCostCents)} · ${lastCost} · ${timeAgo(last.at)}</small></div>${recentDonutHtml(last)}`
-    : `<div class="empty-state">本周期还没有可显示的用量事件</div>`;
+  if (!d) return;
+  const items = [overviewCursor(d), overviewCodex(d), overviewClaude(d), overviewDevin(d), overviewDeepseek(d)];
+  const missing = OVERVIEW_SOURCES.filter((_source, index) => !items[index]);
+  const html = `${overviewHeroHtml(d)}
+    <h3 class="ov-label ov-label-quota">额度与余额<small>点击卡片查看明细</small></h3>
+    <div class="ov-sources">
+      ${items.filter(Boolean).map(overviewSourceHtml).join("")}
+      ${missing.length ? `<section class="ov-missing" aria-label="未连接的来源">${missing.map((source) =>
+        `<div>${overviewLogo(source)}<span><b>${escapeHtml(sourceName(source))}</b><small>${escapeHtml(OVERVIEW_MISSING_HINTS[source])}</small></span></div>`).join("")}</section>` : ""}
+    </div>
+    <h3 class="ov-label ov-label-recent">最近一次调用</h3>
+    ${overviewRecentHtml(d)}`;
+  if (html === overviewHtml) return;
+  overviewHtml = html;
+  $("overviewRoot").innerHTML = html;
 }
 
 let verificationBusy = false;
@@ -1218,28 +1370,6 @@ $('verificationPanel').addEventListener('click',async event=>{
   }
 });
 
-function recentDonutHtml(last) {
-  const tokens = last?.tokens || {};
-  const parts = [
-    { key: "input", value: Number(tokens.input) || 0, className: "input" },
-    { key: "cacheWrite", value: Number(tokens.cacheWrite) || 0, className: "cache-write" },
-    { key: "cacheRead", value: Number(tokens.cacheRead) || 0, className: "cache-read" },
-    { key: "output", value: Number(tokens.output) || 0, className: "output" },
-  ];
-  const total = parts.reduce((sum, part) => sum + part.value, 0);
-  const radius = 16;
-  const circumference = 2 * Math.PI * radius;
-  let offset = 0;
-  const rings = parts.map((part) => {
-    const length = total > 0 ? (part.value / total) * circumference : 0;
-    const circle = `<circle class="recent-donut-ring ${part.className}" cx="21" cy="21" r="${radius}" stroke-dasharray="${length.toFixed(2)} ${Math.max(0, circumference - length).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}"></circle>`;
-    offset += length;
-    return circle;
-  }).join("");
-  const cost = last?.equivalentCostCents == null ? "—" : formatUsd(last.equivalentCostCents);
-  return `<div class="recent-donut" aria-label="最近一次 Token 构成"><svg viewBox="0 0 42 42" role="img"><circle class="recent-donut-ring track" cx="21" cy="21" r="${radius}"></circle>${rings}</svg><div class="recent-donut-core">${escapeHtml(cost)}</div></div>`;
-}
-
 function devinCreditLabel(key) {
   return ({ availablePromptCredits: "可用 Prompt credits", usedPromptCredits: "已用 Prompt credits",
     availableFlowCredits: "可用 Flow credits", usedFlowCredits: "已用 Flow credits",
@@ -1253,6 +1383,66 @@ const precisionNotes = {
   exact: "Fast 与每一种 thinking effort 都作为独立型号统计。",
 };
 
+const MODEL_PARTS = [
+  { field: "input", label: "输入", className: "input", cost: "inputCostCents" },
+  { field: "cacheWrite", label: "写缓存", className: "cache-write", cost: "cacheWriteCostCents" },
+  { field: "cacheRead", label: "读缓存", className: "cache-read", cost: "cacheReadCostCents" },
+  { field: "output", label: "输出", className: "output", cost: "outputCostCents" },
+];
+const MODEL_PALETTE = ["#7fe0b6", "#8fc8ff", "#f3c277", "#c9a4ff", "#f0a488", "#6fd6d9", "#f28bc0", "#a6df7a", "#8c97ff", "#e8d57a"];
+const modelExpanded = new Set();
+let modelViewKey = "";
+let modelListHtml = "";
+
+function modelPaletteColor(index) {
+  return index < MODEL_PALETTE.length ? MODEL_PALETTE[index] : `hsl(${(index * 137.508) % 360} 55% 66%)`;
+}
+
+function modelLogoHtml(model) {
+  const brand = window.ReceiptModel?.provider(model);
+  const icon = brand && window.ReceiptBrandIcons?.[brand];
+  return `<span class="md-logo ${brand || "unknown"}" aria-hidden="true">${icon ? `<img src="${icon}" alt="">` : escapeHtml(String(model || "?").slice(0, 1).toUpperCase())}</span>`;
+}
+
+function modelBarHtml(row, max) {
+  const total = Math.max(0, Number(row.total) || 0);
+  const parts = MODEL_PARTS.map((part) => ({ ...part, value: Math.max(0, Number(row[part.field]) || 0) }));
+  const sum = parts.reduce((acc, part) => acc + part.value, 0);
+  const scale = max > 0 ? 100 / max : 0;
+  let x = 0;
+  const segments = sum > 0
+    ? parts.map((part) => {
+      const width = part.value * (total / sum) * scale;
+      const rect = `<rect class="${part.className}" x="${x.toFixed(3)}" y="0" width="${width.toFixed(3)}" height="6"/>`;
+      x += width;
+      return rect;
+    }).join("")
+    : `<rect class="total" x="0" y="0" width="${(total * scale).toFixed(3)}" height="6"/>`;
+  return `<svg class="md-bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><g class="md-bar-fill">${segments}</g></svg>`;
+}
+
+function modelRowHtml(row, { key, max, sum, precision, costAvailable }) {
+  const label = window.ModelDisplay.format(row, { precision });
+  const open = modelExpanded.has(key);
+  const share = sum > 0 ? (Math.max(0, Number(row.total) || 0) / sum) * 100 : 0;
+  const cost = costAvailable ? formatUsd(row.costCents) : "未计价";
+  const inputs = (Number(row.input) || 0) + (Number(row.cacheRead) || 0) + (Number(row.cacheWrite) || 0);
+  const cells = MODEL_PARTS.map((part) => `<span class="${part.className}"><small><i></i>${part.label}</small><b>${formatTokens(row[part.field])}</b><em>${formatUsd(row[part.cost])}</em></span>`).join("")
+    + `<span><small>推理 Token</small><b>${formatTokens(row.reasoning)}</b><em>含在输出中</em></span>`
+    + `<span><small>缓存命中率</small><b>${inputs > 0 ? formatPct(((Number(row.cacheRead) || 0) / inputs) * 100) : "—"}</b><em>读缓存 / 全部输入</em></span>`
+    + `<span><small>API 等效合计</small><b>${cost}</b><em>${formatInteger(row.count)} 次请求</em></span>`
+    + (row.unallocatedCostCents ? `<span><small>未拆分费用</small><b>${formatUsd(row.unallocatedCostCents)}</b><em>无法归入四类</em></span>` : "");
+  return `<article class="md-row${open ? " open" : ""}">
+    <button type="button" class="md-row-head" data-md-toggle="${escapeHtml(key)}" aria-expanded="${open}" title="${escapeHtml(label)} · 展开或收起明细">
+      ${modelLogoHtml(row.name || row.label)}
+      <span class="md-name"><b>${escapeHtml(label)}</b><small>${formatInteger(row.count)} 次 · 有效 ${formatTokens(row.effective)} · 占 ${share < 0.1 && share > 0 ? "&lt;0.1" : share.toFixed(1)}%</small></span>
+      <span class="md-value"><b>${formatTokens(row.total)}</b><small class="${costAvailable ? "" : "unpriced"}">${cost}</small></span>
+    </button>
+    ${modelBarHtml(row, max)}
+    <div class="md-detail">${cells}</div>
+  </article>`;
+}
+
 function renderModels(d) {
   const precision = settings.modelPrecision || "coarse";
   const source = settings.dataSource || "all";
@@ -1264,57 +1454,48 @@ function renderModels(d) {
     button.classList.toggle("active", selected);
     button.setAttribute("aria-pressed", String(selected));
   });
-  const activeUsage = modelUsage?.key === settings.modelRange ? modelUsage : null;
-  const view = activeUsage?.sources?.[source] || activeUsage?.sources?.all;
-  if (!view) {
-    const option = $("modelRangeSelect").selectedOptions[0];
-    $("modelCount").textContent = "读取中";
-    $("modelSubtitle").textContent = `${option?.textContent || "所选范围"} · 正在聚合持久化历史`;
-    $("modelList").innerHTML = `<div class="empty-state">正在计算模型用量…</div>`;
-    $("modelDonutContent").innerHTML = `<div class="empty-state">正在计算模型用量…</div>`;
-    $("modelDonutNote").textContent = "";
-    return;
-  }
-  const rows = view.modelBreakdowns?.[precision] || [];
-  $("modelCount").textContent = `${formatInteger(view.eventCount)} 次`;
-  $("modelSubtitle").textContent = `${view.label || "全部"} · ${view.periodLabel || "当前周期"} · 按总 Token（含缓存）排序`;
-  const unknownSpeed = ["all", "codex"].includes(source) ? donut ? " 环状图中 Codex 速度未知的请求并入非 Fast；原始记录不变。" : " Codex 优先持久化服务端响应 service_tier；抓不到响应时回退到本地请求记录，旧记录可能显示速度未知。" : "";
-  $("precisionNote").textContent = precisionNotes[precision] + unknownSpeed;
   document.querySelectorAll("[data-precision]").forEach((button) => {
     button.classList.toggle("active", button.dataset.precision === precision);
   });
   document.querySelectorAll("[data-source]").forEach((button) => {
     button.classList.toggle("active", button.dataset.source === source);
   });
-  if (donut) { renderModelDonut(activeUsage, view); return; }
-  if (!rows.length) {
-    $("modelList").innerHTML = `<div class="empty-state">暂无模型明细</div>`;
+  const activeUsage = modelUsage?.key === settings.modelRange ? modelUsage : null;
+  const view = activeUsage?.sources?.[source] || activeUsage?.sources?.all;
+  if (!view) {
+    const option = $("modelRangeSelect").selectedOptions[0];
+    $("modelCount").textContent = "读取中";
+    $("modelSubtitle").textContent = `${option?.textContent || "所选范围"} · 正在聚合持久化历史`;
+    modelListHtml = "";
+    modelViewKey = "";
+    $("modelList").innerHTML = `<div class="empty-state md-loading">正在计算模型用量…</div>`;
+    $("modelDonutContent").innerHTML = `<div class="empty-state md-loading">正在计算模型用量…</div>`;
+    $("modelDonutNote").textContent = "";
     return;
   }
+  const viewKey = [source, precision, settings.modelRange, donut ? `donut:${settings.modelMetric}` : "list"].join("|");
+  const animate = viewKey !== modelViewKey && !reducedMotion() && !document.hidden;
+  modelViewKey = viewKey;
+  $("modelCount").textContent = `${formatInteger(view.eventCount)} 次`;
+  $("modelSubtitle").textContent = `${view.label || "全部"} · ${view.periodLabel || "当前周期"} · 按总 Token（含缓存）排序`;
+  const unknownSpeed = ["all", "codex"].includes(source) ? donut ? " 环状图中 Codex 速度未知的请求并入非 Fast；原始记录不变。" : " Codex 优先持久化服务端响应 service_tier；抓不到响应时回退到本地请求记录，旧记录可能显示速度未知。" : "";
+  $("precisionNote").textContent = precisionNotes[precision] + unknownSpeed;
+  if (donut) { renderModelDonut(activeUsage, view, animate); return; }
+  const rows = (view.modelBreakdowns?.[precision] || []).slice()
+    .sort((a, b) => (Number(b.total) || 0) - (Number(a.total) || 0));
   const max = Math.max(1, ...rows.map((row) => Number(row.total) || 0));
-  $("modelList").innerHTML = rows
-    .map((row, index) => {
-      const modelLabel = window.ModelDisplay.format(row, { precision });
-      return `
-      <article class="model-row">
-        <div class="model-rank">${String(index + 1).padStart(2, "0")}</div>
-        <div class="model-main">
-          <div class="model-title"><b title="${escapeHtml(modelLabel)}">${escapeHtml(modelLabel)}</b><span>${formatTokens(row.total)} 总 Token</span></div>
-          <progress class="model-progress ${row.fast ? "fast" : ""}" max="${max}" value="${Math.max(0, row.total || 0)}"></progress>
-          <div class="model-meta"><span>${formatInteger(row.count)} 次 · 有效 ${formatTokens(row.effective)}</span><span>${view.costAvailable ? formatUsd(row.costCents) : `推理 ${formatTokens(row.reasoning)}`}</span></div>
-          <div class="model-detail-grid">
-            <span><small>输入 · ${formatUsd(row.inputCostCents)}</small><b>${formatTokens(row.input)}</b></span>
-            <span><small>缓存写入 · ${formatUsd(row.cacheWriteCostCents)}</small><b>${formatTokens(row.cacheWrite)}</b></span>
-            <span><small>缓存读取 · ${formatUsd(row.cacheReadCostCents)}</small><b>${formatTokens(row.cacheRead)}</b></span>
-            <span><small>输出 · ${formatUsd(row.outputCostCents)}</small><b>${formatTokens(row.output)}</b></span>
-            <span><small>推理 Token</small><b>${formatTokens(row.reasoning)}</b></span>
-            <span><small>API 等效合计</small><b>${formatUsd(row.costCents)}</b></span>
-            ${row.unallocatedCostCents ? `<span><small>未拆分费用</small><b>${formatUsd(row.unallocatedCostCents)}</b></span>` : ""}
-          </div>
-        </div>
-      </article>`;
-    })
-    .join("");
+  const sum = rows.reduce((acc, row) => acc + Math.max(0, Number(row.total) || 0), 0);
+  const legend = `<div class="md-legend" aria-hidden="true">${MODEL_PARTS.map((part) => `<span class="${part.className}"><i></i>${part.label}</span>`).join("")}<small>条长为总 Token，相对第一名</small></div>`;
+  const html = rows.length
+    ? legend + rows.map((row) => modelRowHtml(row, {
+      key: `${precision}:${JSON.stringify([row.name || row.label, row.fastKnown === false ? null : Boolean(row.fast), row.effort || ""])}`,
+      max, sum, precision, costAvailable: view.costAvailable,
+    })).join("")
+    : `<div class="empty-state">所选范围暂无模型明细</div>`;
+  if (!animate && html === modelListHtml) return;
+  modelListHtml = html;
+  $("modelList").classList.toggle("animate", animate);
+  $("modelList").innerHTML = html;
 }
 
 let modelDonutState = null;
@@ -1323,24 +1504,37 @@ function modelColor(key) {
   for (const char of key) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) | 0;
   return `hsl(${Math.abs(hash) % 360} 65% 68%)`;
 }
-function renderModelDonut(usage, view) {
+function renderModelDonut(usage, view, animate = false) {
   const metric = ["total", "effective", "costCents"].includes(settings.modelMetric) ? settings.modelMetric : "total";
   const label = metric === "costCents" ? "美元等效" : metric === "effective" ? "有效 Token" : "总 Token";
   const format = metric === "costCents" ? formatUsd : formatTokens;
   const result = window.UsageCharts.modelSlices(usage.sources, { source: settings.dataSource, precision: settings.modelPrecision, metric });
   modelDonutState = { ...result, metric, label };
-  $("modelMetricSelect").value = metric;
+  document.querySelectorAll("[data-model-metric]").forEach((button) => button.classList.toggle("active", button.dataset.modelMetric === metric));
   $("modelSubtitle").textContent = `${view.label || "全部"} · ${view.periodLabel || "当前周期"} · ${label}占比`;
   const coverage = Number(view.costCoveragePercent);
   $("modelDonutNote").textContent = `占比按${label}计算，所有模型均保留；悬停或聚焦图例查看详情。${metric === "costCents" ? ` 仅统计已知价格，计价覆盖 ${Number.isFinite(coverage) ? formatPct(coverage) : "未知"}；未计价用量不代表免费。DeepSeek 官方日账单按消费日汇率换算，本机会话为官方单价估算。` : ""}`;
+  const content = $("modelDonutContent");
+  content.classList.toggle("animate", animate);
   if (!result.rows.length) {
-    $("modelDonutContent").innerHTML = `<div class="empty-state">所选范围暂无模型用量</div>`;
+    content.innerHTML = `<div class="empty-state">所选范围暂无模型用量</div>`;
     return;
   }
-  const circles = result.rows.map((row, index) => row.percent > 0
-    ? `<circle class="model-donut-slice" data-donut-index="${index}" cx="100" cy="100" r="76" pathLength="100" fill="none" stroke="${modelColor(row.key)}" stroke-width="24" stroke-dasharray="${row.percent} ${100 - row.percent}" stroke-dashoffset="${-row.offset}" transform="rotate(-90 100 100)"><title>${escapeHtml(row.label)} · ${escapeHtml(format(row.value))} · ${row.percent.toFixed(2)}%</title></circle>` : "").join("");
-  const legend = result.rows.map((row, index) => `<button type="button" class="model-donut-legend-row" data-donut-index="${index}"><svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="5" fill="${modelColor(row.key)}"/></svg><span><b>${escapeHtml(row.label)}</b><small>${formatInteger(row.count)} 次 · ${format(row.value)}</small></span><strong>${row.percent.toFixed(2)}%</strong></button>`).join("");
-  $("modelDonutContent").innerHTML = `<div class="model-donut-visual"><svg class="model-donut-svg" viewBox="0 0 200 200" role="img" aria-label="${label}按模型分布"><circle cx="100" cy="100" r="76" fill="none" stroke="var(--line)" stroke-width="24"/>${circles}</svg><div class="model-donut-center"><span id="modelDonutLabel">${label}合计</span><strong id="modelDonutValue">${format(result.total)}</strong><small id="modelDonutShare">${result.total > 0 ? `${result.rows.length} 个分组` : "暂无可计算占比的用量"}</small></div></div><div class="model-donut-legend">${legend}</div>`;
+  const visible = result.rows.filter((row) => row.percent > 0).length;
+  const gap = visible > 1 ? 0.5 : 0;
+  // Presentation attributes rather than inline styles: the CSP forbids style attributes.
+  const circles = result.rows.map((row, index) => {
+    if (!(row.percent > 0)) return "";
+    const length = row.percent > gap * 3 ? row.percent - gap : row.percent;
+    return `<circle class="md-donut-slice" data-donut-index="${index}" cx="100" cy="100" r="74" pathLength="100" fill="none" stroke="${modelPaletteColor(index)}" stroke-width="22" stroke-dasharray="${length.toFixed(3)} ${(100 - length).toFixed(3)}" stroke-dashoffset="${(-row.offset).toFixed(3)}" transform="rotate(-90 100 100)"><title>${escapeHtml(row.label)} · ${escapeHtml(format(row.value))} · ${row.percent.toFixed(2)}%</title></circle>`;
+  }).join("");
+  const legend = result.rows.map((row, index) => `<button type="button" class="md-donut-row" data-donut-index="${index}">
+      <svg class="md-dot" viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4.5" fill="${modelPaletteColor(index)}"/></svg>
+      ${modelLogoHtml(row.name || row.label)}
+      <span class="md-name"><b>${escapeHtml(row.label)}</b><small>${formatInteger(row.count)} 次 · ${format(row.value)}</small></span>
+      <strong>${row.percent.toFixed(row.percent >= 10 ? 1 : 2)}%</strong>
+    </button>`).join("");
+  content.innerHTML = `<div class="md-donut-visual"><svg class="md-donut-svg" viewBox="0 0 200 200" role="img" aria-label="${label}按模型分布"><circle class="md-donut-track" cx="100" cy="100" r="74" fill="none" stroke-width="22"/>${circles}</svg><div class="md-donut-center"><span id="modelDonutLabel">${label}合计</span><strong id="modelDonutValue">${format(result.total)}</strong><small id="modelDonutShare">${result.total > 0 ? `${result.rows.length} 个分组` : "暂无可计算占比的用量"}</small></div></div><div class="md-donut-legend">${legend}</div>`;
 }
 function highlightModelDonut(index = -1) {
   if (!modelDonutState || !$("modelDonutValue")) return;
@@ -1462,7 +1656,7 @@ function chartSegmentDefinitions(metric, options = {}) {
   });
 }
 
-function chartSvg(series, metric, range, breakdown = false, speedBreakdown = false, modelBreakdown = false) {
+function chartSvg(series, metric, range, breakdown = false, speedBreakdown = false, modelBreakdown = false, animate = false) {
   if (!series?.length) return `<div class="empty-state">暂无趋势数据</div>`;
   const fullscreen = Boolean(windowState.fullscreen);
   const custom = range === "custom";
@@ -1522,7 +1716,7 @@ function chartSvg(series, metric, range, breakdown = false, speedBreakdown = fal
       return `<g class="chart-column" data-chart-index="${index}">${hitbox}${rects}${label}</g>`;
     })
     .join("");
-  return `<svg class="bar-chart${custom ? " custom-range" : ""}"${custom ? ` width="${width}"` : ""} viewBox="0 0 ${width} ${height}" role="img" aria-label="消耗柱状图">${grid}${bars}</svg>`;
+  return `<svg class="bar-chart${custom ? " custom-range" : ""}${animate ? " animate" : ""}"${custom ? ` width="${width}"` : ""} viewBox="0 0 ${width} ${height}" role="img" aria-label="消耗柱状图">${grid}${bars}</svg>`;
 }
 
 function customTrendPayload() {
@@ -1548,6 +1742,32 @@ async function loadCustomTrends() {
   if (request !== customTrendRequest) return;
   customTrendLoading = false;
   if (snapshot.data && settings.trendRange === "custom") renderTrends(snapshot.data);
+}
+
+// Entrance animations replay only when a view's selection changes (or the tab is opened), never on refresh.
+let viewMotion = {};
+function viewEntrance(view, key) {
+  const changed = viewMotion[view] !== key;
+  viewMotion[view] = key;
+  return changed && !reducedMotion() && !document.hidden;
+}
+
+function sourceLogoHtml(source, className = "vw-logo") {
+  const icon = window.ReceiptBrandIcons?.[OVERVIEW_BRAND_ICONS[source]];
+  return `<span class="${className}" aria-hidden="true">${icon ? `<img src="${icon}" alt="">` : escapeHtml(sourceName(source).slice(0, 1))}</span>`;
+}
+
+function compositionBarHtml(row, className = "ev-bar") {
+  const parts = MODEL_PARTS.map((part) => ({ ...part, value: Math.max(0, Number(row[part.field]) || 0) }));
+  const sum = parts.reduce((acc, part) => acc + part.value, 0);
+  let x = 0;
+  const rects = sum > 0 ? parts.map((part) => {
+    const width = part.value / sum * 100;
+    const rect = `<rect class="${part.className}" x="${x.toFixed(3)}" y="0" width="${width.toFixed(3)}" height="4"/>`;
+    x += width;
+    return rect;
+  }).join("") : "";
+  return `<svg class="${className}" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true">${rects}</svg>`;
 }
 
 function renderTrends(d) {
@@ -1589,17 +1809,29 @@ function renderTrends(d) {
   const draftUnit = window.TrendRange.units[$("trendCustomUnit").value];
   $("trendCustomHint").textContent = customTrendError || `按${draftUnit?.bucketLabel || "小时"}聚合 · N 为 1–100`;
   $("trendResolution").textContent = `${view.label || "全部"} · ${resolution}`;
-  $("trendTotal").textContent = formatMetric(total, metric);
+  const pending = custom && (customTrendLoading || customTrendError);
+  // Average only over buckets that have started, so today's future hours don't dilute it.
+  const now = Date.now();
+  const elapsed = series.filter((item) => !(Number(item.start) > now));
+  const bucket = custom ? unit?.bucketLabel || "时段" : range === "day" ? "小时" : "天";
+  const hasPeak = !pending && peak && Number(peak[metric]) > 0;
+  $("trendTotalLabel").textContent = `${metric === "equivalentCostCents" ? "美元等效" : metric === "effective" ? "有效 Token" : "总 Token"}合计`;
+  $("trendTotal").textContent = pending ? "—" : formatMetric(total, metric);
+  $("trendPeakLabel").textContent = hasPeak ? `峰值 · ${peak.label || peak.shortLabel}` : "峰值";
+  $("trendPeakLabel").title = $("trendPeakLabel").textContent;
+  $("chartPeak").textContent = hasPeak ? formatMetric(peak[metric], metric) : "—";
+  $("trendAvgLabel").textContent = `平均 / ${bucket}`;
+  $("trendAvg").textContent = !pending && elapsed.length ? formatMetric(total / elapsed.length, metric) : "—";
   hideChartTooltip();
   chartTooltipContext = { series, metric, breakdown, speedBreakdown, modelBreakdown };
-  $("trendChart").innerHTML = chartSvg(series, metric, range, breakdown, speedBreakdown, modelBreakdown);
-  if (custom && (customTrendLoading || customTrendError)) {
-    $("trendTotal").textContent = "—";
+  if (pending) {
     $("trendChart").innerHTML = `<div class="empty-state">${customTrendLoading ? "正在读取历史趋势…" : `读取失败：${escapeHtml(customTrendError)}，请点击应用重试`}</div>`;
+  } else {
+    const animate = viewEntrance("trends", JSON.stringify([source, range, metric, breakdown, speedBreakdown, modelBreakdown, custom && customTrendPayload(), Boolean(windowState.fullscreen), series.length > 0]));
+    $("trendChart").innerHTML = chartSvg(series, metric, range, breakdown, speedBreakdown, modelBreakdown, animate);
   }
   chart.scrollLeft = trendChartScroll.left;
   $("legendItems").innerHTML = trendLegendHtml(metric, breakdown, speedBreakdown, modelBreakdown, series);
-  $("chartPeak").textContent = peak ? `峰值 ${peak.shortLabel} · ${formatMetric(peak[metric], metric)}` : "峰值 —";
   document.querySelectorAll("[data-range]").forEach((button) => button.classList.toggle("active", button.dataset.range === range));
   document.querySelectorAll("[data-metric]").forEach((button) => {
     button.disabled = button.dataset.metric === "equivalentCostCents" && !view.costAvailable;
@@ -1784,7 +2016,7 @@ function speedLabel(event) {
   return event?.fast ? { text: "Fast", className: "fast" } : { text: "非 Fast", className: "normal" };
 }
 
-function levelChartSvg(series, cycle, timeline = {}) {
+function levelChartSvg(series, cycle, timeline = {}, animate = false) {
   const balanceMode = timeline.kind === "balance";
   if (!series?.length) return `<div class="empty-state">${balanceMode ? "这个周期还没有余额采样；成功刷新后开始记录" : "这个周期还没有水位采样"}</div>`;
   const fullscreen = Boolean(windowState.fullscreen);
@@ -1813,7 +2045,7 @@ function levelChartSvg(series, cycle, timeline = {}) {
   }).join("");
   const labels = [series[0], series[Math.floor(series.length / 2)], series[series.length - 1]]
     .filter((item, index, list) => list.findIndex((entry) => entry.at === item.at) === index)
-    .map((item) => `<text class="axis-x" x="${xOf(item.at).toFixed(1)}" y="${baseY + 22}" text-anchor="middle">${escapeHtml(formatDateTime(item.at))}</text>`)
+    .map((item, index, list) => `<text class="axis-x" x="${xOf(item.at).toFixed(1)}" y="${baseY + 22}" text-anchor="${list.length > 1 && index === list.length - 1 ? "end" : index === 0 && list.length > 1 ? "start" : "middle"}">${escapeHtml(formatDateTime(item.at))}</text>`)
     .join("");
   const dots = series.map((item, index) => item.projected ? "" : `<circle class="level-dot" data-level-index="${index}" cx="${xOf(item.at).toFixed(1)}" cy="${yOf(valueOf(item)).toFixed(1)}" r="2.4"></circle>`).join("");
   const hits = series.map((item, index) => {
@@ -1825,7 +2057,7 @@ function levelChartSvg(series, cycle, timeline = {}) {
   // Clip the reference to the existing data domain; never add its end to series.
   const reference = window.UsageCharts.uniformSegment(cycle, minAt, maxAt);
   const uniform = reference.length ? `<polyline class="uniform-line" points="${reference.map((point) => `${xOf(point.at).toFixed(1)},${yOf(point.remainingPercent).toFixed(1)}`).join(" ")}"><title>匀速使用：周期初 100%，周期末 0%</title></polyline>` : "";
-  return `<svg class="bar-chart level-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${balanceMode ? "DeepSeek 余额变化趋势" : "额度水位与匀速使用参考线"}">${ticks}<polygon class="level-area" points="${area}"></polygon>${uniform}<polyline class="level-line" points="${points.join(" ")}"></polyline>${dots}${hits}${labels}</svg>`;
+  return `<svg class="bar-chart level-chart${animate ? " animate" : ""}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${balanceMode ? "DeepSeek 余额变化趋势" : "额度水位与匀速使用参考线"}">${ticks}<polygon class="level-area" points="${area}"></polygon>${uniform}<polyline class="level-line" pathLength="100" points="${points.join(" ")}"></polyline>${dots}${hits}${labels}</svg>`;
 }
 
 function renderLevels() {
@@ -1840,9 +2072,13 @@ function renderLevels() {
   $("levelFootnote").textContent = balanceMode ? (timeline.reconstructedCount
     ? "历史每日余额按官方充值、赠送与扣款账单回算，并与当前钱包核对；日内曲线不代表实际扣款时间。后续数据来自实时查询，余额包含整个账户的消费。"
     : "余额从首次成功查询开始记录，未采集的时间没有历史数据。余额变化含充值、赠送及其他设备消费，不等同于本机消费。") : "曲线来自每次刷新写入的额度采样；当前点会叠加上一次同步结果。";
-  $("levelPoolSwitch").innerHTML = pools.map((pool) => (
-    `<button type="button" data-level-pool="${escapeHtml(pool.id)}" class="${pool.id === (timeline?.pool || settings.quotaLevelPool) ? "active" : ""}"${pool.hasData ? "" : " disabled"}>${escapeHtml(pool.label.replace("Cursor ", "").replace("Codex ", "Codex "))}</button>`
-  )).join("");
+  const activePool = timeline?.pool || settings.quotaLevelPool;
+  $("levelPoolSwitch").innerHTML = pools.map((pool) => {
+    const active = pool.id === activePool;
+    const label = pool.label.replace(/^(Cursor|Codex|Claude|Devin|DeepSeek)\s+/, "");
+    const source = pool.source || (String(pool.id).startsWith("other-") ? "cursor" : String(pool.id).split("-")[0]);
+    return `<button type="button" class="lv-pool${active ? " active" : ""}" data-level-pool="${escapeHtml(pool.id)}" aria-pressed="${active}" title="${escapeHtml(pool.label)}${pool.hasData ? "" : " · 暂无采样"}"${pool.hasData ? "" : " disabled"}>${sourceLogoHtml(source)}${escapeHtml(label)}</button>`;
+  }).join("");
   const cycles = timeline?.cycles || [];
   $("levelCycleSelect").innerHTML = cycles.length
     ? cycles.map((cycle) => `<option value="${escapeHtml(cycle.key)}"${cycle.key === timeline.cycle?.key ? " selected" : ""}>${escapeHtml(cycle.label)}</option>`).join("")
@@ -1852,14 +2088,34 @@ function renderLevels() {
     : "各账期内剩余额度变化";
   const start = timeline?.cycle?.startRemaining;
   const end = timeline?.cycle?.endRemaining;
-  $("levelTotal").textContent = start == null && end == null ? "—" : balanceMode
-    ? `${formatBalance(start, timeline.currency)} → ${formatBalance(end, timeline.currency)}` : `${formatCursorPct(start)} → ${formatCursorPct(end)}`;
+  const formatLevel = (value) => value == null ? "—" : balanceMode ? formatBalance(value, timeline.currency) : formatCursorPct(value);
+  $("levelStart").textContent = formatLevel(start);
+  $("levelTotal").textContent = formatLevel(end);
+  $("levelEndLabel").textContent = Number(timeline?.cycle?.endAt) > Date.now() ? "最新" : "周期末";
   const sampleCount = timeline?.sampleCount ?? (timeline?.series?.filter((point) => !point.projected).length || 0);
   $("levelPeak").textContent = sampleCount
     ? `${sampleCount} 个${balanceMode ? "数据" : "采样"}点`
     : "尚无采样";
-  $("levelChart").innerHTML = levelChartSvg(timeline?.series || [], timeline?.cycle, timeline || {});
+  const series = timeline?.series || [];
+  const animate = viewEntrance("levels", JSON.stringify([timeline?.pool, timeline?.cycle?.key, settings.balanceRange, Boolean(windowState.fullscreen), series.length > 0]));
+  $("levelChart").innerHTML = levelChartSvg(series, timeline?.cycle, timeline || {}, animate);
   const reference = timeline?.cycle?.reference;
+  // Pace: the uniform-usage reference at the latest real sample. Only with a known cycle reference; never guessed.
+  const lastSample = series.filter((point) => !point.projected).at(-1);
+  const pace = !balanceMode && reference && lastSample ? window.UsageCharts.uniformRemaining(timeline.cycle, lastSample.at) : null;
+  const paceNode = $("levelPace");
+  paceNode.classList.toggle("up", pace != null && end != null && Number(end) >= pace);
+  paceNode.classList.toggle("down", pace != null && end != null && Number(end) < pace);
+  if (balanceMode) {
+    $("levelPaceLabel").textContent = "已采样净变化";
+    paceNode.textContent = timeline.change == null ? "—" : `${timeline.change >= 0 ? "+" : ""}${formatBalance(timeline.change, timeline.currency)}`;
+    paceNode.title = "含充值、赠送及其他设备消费，不等同于本机消费";
+  } else {
+    $("levelPaceLabel").textContent = `匀速应剩${reference?.estimated ? "（起点推算）" : ""}`;
+    paceNode.textContent = pace == null ? "—" : formatCursorPct(pace);
+    paceNode.title = pace == null ? "周期结束时间未知，无法给出匀速参考"
+      : `最新采样 ${formatDateTime(lastSample.at)} 时按匀速使用应剩 ${formatCursorPct(pace)}；${Number(end) >= pace ? "实际剩余高于参考" : "实际剩余低于参考"}`;
+  }
   $("uniformLegend").hidden = !reference;
   $("uniformNote").textContent = reference
     ? `${timeline.cycle.interrupted ? `本周期于 ${formatDateTime(timeline.cycle.endAt)} 提前重置，原定结束时间为 ${formatDateTime(timeline.cycle.scheduledEndAt)}。` : ""}虚线为匀速使用参考：${formatDateTime(reference.startAt)} 的 100% → ${formatDateTime(reference.endAt)} 的 0%。仅显示已有采样的时间范围。${reference.estimated ? " 周期起点按常规周期长度推算。" : ""}`
@@ -1884,34 +2140,56 @@ function renderEvents() {
   }
   $("eventCount").textContent = `${formatInteger(page.total)} ${page.events.some((event) => event.pool === "deepseek-platform-daily") ? "条记录" : "次"}`;
   $("eventSubtitle").textContent = page.total ? `第 ${page.offset + 1}–${Math.min(page.offset + page.events.length, page.total)} 条` : "没有匹配的请求";
+  const animate = viewEntrance("events", JSON.stringify([settings.eventSource || "all", eventQueryDraft, page.offset, page.total > 0, Boolean(windowState.fullscreen)]));
+  let day = "";
+  const today = new Date();
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  const dayLabel = (date) => {
+    const same = (other) => date.getFullYear() === other.getFullYear() && date.getMonth() === other.getMonth() && date.getDate() === other.getDate();
+    const base = `${date.getMonth() + 1}月${date.getDate()}日`;
+    return same(today) ? `今天 · ${base}` : same(yesterday) ? `昨天 · ${base}` : date.getFullYear() === today.getFullYear() ? base : `${date.getFullYear()}年${base}`;
+  };
   $("eventList").innerHTML = page.events.length
     ? page.events.map((event) => {
       const speed = speedLabel(event);
       const model = window.ModelDisplay.format(event);
-      return `<article class="event-row">
-        <div class="event-row-top"><b>${escapeHtml(model)}</b><em>${event.billingKind === "estimated" ? "估算 " : ""}${escapeHtml(event.equivalentCostHighCents > event.equivalentCostLowCents ? `${formatRequestUsd(event,event.equivalentCostLowCents)}–${formatRequestUsd(event,event.equivalentCostHighCents)}` : formatRequestUsd(event,eventCostCents(event)))}</em></div>
-        <div class="event-meta">
-          <span>${escapeHtml(formatDateTime(event.timestamp))}${event.pool === "deepseek-platform-daily" ? ` · 官方日汇总 · ${formatInteger(event.count)} 次请求` : ""}</span>
-          <span>${sourceName(event.source)}</span>
-          <span class="speed-pill ${speed.className}">${speed.text}</span>
+      const date = new Date(event.timestamp);
+      const key = Number.isFinite(date.getTime()) ? date.toDateString() : "";
+      const header = key && key !== day ? `<div class="ev-day">${escapeHtml(dayLabel(date))}</div>` : "";
+      day = key || day;
+      const daily = event.pool === "deepseek-platform-daily";
+      const time = !key ? "—" : daily ? "全天" : `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+      const cost = event.equivalentCostHighCents > event.equivalentCostLowCents
+        ? `${formatRequestUsd(event, event.equivalentCostLowCents)}–${formatRequestUsd(event, event.equivalentCostHighCents)}`
+        : formatRequestUsd(event, eventCostCents(event));
+      const tokens = MODEL_PARTS.map((part) => `<span class="${part.className}"><i></i>${part.label} <b>${formatTokens(event[part.field])}</b></span>`).join("");
+      const billing = event.billingAmount != null ? `<div class="ev-billing">${event.billingKind === "estimated" ? "估算" : "官方实收"} ${formatBalance(event.billingAmount, event.billingCurrency)}${event.billingBasis ? ` · 官方价格 ${escapeHtml(event.billingBasis.priceDate)} · ${event.billingBasis.period === "peak" ? "高峰" : event.billingBasis.period === "offpeak" ? "空闲" : "节假日未知，费用范围"}` : ""}${event.fxRate != null ? ` · 1 CNY = ${escapeHtml(event.fxRate)} USD · 汇率 ${escapeHtml(event.fxDate)} (${escapeHtml(event.fxSource)})${event.fxDate !== event.billingDate ? " · 最近已发布工作日" : ""}` : " · 美元汇率待获取"}</div>` : "";
+      return `${header}<article class="ev-row">
+        ${modelLogoHtml(event.model)}
+        <div class="ev-main">
+          <div class="ev-title"><b title="${escapeHtml(model)}">${escapeHtml(model)}</b>
+            <div class="ev-meta"><span>${time}</span><span>${sourceName(event.source)}</span>${daily ? `<span>官方日汇总 · ${formatInteger(event.count)} 次请求</span>` : ""}<span class="speed-pill ${speed.className}">${speed.text}</span></div>
+          </div>
+          <div class="ev-cost"><b>${escapeHtml(cost)}</b><small>${event.billingKind === "estimated" ? "估算 · " : ""}美元等效</small></div>
+          <div class="ev-comp">${compositionBarHtml(event)}<div class="ev-tokens">${tokens}</div>${billing}</div>
         </div>
-        <small>输入 ${formatTokens(event.input)} · 写缓存 ${formatTokens(event.cacheWrite)} · 读缓存 ${formatTokens(event.cacheRead)} · 输出 ${formatTokens(event.output)}</small>
-        ${event.billingAmount != null ? `<small>${event.billingKind === "estimated" ? "估算" : "官方实收"} ${formatBalance(event.billingAmount, event.billingCurrency)}${event.billingBasis ? ` · 官方价格 ${escapeHtml(event.billingBasis.priceDate)} · ${event.billingBasis.period === "peak" ? "高峰" : event.billingBasis.period === "offpeak" ? "空闲" : "节假日未知，费用范围"}` : ""}${event.fxRate != null ? ` · 1 CNY = ${escapeHtml(event.fxRate)} USD · 汇率 ${escapeHtml(event.fxDate)} (${escapeHtml(event.fxSource)})${event.fxDate !== event.billingDate ? " · 最近已发布工作日" : ""}` : " · 美元汇率待获取"}</small>` : ""}
       </article>`;
     }).join("")
     : `<div class="empty-state">没有匹配的请求记录</div>`;
+  $("eventList").classList.toggle("animate", animate);
   const pageCount = Math.max(1, Math.ceil((page.total || 0) / (page.limit || 40)));
   const current = Math.floor((page.offset || 0) / (page.limit || 40)) + 1;
-  $("eventPager").innerHTML = `
-    <button type="button" class="text-btn" id="eventPrev" ${page.offset <= 0 ? "disabled" : ""}>上一页</button>
+  $("eventPager").innerHTML = pageCount > 1 ? `
+    <button type="button" class="vw-btn" id="eventPrev" aria-label="上一页" ${page.offset <= 0 ? "disabled" : ""}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>上一页</button>
     <span>${current} / ${pageCount}</span>
-    <button type="button" class="text-btn" id="eventNext" ${page.offset + page.events.length >= page.total ? "disabled" : ""}>下一页</button>
-  `;
+    <button type="button" class="vw-btn" id="eventNext" aria-label="下一页" ${page.offset + page.events.length >= page.total ? "disabled" : ""}>下一页<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+  ` : "";
   $("eventPrev")?.addEventListener("click", () => loadEventPage(Math.max(0, page.offset - page.limit)));
   $("eventNext")?.addEventListener("click", () => loadEventPage(page.offset + page.limit));
 }
 
 function formatRate(value) {
+  if (value == null || value === "") return "—";
   const number = Number(value);
   if (!Number.isFinite(number)) return "—";
   return `$${number}`;
@@ -1940,35 +2218,25 @@ function renderPricing() {
     ? `${catalog.snapshot.status === "remote" || catalog.snapshot.status === "official" ? "官方" : "内置"}价目 · ${catalog.snapshot.modelCount} 个模型`
     : "按模型与 Fast / 非 Fast 分档";
   $("pricingNote").textContent = `${catalog.snapshot?.note || "价格单位为每百万 Token 美元。"}${["all", "devin"].includes(settings.pricingSource) ? " Devin 显示模型原价等值，SWE-2 写缓存按输入价估算；免费活动与额度扣费以服务端实际数据为准。" : ""}`;
-  $("pricingList").innerHTML = catalog.rows?.length
-    ? `<div class="pricing-table-wrap"><table class="pricing-table">
-      <thead>
-        <tr>
-          <th>来源</th>
-          <th>模型</th>
-          <th>速度</th>
-          <th>上下文</th>
-          <th>输入</th>
-          <th>输出</th>
-          <th>写缓存</th>
-          <th>读缓存</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${catalog.rows.map((row) => `
-          <tr>
-            <td class="pricing-source">${sourceName(row.source)}</td>
-            <td class="pricing-model">${escapeHtml(window.ModelDisplay.format(row.model, { precision: "coarse" }))}</td>
-            <td class="pricing-speed"><span class="speed-pill ${row.speed === "fast" ? "fast" : "normal"}">${escapeHtml(row.speedLabel)}</span></td>
-            <td class="pricing-context">${escapeHtml(row.contextLabel)}</td>
-            <td class="pricing-rate" data-label="输入">${escapeHtml(formatRate(row.input))}</td>
-            <td class="pricing-rate" data-label="输出">${escapeHtml(formatRate(row.output))}</td>
-            <td class="pricing-rate" data-label="写缓存">${escapeHtml(formatRate(row.cacheWrite))}</td>
-            <td class="pricing-rate" data-label="读缓存">${escapeHtml(formatRate(row.cacheRead))}</td>
-          </tr>
-        `).join("")}
-      </tbody>
-    </table></div>`
+  // Consecutive tiers of the same source + model share one card; catalog order is preserved.
+  const groups = [];
+  for (const row of catalog.rows || []) {
+    const last = groups.at(-1);
+    if (last && last.source === row.source && last.model === row.model) last.rows.push(row);
+    else groups.push({ source: row.source, model: row.model, rows: [row] });
+  }
+  const rate = (value) => `<b class="${value != null && Number(value) === 0 ? "zero" : ""}">${escapeHtml(formatRate(value))}</b>`;
+  const animate = viewEntrance("pricing", JSON.stringify([settings.pricingSource || "all", catalog.selectedId, Boolean(windowState.fullscreen)]));
+  $("pricingList").classList.toggle("animate", animate);
+  $("pricingList").innerHTML = groups.length
+    ? `<div class="pr-head pr-cols" aria-hidden="true"><span>$ / 百万 Token</span><span>输入</span><span>输出</span><span>写缓存</span><span>读缓存</span></div>
+      ${groups.map((group) => `<article class="pr-group">
+        <header>${modelLogoHtml(group.model)}<b>${escapeHtml(window.ModelDisplay.format(group.model, { precision: "coarse" }))}</b><small>${sourceName(group.source)}</small></header>
+        ${group.rows.map((row) => `<div class="pr-tier pr-cols" role="group" aria-label="${escapeHtml(`${row.speedLabel} · ${row.contextLabel}：输入 ${formatRate(row.input)}，输出 ${formatRate(row.output)}，写缓存 ${formatRate(row.cacheWrite)}，读缓存 ${formatRate(row.cacheRead)}`)}">
+          <span class="pr-tier-name"><span class="speed-pill ${row.speed === "fast" ? "fast" : "normal"}">${escapeHtml(row.speedLabel)}</span><small>${escapeHtml(row.contextLabel)}</small></span>
+          ${rate(row.input)}${rate(row.output)}${rate(row.cacheWrite)}${rate(row.cacheRead)}
+        </div>`).join("")}
+      </article>`).join("")}`
     : `<div class="empty-state">这份价目表里没有可展示的档位</div>`;
 }
 
@@ -1994,6 +2262,8 @@ function setActiveTab(tab, persist = false) {
   });
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `${visible}View`));
   if (persist) {
+    if (valid === "models") modelViewKey = "";
+    viewMotion = {};
     window.widget.saveSettings({ activeTab: valid });
     if (valid === "levels") loadQuotaTimeline();
     if (valid === "events") loadEventPage(0);
@@ -2268,7 +2538,7 @@ async function exportEvents(kind) {
   exportBusy = true;
   const buttons = [$("eventExportCsv"), $("eventExportJson")];
   buttons.forEach((button) => { button.disabled = true; });
-  $("eventExport" + (kind === "csv" ? "Csv" : "Json")).textContent = "正在导出…";
+  $("eventExport" + (kind === "csv" ? "Csv" : "Json")).classList.add("busy");
   // Capture the filter before opening the native save dialog.
   const filter = { kind, source: settings.eventSource || "all", query: eventQueryDraft };
   try {
@@ -2279,9 +2549,7 @@ async function exportEvents(kind) {
   } catch { showToast("导出失败，请重试", true); }
   finally {
     exportBusy = false;
-    buttons.forEach((button) => { button.disabled = false; });
-    $("eventExportCsv").textContent = "导出 CSV";
-    $("eventExportJson").textContent = "导出 JSON";
+    buttons.forEach((button) => { button.disabled = false; button.classList.remove("busy"); });
   }
 }
 
@@ -2456,7 +2724,7 @@ async function refreshPriceCatalog() {
   const buttons = [$("priceBtn"), $("priceQuickBtn")];
   if (buttons.some((button) => button.disabled)) return;
   buttons.forEach((button) => { button.disabled = true; });
-  $("priceBtn").textContent = "更新中…";
+  $("priceBtn").classList.add("spinning");
   try {
     const result = await window.widget.refreshPricing();
     if (!result?.ok) throw new Error(result?.error || "价目表更新失败");
@@ -2467,7 +2735,7 @@ async function refreshPriceCatalog() {
     showToast(error.message || "价目表更新失败", true);
   } finally {
     buttons.forEach((button) => { button.disabled = false; });
-    $("priceBtn").textContent = "更新价格 ↻";
+    $("priceBtn").classList.remove("spinning");
   }
 }
 $("priceBtn").addEventListener("click", refreshPriceCatalog);
@@ -2509,11 +2777,25 @@ $("compactBtn").addEventListener("click", () => window.widget.saveSettings({ com
 $("smartBtn").addEventListener("click", () => setSmartPanel(!smartPanelOpen));
 $("healthBtn").addEventListener("click", () => setSmartPanel(true));
 $("smartCloseBtn").addEventListener("click", () => setSmartPanel(false));
-$("quotaGlance").addEventListener("click", (event) => {
-  const target = event.target.closest("[data-quota-target]")?.dataset.quotaTarget;
-  if (["cursorPool", "otherPool", "codexPool", "claudePool", "devinPool"].includes(target)) {
-    $(target).scrollIntoView({ behavior: reducedMotion() ? "instant" : "smooth", block: "start" });
+$("overviewRoot").addEventListener("click", (event) => {
+  const currency = event.target.closest("[data-ov-balance]")?.dataset.ovBalance;
+  if (currency) {
+    settings.quotaLevelPool = `deepseek-balance-${currency}`;
+    selectedCycleKey = null;
+    window.widget.saveSettings({ quotaLevelPool: settings.quotaLevelPool });
+    setActiveTab("levels", true);
+    return;
   }
+  const toggle = event.target.closest("[data-ov-toggle]");
+  if (!toggle || document.body.classList.contains("fullscreen") || document.body.classList.contains("compact")) return;
+  const source = toggle.dataset.ovToggle;
+  const open = !overviewExpanded.has(source);
+  if (open) overviewExpanded.add(source);
+  else overviewExpanded.delete(source);
+  toggle.setAttribute("aria-expanded", String(open));
+  const card = toggle.closest(".ov-source");
+  card.classList.toggle("open", open);
+  if (open) card.scrollIntoView({ behavior: reducedMotion() ? "instant" : "smooth", block: "nearest" });
 });
 $("motionSelect").addEventListener("change", (event) => window.widget.saveSettings({ motionPreference: event.target.value }));
 $("startupToggle").addEventListener("change", (event) => window.widget.saveSettings({ openAtLogin: event.target.checked }));
@@ -2532,10 +2814,28 @@ document.querySelectorAll("[data-model-view]").forEach((button) => {
     if (snapshot.data) renderModels(snapshot.data);
   });
 });
-$("modelMetricSelect").addEventListener("change", (event) => {
-  settings.modelMetric = event.target.value;
-  window.widget.saveSettings({ modelMetric: settings.modelMetric });
-  if (snapshot.data) renderModels(snapshot.data);
+document.querySelectorAll("[data-model-metric]").forEach((button) => {
+  button.addEventListener("click", () => {
+    settings.modelMetric = button.dataset.modelMetric;
+    window.widget.saveSettings({ modelMetric: settings.modelMetric });
+    if (snapshot.data) renderModels(snapshot.data);
+  });
+});
+$("modelList").addEventListener("click", (event) => {
+  const toggle = event.target.closest("[data-md-toggle]");
+  if (!toggle || document.body.classList.contains("fullscreen")) return;
+  const key = toggle.dataset.mdToggle;
+  const open = !modelExpanded.has(key);
+  if (open) modelExpanded.add(key);
+  else modelExpanded.delete(key);
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.closest(".md-row").classList.toggle("open", open);
+  modelListHtml = "";
+});
+document.querySelectorAll(".ls-logo[data-brand]").forEach((node) => {
+  const icon = window.ReceiptBrandIcons?.[OVERVIEW_BRAND_ICONS[node.dataset.brand]];
+  node.innerHTML = icon ? `<img src="${icon}" alt="">`
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/></svg>';
 });
 for (const type of ["pointerover", "focusin", "click"]) {
   $("modelDonutContent").addEventListener(type, (event) => {

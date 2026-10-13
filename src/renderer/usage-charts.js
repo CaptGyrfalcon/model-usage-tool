@@ -19,7 +19,7 @@
   const fields = ["total", "effective", "count", "costCents", "input", "output", "cacheRead", "cacheWrite", "reasoning"];
   function modelSlices(sources, { source = "all", precision = "coarse", metric = "total" } = {}) {
     const groups = new Map();
-    for (const origin of source === "all" ? ["cursor", "codex", "claude", "deepseek"] : [source]) {
+    for (const origin of source === "all" ? ["cursor", "codex", "claude", "deepseek", "devin"] : [source]) {
       for (const row of sources?.[origin]?.modelBreakdowns?.[precision] || []) {
         const name = row.name || row.label || "未知模型";
         const unknown = row.fastKnown === false;

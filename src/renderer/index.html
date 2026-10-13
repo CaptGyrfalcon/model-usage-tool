@@ -5,10 +5,13 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI 用量</title>
-    <link rel="stylesheet" href="styles.css?v=20" />
+    <link rel="stylesheet" href="styles.css?v=21" />
     <link rel="stylesheet" href="orb.css" />
     <link rel="stylesheet" href="receipt.css" />
     <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="overview.css" />
+    <link rel="stylesheet" href="models.css" />
+    <link rel="stylesheet" href="views.css" />
   </head>
   <body>
     <div class="shell">
@@ -74,20 +77,7 @@
         </section>
         <div id="bootstrapState" class="bootstrap-state" role="status" hidden></div>
         <section class="view active" id="overviewView">
-          <div class="overview-section-label">剩余额度 <span>点击查看详情</span></div>
-          <div id="quotaGlance" class="quota-glance" aria-label="各池剩余额度"></div>
-          <div class="hero-grid" id="heroGrid"></div>
-          <div class="overview-section-label">额度详情 <span>当前周期</span></div>
-          <div class="quota-stack">
-            <article class="quota-card cursor-card" id="cursorPool"></article>
-            <article class="quota-card other-card" id="otherPool"></article>
-            <article class="quota-card codex-card" id="codexPool"></article>
-            <article class="quota-card claude-card" id="claudePool"></article>
-            <article class="quota-card deepseek-card" id="deepseekPool"></article>
-            <article class="quota-card devin-card" id="devinPool"></article>
-          </div>
-          <article class="detail-card" id="recentPanel"></article>
-
+          <div id="overviewRoot" class="ov-root"></div>
         </section>
 
         <section class="view" id="modelsView">
@@ -98,80 +88,86 @@
             </div>
             <span class="count-pill" id="modelCount">0 次</span>
           </div>
-          <div class="control-row">
-          <div class="segmented source-switch" aria-label="模型数据来源">
-            <button type="button" data-source="all" class="active">全部</button>
-            <button type="button" data-source="cursor">Cursor</button>
-            <button type="button" data-source="codex">Codex</button>
-            <button type="button" data-source="claude">Claude</button>
-            <button type="button" data-source="deepseek">DeepSeek</button>
-            <button type="button" data-source="devin">Devin</button>
+          <div class="logo-switch" role="group" aria-label="模型数据来源">
+            <button type="button" data-source="all" class="active" title="全部" aria-label="全部"><span class="ls-logo" data-brand="all"></span><span class="ls-name">全部</span></button>
+            <button type="button" data-source="cursor" title="Cursor" aria-label="Cursor"><span class="ls-logo" data-brand="cursor"></span><span class="ls-name">Cursor</span></button>
+            <button type="button" data-source="codex" title="Codex" aria-label="Codex"><span class="ls-logo" data-brand="codex"></span><span class="ls-name">Codex</span></button>
+            <button type="button" data-source="claude" title="Claude Code" aria-label="Claude Code"><span class="ls-logo" data-brand="claude"></span><span class="ls-name">Claude Code</span></button>
+            <button type="button" data-source="deepseek" title="DeepSeek" aria-label="DeepSeek"><span class="ls-logo" data-brand="deepseek"></span><span class="ls-name">DeepSeek</span></button>
+            <button type="button" data-source="devin" title="Devin" aria-label="Devin"><span class="ls-logo" data-brand="devin"></span><span class="ls-name">Devin</span></button>
           </div>
-          <div class="segmented precision-switch" aria-label="模型统计精度">
-            <button type="button" data-precision="coarse" class="active">笼统</button>
-            <button type="button" data-precision="speed">速度</button>
-            <button type="button" data-precision="exact">精确</button>
-          </div>
-          </div>
-          <div class="control-row">
-          <label class="model-range-control">
-            <span>统计范围</span>
-            <select id="modelRangeSelect" aria-label="模型用量统计范围">
-              <option value="all">全部历史</option>
-              <optgroup label="按月">
-                <option value="months6">近 6 个月</option>
-                <option value="months3">近 3 个月</option>
-                <option value="month1">近 1 个月</option>
-              </optgroup>
-              <optgroup label="按天">
-                <option value="days14">近 14 天</option>
-                <option value="days7">近 7 天</option>
-                <option value="day1">近 1 天</option>
-              </optgroup>
-              <optgroup label="按小时">
-                <option value="hours12">近 12 小时</option>
-                <option value="hours6">近 6 小时</option>
-                <option value="hour1">近 1 小时</option>
-              </optgroup>
-            </select>
-          </label>
-          <div class="segmented model-view-switch" aria-label="模型展示方式">
-            <button type="button" data-model-view="list" class="active" aria-pressed="true">文字明细</button>
-            <button type="button" data-model-view="donut" aria-pressed="false">环状图</button>
-          </div>
+          <div class="md-toolbar">
+            <div class="segmented precision-switch" aria-label="模型统计精度">
+              <button type="button" data-precision="coarse" class="active" title="只按基础模型合并">笼统</button>
+              <button type="button" data-precision="speed" title="拆分标准 / Fast">速度</button>
+              <button type="button" data-precision="exact" title="拆分 Fast 与每种 thinking effort">精确</button>
+            </div>
+            <label class="md-range" title="统计范围">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>
+              <select id="modelRangeSelect" aria-label="模型用量统计范围">
+                <option value="all">全部历史</option>
+                <optgroup label="按月"><legend>按月</legend>
+                  <option value="months6">近 6 个月</option>
+                  <option value="months3">近 3 个月</option>
+                  <option value="month1">近 1 个月</option>
+                </optgroup>
+                <optgroup label="按天"><legend>按天</legend>
+                  <option value="days14">近 14 天</option>
+                  <option value="days7">近 7 天</option>
+                  <option value="day1">近 1 天</option>
+                </optgroup>
+                <optgroup label="按小时"><legend>按小时</legend>
+                  <option value="hours12">近 12 小时</option>
+                  <option value="hours6">近 6 小时</option>
+                  <option value="hour1">近 1 小时</option>
+                </optgroup>
+              </select>
+            </label>
+            <div class="segmented model-view-switch" aria-label="模型展示方式">
+              <button type="button" data-model-view="list" class="active" aria-pressed="true" title="排行列表" aria-label="排行列表"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h8M9 18h5"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></svg></button>
+              <button type="button" data-model-view="donut" aria-pressed="false" title="环状图" aria-label="环状图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/><path d="M12 4v4.5M19.5 14.5l-4.2-1.4"/></svg></button>
+            </div>
           </div>
           <div class="precision-note" id="precisionNote"></div>
-          <div id="modelDonutPanel" class="model-donut-panel" hidden>
-            <label class="model-range-control"><span>占比指标</span><select id="modelMetricSelect" aria-label="环状图占比指标"><option value="total">总 Token（含缓存）</option><option value="effective">有效 Token</option><option value="costCents">美元等效</option></select></label>
-            <div id="modelDonutContent" class="model-donut-content"></div>
+          <div id="modelDonutPanel" class="md-donut-panel" hidden>
+            <div class="segmented md-metric-switch" aria-label="环状图占比指标">
+              <button type="button" data-model-metric="total" class="active">总 Token</button>
+              <button type="button" data-model-metric="effective">有效 Token</button>
+              <button type="button" data-model-metric="costCents">美元等效</button>
+            </div>
+            <div id="modelDonutContent" class="md-donut-content"></div>
             <p id="modelDonutNote" class="precision-note"></p>
           </div>
-          <div class="model-list" id="modelList"></div>
+          <div class="md-list" id="modelList"></div>
         </section>
 
         <section class="view" id="trendsView">
           <div class="section-heading">
             <div>
-              <h2>新增消耗</h2>
+              <h2>消耗趋势</h2>
               <p id="trendResolution">按小时聚合</p>
             </div>
-            <div class="trend-total" id="trendTotal">—</div>
           </div>
-          <div class="control-row trend-control-row">
-          <div class="segmented source-switch" aria-label="趋势数据来源">
-            <button type="button" data-source="all" class="active">全部</button>
-            <button type="button" data-source="cursor">Cursor</button>
-            <button type="button" data-source="codex">Codex</button>
-            <button type="button" data-source="claude">Claude</button>
-            <button type="button" data-source="deepseek">DeepSeek</button>
-            <button type="button" data-source="devin">Devin</button>
+          <div class="logo-switch" role="group" aria-label="趋势数据来源">
+            <button type="button" data-source="all" class="active" title="全部" aria-label="全部"><span class="ls-logo" data-brand="all"></span><span class="ls-name">全部</span></button>
+            <button type="button" data-source="cursor" title="Cursor" aria-label="Cursor"><span class="ls-logo" data-brand="cursor"></span><span class="ls-name">Cursor</span></button>
+            <button type="button" data-source="codex" title="Codex" aria-label="Codex"><span class="ls-logo" data-brand="codex"></span><span class="ls-name">Codex</span></button>
+            <button type="button" data-source="claude" title="Claude Code" aria-label="Claude Code"><span class="ls-logo" data-brand="claude"></span><span class="ls-name">Claude Code</span></button>
+            <button type="button" data-source="deepseek" title="DeepSeek" aria-label="DeepSeek"><span class="ls-logo" data-brand="deepseek"></span><span class="ls-name">DeepSeek</span></button>
+            <button type="button" data-source="devin" title="Devin" aria-label="Devin"><span class="ls-logo" data-brand="devin"></span><span class="ls-name">Devin</span></button>
           </div>
-          <div class="segmented trend-range-switch" aria-label="趋势范围">
-            <button type="button" data-range="day" class="active">日</button>
-            <button type="button" data-range="week">周</button>
-            <button type="button" data-range="month">月</button>
-            <button type="button" data-range="custom">近 N…</button>
-          </div>
+          <div class="vw-toolbar tr-toolbar">
+            <div class="segmented trend-range-switch" aria-label="趋势范围">
+              <button type="button" data-range="day" class="active" title="今天，每小时">日</button>
+              <button type="button" data-range="week" title="最近 7 天，每日">周</button>
+              <button type="button" data-range="month" title="最近 30 天，每日">月</button>
+              <button type="button" data-range="custom" title="自定义最近 N 个时间单位">近 N</button>
+            </div>
+            <div class="segmented metric-switch" aria-label="趋势指标">
+              <button type="button" data-metric="total" class="active" title="总 Token（含缓存）">总 Token</button>
+              <button type="button" data-metric="effective" title="有效 Token（不含缓存读取）">有效</button>
+              <button type="button" data-metric="equivalentCostCents" title="美元等效费用">美元</button>
+            </div>
           </div>
           <form id="trendCustomForm" class="trend-custom-range" hidden>
             <label for="trendCustomCount">近</label>
@@ -186,30 +182,23 @@
             <button type="submit">应用</button>
             <small id="trendCustomHint" role="status">按小时聚合 · N 为 1–100</small>
           </form>
-          <div class="segmented metric-switch" aria-label="趋势指标">
-            <button type="button" data-metric="total" class="active">总 Token</button>
-            <button type="button" data-metric="effective">有效 Token</button>
-            <button type="button" data-metric="equivalentCostCents">美元等效</button>
+          <div class="vw-stats" aria-live="polite">
+            <div class="vw-stat main"><small id="trendTotalLabel">合计</small><b class="trend-total" id="trendTotal">—</b></div>
+            <div class="vw-stat"><small id="trendPeakLabel">峰值</small><b id="chartPeak">—</b></div>
+            <div class="vw-stat"><small id="trendAvgLabel">平均</small><b id="trendAvg">—</b></div>
           </div>
-          <div class="breakdown-toggles">
-            <button type="button" id="breakdownBtn" class="breakdown-btn" aria-pressed="false" title="柱内显示输入 / 缓存 / 输出构成" aria-label="柱内显示输入构成">
-              <span class="toggle-track"><i></i></span>
-              输入构成
-            </button>
-            <button type="button" id="speedBreakdownBtn" class="breakdown-btn speed-breakdown-btn" aria-pressed="false" title="柱内显示 Fast / 非 Fast 比例" aria-label="柱内显示 Fast 比例">
-              <span class="toggle-track"><i></i></span>
-              Fast 比例
-            </button>
-            <button type="button" id="modelBreakdownBtn" class="breakdown-btn" aria-pressed="false" title="柱内按模型分类堆叠" aria-label="柱内按模型分类">
-              <span class="toggle-track"><i></i></span>
-              按模型
-            </button>
-          </div>
-          <article class="chart-card">
+          <article class="chart-card vw-card">
+            <div class="vw-card-head">
+              <span class="vw-card-title">叠加</span>
+              <div class="vw-chips" role="group" aria-label="柱内拆分">
+                <button type="button" id="breakdownBtn" class="vw-chip" aria-pressed="false" title="柱内显示输入 / 缓存 / 输出构成" aria-label="柱内显示输入构成"><i class="chip-dots composition" aria-hidden="true"></i>构成</button>
+                <button type="button" id="speedBreakdownBtn" class="vw-chip" aria-pressed="false" title="柱内显示 Fast / 非 Fast 比例" aria-label="柱内显示 Fast 比例"><i class="chip-dots speed" aria-hidden="true"></i>Fast</button>
+                <button type="button" id="modelBreakdownBtn" class="vw-chip" aria-pressed="false" title="柱内按模型分类堆叠" aria-label="柱内按模型分类"><i class="chip-dots model" aria-hidden="true"></i>模型</button>
+              </div>
+            </div>
             <div class="chart-wrap" id="trendChart"></div>
             <div class="chart-legend">
               <span class="legend-items" id="legendItems"><i></i><b id="legendText">总 Token 新增（含缓存）</b></span>
-              <span id="chartPeak">峰值 —</span>
             </div>
           </article>
           <div class="trend-footnote" id="trendFootnote">数据来自本地持久化历史库。</div>
@@ -221,20 +210,26 @@
               <h2>额度水位</h2>
               <p id="levelSubtitle">各账期内剩余额度变化</p>
             </div>
-            <div class="trend-total" id="levelTotal">—</div>
           </div>
-          <div class="segmented" id="levelPoolSwitch" aria-label="额度池"></div>
-          <div class="segmented" id="balanceRangeSwitch" aria-label="余额趋势范围" hidden>
-            <button type="button" data-balance-range="day">日</button>
-            <button type="button" data-balance-range="week">周</button>
-            <button type="button" data-balance-range="month">月</button>
-            <button type="button" data-balance-range="year">年</button>
+          <div class="lv-pools" id="levelPoolSwitch" role="group" aria-label="额度池"></div>
+          <div class="vw-toolbar lv-toolbar">
+            <label class="vw-select" title="额度周期">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>
+              <select id="levelCycleSelect" aria-label="额度周期"></select>
+            </label>
+            <div class="segmented" id="balanceRangeSwitch" aria-label="余额趋势范围" hidden>
+              <button type="button" data-balance-range="day">日</button>
+              <button type="button" data-balance-range="week">周</button>
+              <button type="button" data-balance-range="month">月</button>
+              <button type="button" data-balance-range="year">年</button>
+            </div>
           </div>
-          <label class="model-range-control">
-            <span>周期</span>
-            <select id="levelCycleSelect" aria-label="额度周期"></select>
-          </label>
-          <article class="chart-card">
+          <div class="vw-stats">
+            <div class="vw-stat"><small>周期起点</small><b id="levelStart">—</b></div>
+            <div class="vw-stat main"><small id="levelEndLabel">最新</small><b class="trend-total" id="levelTotal">—</b></div>
+            <div class="vw-stat"><small id="levelPaceLabel">匀速应剩</small><b id="levelPace">—</b></div>
+          </div>
+          <article class="chart-card vw-card">
             <div class="chart-wrap" id="levelChart"></div>
             <div class="chart-legend">
               <span class="legend-items"><i class="level-swatch"></i><b id="levelLegendText">剩余额度</b></span>
@@ -254,20 +249,22 @@
             </div>
             <span class="count-pill" id="eventCount">0 次</span>
           </div>
-          <div class="segmented" id="eventSourceSwitch" aria-label="请求来源">
-            <button type="button" data-event-source="all" class="active">全部</button>
-            <button type="button" data-event-source="cursor">Cursor</button>
-            <button type="button" data-event-source="codex">Codex</button>
-            <button type="button" data-event-source="claude">Claude</button>
-            <button type="button" data-event-source="deepseek">DeepSeek</button>
-            <button type="button" data-event-source="devin">Devin</button>
+          <div class="logo-switch" id="eventSourceSwitch" role="group" aria-label="请求来源">
+            <button type="button" data-event-source="all" class="active" title="全部" aria-label="全部"><span class="ls-logo" data-brand="all"></span><span class="ls-name">全部</span></button>
+            <button type="button" data-event-source="cursor" title="Cursor" aria-label="Cursor"><span class="ls-logo" data-brand="cursor"></span><span class="ls-name">Cursor</span></button>
+            <button type="button" data-event-source="codex" title="Codex" aria-label="Codex"><span class="ls-logo" data-brand="codex"></span><span class="ls-name">Codex</span></button>
+            <button type="button" data-event-source="claude" title="Claude Code" aria-label="Claude Code"><span class="ls-logo" data-brand="claude"></span><span class="ls-name">Claude Code</span></button>
+            <button type="button" data-event-source="deepseek" title="DeepSeek" aria-label="DeepSeek"><span class="ls-logo" data-brand="deepseek"></span><span class="ls-name">DeepSeek</span></button>
+            <button type="button" data-event-source="devin" title="Devin" aria-label="Devin"><span class="ls-logo" data-brand="devin"></span><span class="ls-name">Devin</span></button>
           </div>
-          <div class="event-toolbar">
-            <input id="eventSearch" type="search" placeholder="搜索模型或 effort" aria-label="搜索请求" />
-            <button type="button" id="eventExportCsv" class="text-btn">导出 CSV</button>
-            <button type="button" id="eventExportJson" class="text-btn">导出 JSON</button>
+          <div class="vw-toolbar ev-toolbar">
+            <label class="vw-search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>
+              <input id="eventSearch" type="search" placeholder="搜索模型或 effort" aria-label="搜索请求" />
+            </label>
+            <button type="button" id="eventExportCsv" class="vw-btn" title="导出 CSV：当前来源与搜索结果的全部历史，不受分页限制"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></svg>CSV</button>
+            <button type="button" id="eventExportJson" class="vw-btn" title="导出 JSON：当前来源与搜索结果的全部历史，不受分页限制"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></svg>JSON</button>
           </div>
-          <p class="export-note">导出当前来源与搜索结果的全部历史，不受分页限制。</p>
           <div class="event-list" id="eventList"></div>
           <div class="pager" id="eventPager"></div>
         </section>
@@ -278,20 +275,23 @@
               <h2>令牌价目表</h2>
               <p id="pricingSubtitle">按模型与 Fast / 非 Fast 分档</p>
             </div>
-            <div class="pricing-heading-actions"><span class="count-pill" id="pricingCount">0 档</span><button type="button" id="priceBtn" class="text-btn" title="手动更新官方价目表" aria-label="手动更新官方价目表">更新价格 ↻</button></div>
+            <div class="pricing-heading-actions">
+              <span class="count-pill" id="pricingCount">0 档</span>
+              <button type="button" id="priceBtn" class="icon-btn vw-refresh" title="手动更新官方价目表" aria-label="手动更新官方价目表"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 18 17"/></svg></button>
+            </div>
           </div>
-          <div class="control-row pricing-control-row">
-          <div class="segmented" id="pricingSourceSwitch" aria-label="价目表目录">
-            <button type="button" data-pricing-source="all" class="active">全部</button>
-            <button type="button" data-pricing-source="cursor">Cursor</button>
-            <button type="button" data-pricing-source="codex">Codex</button>
-            <button type="button" data-pricing-source="claude">Claude</button>
-            <button type="button" data-pricing-source="devin">Devin</button>
+          <div class="logo-switch" id="pricingSourceSwitch" role="group" aria-label="价目表目录">
+            <button type="button" data-pricing-source="all" class="active" title="全部" aria-label="全部"><span class="ls-logo" data-brand="all"></span><span class="ls-name">全部</span></button>
+            <button type="button" data-pricing-source="cursor" title="Cursor" aria-label="Cursor"><span class="ls-logo" data-brand="cursor"></span><span class="ls-name">Cursor</span></button>
+            <button type="button" data-pricing-source="codex" title="Codex" aria-label="Codex"><span class="ls-logo" data-brand="codex"></span><span class="ls-name">Codex</span></button>
+            <button type="button" data-pricing-source="claude" title="Claude Code" aria-label="Claude Code"><span class="ls-logo" data-brand="claude"></span><span class="ls-name">Claude Code</span></button>
+            <button type="button" data-pricing-source="devin" title="Devin" aria-label="Devin"><span class="ls-logo" data-brand="devin"></span><span class="ls-name">Devin</span></button>
           </div>
-          <label class="model-range-control">
-            <span>版本</span>
-            <select id="pricingSnapshotSelect" aria-label="价目表版本"></select>
-          </label>
+          <div class="vw-toolbar pr-toolbar">
+            <label class="vw-select" title="价目表版本">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>
+              <select id="pricingSnapshotSelect" aria-label="价目表版本"></select>
+            </label>
           </div>
           <div class="pricing-note" id="pricingNote"></div>
           <div class="pricing-list" id="pricingList"></div>
@@ -443,13 +443,13 @@
     <script src="model-display.js"></script>
     <script src="receipt-model.js"></script>
     <script src="trend-range.js"></script>
-    <script src="preview.js?v=10"></script>
+    <script src="preview.js?v=11"></script>
     <script src="liquid-pool.js?v=6"></script>
     <script src="motion.js"></script>
     <script src="fullscreen-morph.js"></script>
     <script src="usage-charts.js"></script>
-    <script src="app.js?v=25"></script>
     <script src="brand-icons.js"></script>
+    <script src="app.js?v=26"></script>
     <script src="receipt-render-task.js"></script>
     <script src="receipt.js"></script>
   </body>

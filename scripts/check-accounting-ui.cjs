@@ -9,7 +9,7 @@ app.whenReady().then(async()=>{
  await w.loadFile(path.join(root,'src/renderer/index.html'),{query:{preview:'1'}});
  await new Promise(r=>setTimeout(r,500));
  const checks=await w.webContents.executeJavaScript(`(async()=>{
-   settings.orbMode=false;settings.activeTab='overview';settings.compact=false;
+   settings.orbMode=false;settings.activeTab='overview';settings.compact=false;overviewExpanded.add('codex');
    const d=snapshot.data;
    for(const q of codexQuotaWindows(d.codex))if(q.windowMinutes===10080){q.usedPercent=78;q.percentRemaining=22;q.quotaEstimate={estimateStatus:'local-dollar-usage',inferredTotalCents:50000,inferredRemainingCents:11000,usedCents:39000};}
    render();

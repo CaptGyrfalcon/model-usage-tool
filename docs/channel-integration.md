@@ -53,16 +53,17 @@ Token 是否包含缓存、响应拆分 / 重试 / fork 去重方式。优先使
 |---|---|---|
 | 采集、鉴权、错误与缓存 | `src/<source>.cjs` | 时间限额、受信官方域、禁止凭据重定向、匿名错误、账号隔离、读取失败保留历史 |
 | 主快照与单源启动 | `src/lib.cjs` 的 `fetchSnapshot` | `Promise.allSettled`、来源对象、`sourceStatus`、全部来源不可用判断；新渠道单独可用时能启动 |
-| 总览、首屏剩余环 | `renderer/index.html`, `renderer/app.js` | 卡片、真实套餐、今日 / 30 天 Token、费用口径、剩余环、点击跳详情、空 / 缓存 / 失败 / 过期状态 |
+| 总览来源卡片与剩余环 | `renderer/app.js` 的 `overview<来源>`、`OVERVIEW_*` 常量与 `renderOverview`；`renderer/overview.css` | 来源卡片（品牌标志、真实套餐、今日 Token）、每个额度窗口一枚剩余环；展开明细含 30 天 Token、费用口径与说明；未连接时进入“未连接”列表；缓存 / 失败 / 滞后状态标签，过期或未知窗口显示 “—”；迷你与全屏布局 |
 | 汇总与最近请求 | `lib.cjs` 的 `combined`, `sources`, `lastEventFromHistory` | 新事件计入总量且只计一次，单源及全部总数一致，来源名称正确 |
 | 模型笼统 / 速度 / 精确统计 | `lib.cjs` 的 `buildModelUsage`, `getModelUsage`, `sourceView`, `buildModelBreakdowns` | 各范围、来源过滤、模型 / effort 展示及三档分组保持总量 |
-| 模型环状图 | `renderer/app.js`, `usage-charts.js`, `model-display.js` | 总 / 有效 Token、美元等值都支持；未计价不能当免费、未知速度保留证据 |
-| Token / 费用趋势 | `lib.cjs` 的 `getTrendUsage`, `buildTrendSeries`, `trendBundle`; `renderer/app.js` | 默认 / 自定义范围和来源过滤，输入 / 缓存 / 输出及速度 / 模型拆分一致 |
-| 请求明细与搜索 | `history.cjs`, `renderer/app.js`, `index.html` | 来源按钮、模型 / effort 搜索、分页、原单位 / 估算 / 官方汇总标签 |
+| 模型页来源切换与排行 | `index.html` 的 `.logo-switch`（模型、趋势、请求、价目四页共用，样式在 `renderer/views.css`）、`OVERVIEW_BRAND_ICONS`、`brand-icons.js`；`renderer/app.js` 的 `renderModels` / `modelRowHtml`；`renderer/models.css` | 来源按钮只用品牌标志（选中项展开名称，全屏常显），`title` / `aria-label` 写全名；模型行显示供应商标志、总 Token、美元等效（不可计价显示“未计价”，不能写 $0）和输入 / 写缓存 / 读缓存 / 输出构成条；展开明细刷新后保持 |
+| 模型环状图 | `renderer/app.js`, `usage-charts.js`, `model-display.js` | 总 / 有效 Token、美元等值都支持；未计价不能当免费、未知速度保留证据；“全部”须包含新来源 |
+| Token / 费用趋势 | `lib.cjs` 的 `getTrendUsage`, `buildTrendSeries`, `trendBundle`; `renderer/app.js` 的 `renderTrends`; `index.html` 趋势页 `.logo-switch`; `renderer/views.css` | 默认 / 自定义范围和来源过滤（品牌标志按钮），输入 / 缓存 / 输出及速度 / 模型拆分一致；合计 / 峰值 / 平均只按已开始的时段计算 |
+| 请求明细与搜索 | `history.cjs`, `renderer/app.js` 的 `renderEvents`, `index.html` 的 `#eventSourceSwitch`; `renderer/views.css` | 来源标志按钮、模型 / effort 搜索、按本地日期分组、模型标志与四段构成条、分页、原单位 / 估算 / 官方汇总标签 |
 | 完整 CSV / JSON 导出 | `main.cjs` 的来源白名单, `event-export.cjs`, `history.cjs` | 当前来源和搜索条件；全部记录、快照一致、CSV 公式防护、失败保留原文件 |
 | 日 / 周 / 月 / 年账单小票与 PNG | `receipt.cjs`, `receipt-model.js`, `receipt.js`, `receipt-render-task.js`, `receipt-worker.js`, `brand-icons.js`, `index.html` | 来源白名单 / 选择器、来源与模型图标（Devin 使用官网符号）、分组 / 排序、Token / 费用合计、未计价提示、PNG 保存；CPU 绘制与高清 PNG 编码均在可取消 Worker 中执行，界面只接收有尺寸上限的预览，选项变化立即取消旧任务，仅展示最新结果 |
-| 官方价目表与手动 / 自动刷新 | `pricing.cjs`, `pricing-table.cjs`, `lib.cjs`, `renderer/app.js` | 新来源目录、精确模型别名、原价 / 实收分开、更新失败保留价格、日期与来源；模型后缀不能错误映射 |
-| 额度水位与历史周期 | `history.cjs`, `quota-timeline.cjs`, `lib.getQuotaTimeline`, `app.liveQuotaPoints` | 注册周期池，保存真实点、账户隔离、过期 / 提前重置、原采样时间；参考线起点推算需标明 |
+| 官方价目表与手动 / 自动刷新 | `pricing.cjs`, `pricing-table.cjs`, `lib.cjs`, `renderer/app.js` 的 `renderPricing`, `index.html` 的 `#pricingSourceSwitch` | 新来源目录（品牌标志按钮）、精确模型别名、原价 / 实收分开、更新失败保留价格、日期与来源；模型后缀不能错误映射；同模型档位合并为一张卡片，未知费率显示 “—” |
+| 额度水位与历史周期 | `history.cjs`, `quota-timeline.cjs` 的 `QUOTA_POOLS`（`source` 决定池标签的品牌标志）, `lib.getQuotaTimeline`, `app.liveQuotaPoints`, `renderLevels` | 注册周期池，保存真实点、账户隔离、过期 / 提前重置、原采样时间；参考线起点推算需标明；“匀速应剩”仅在有周期参考时显示，否则为 “—”；余额池显示已采样净变化而非百分比 |
 | 余额趋势（若是 API 钱包） | `balance-timeline.cjs`, `lib.getQuotaTimeline` | 币种和账号隔离，充值 / 赠送 / 消费标签；余额变化不冒充本机消费 |
 | 耗尽预测和额度告警 | `quota-insights.cjs`, `main.cjs`, `renderer/app.js` | 用实际额度与周期；数据缺失或旧窗口无可靠预测，估计必须明确说明 |
 | 极简额度球 / 速度模式 | `app.quotaPools`, `orbPools`, `selectedQuotaPool`, `renderOrb` | 新池可选择，百分比 / 未知速度 / 重置时间正确，不掉回其他来源 |
